@@ -33,6 +33,15 @@ All eleven items, verbatim in intent, none omitted. Every item is pass/fail (D-0
 verification methods below are proposals for how to demonstrate each item during the Agent View
 spike; where a numeric threshold would be required and the Issue fixes none, the row says so.
 
+**A caveat on "pre-implementation".** The items are not uniform in what they presuppose. Items 1–3
+are provable against the Agent View CLI with a thin spike harness. Items 4–6, 9, 10 and 11
+presuppose the very things they test — SQLite recovery, a `MessageBus`, a Curator promotion path, an
+operational canary, a control-plane suite to re-run against a second provider. The Issue places the
+gate before implementation (D-0019) and that position is not weakened here; what it does not say is
+what minimum scaffold discharges each item, which is recorded as Q-0021. In practice these rows are
+expected to be proven on a deliberately minimal vertical slice built as part of the spike, and
+re-proven on the real implementation via the inherited criteria.
+
 | # | Gate item | Verification method | Decisions |
 |---|---|---|---|
 | 1 | The **public CLI alone** can start, obtain structured state of, stop, and resume a top-level worker. | Drive one worker through start → structured-state read → stop → resume using only documented public CLI commands, with a spike harness that has no code path touching `~/.claude/jobs`, internal sockets, or unpublished JSON/transcript formats. Prove the negative by running the harness with those paths made unreadable/absent and observing no behaviour change. Assert the structured state is machine-parseable from published output, not scraped from rendered screen text. Record the exact CLI version used and the output of the capability/version probe. | D-0010, D-0009 |
@@ -51,9 +60,16 @@ spike; where a numeric threshold would be required and the Issue fixes none, the
 
 ## 2. Fault injection targets
 
-Scope per gate item 5. Every case is an automated, reproducible test; every "observable that proves
-it" is a query against SQLite (D-0001) or a persisted incident field (D-0007) — never a screenshot,
-a log line read by a human, or the absence of a visible symptom.
+Scope per gate item 5. Every case is an automated, reproducible test, and every "observable that
+proves it" is a durable record — never a screenshot, a log line read by a human, or the absence of a
+visible symptom.
+
+For control-plane state, that record is a query against SQLite (D-0001) or a persisted incident
+field (D-0007). For an **external side effect**, SQLite is not sufficient on its own: when a process
+dies after the effect succeeded but before its result was recorded, no query of ours can tell that
+apart from an effect that never started. Those cases must additionally be proven against the
+destination's own idempotency or effect record — see the mid-flight kill discussion below. A case
+that asserts exactly-once for an external effect using only our own rows does not pass.
 
 | Target | What is injected | Expected invariant | Observable that proves it |
 |---|---|---|---|

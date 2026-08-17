@@ -81,6 +81,7 @@ figures are **measured baseline**.
 | Q-0018 | Whether repository-root, packaging, and CI files need a classification pass | proposed |
 | Q-0019 | Who owns each of the retired loop's non-detection duties | proposed |
 | Q-0020 | What an incompatible CLI capability probe implies for already-running sessions | proposed |
+| Q-0021 | What scaffold makes each Agent View gate item checkable before implementation | proposed |
 
 ---
 
@@ -668,6 +669,12 @@ the `SessionProvider` is replaced.
 - The SQLite SoT, fact-state model, incident contract, responsibility boundary, and migration method
   are independent of the outcome of the gate.
 - Which concrete alternative provider would be used is not decided (unresolved — see Q-0004).
+- The items differ in what they presuppose: some are provable against the CLI with a thin spike
+  harness, while others (SQLite recovery, `MessageBus`, Curator promotion, the canary, the
+  second-provider suite) presuppose the pieces they test. The Issue states the gate's position
+  without describing the scaffold that discharges it, so the minimum scaffold per item is
+  unresolved — see Q-0021. This is a question about *how* the gate is discharged, not a licence to
+  start implementation without it.
 
 **Status.** accepted
 
@@ -1028,3 +1035,29 @@ the blast radius of an unverified CLI surface.
 **What would settle it.** A decision stating the in-flight policy, consistent with D-0013's rule
 that runs already started on one side finish on that side, and with the unsaved-artifact protection
 required by the Agent View gate (`ACCEPTANCE.md`).
+
+### Q-0021 — What exactly must exist for each Agent View gate item to be checkable "before implementation"?
+
+**Status.** proposed
+
+**Question.** The Issue heads the eleven-item list 「実装開始前の Agent View gate」 — before
+implementation starts — and D-0019 records that as decided. But the items are not uniform in what
+they presuppose. Items 1–3 are genuinely provable against the Agent View CLI with a thin spike
+harness. Items 4–6 presuppose SQLite recovery and a `MessageBus`; item 9 presupposes a Curator
+promotion path; item 10 presupposes an operational canary; item 11 presupposes a control-plane test
+suite to re-run against a second provider. Read literally, the gate cannot be discharged before the
+things it tests exist.
+
+**Why unresolved.** The Issue states the gate and its position without describing the scaffold that
+discharges it, and it does not split the list into spike-checkable and implementation-dependent
+halves. Resolving this by silently reclassifying items would weaken a gate the Issue placed
+deliberately, so it is recorded rather than decided here. Note the ordering the Issue does give:
+these founding documents come first, "その後に Agent View spike を行う" — the spike follows, which
+is consistent with the gate being discharged *by* the spike rather than before it.
+
+**What would settle it.** A decision defining, per item, the minimum scaffold that counts as
+satisfying it — plausibly a deliberately minimal vertical slice (a schema, a lease, an outbox, one
+handler) built as part of the Agent View spike specifically so the gate is checkable, with the
+distinction between "proven on the spike slice" and "re-proven on the real implementation" made
+explicit. `ACCEPTANCE.md` separates the pre-implementation gate from the inherited criteria, which
+is the shape such a decision would formalise.
