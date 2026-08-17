@@ -236,6 +236,15 @@ anomaly. It defines **no semantics or detection predicate for any state** — it
 definition as a P0 contract item still to be done. This document therefore does not gloss them;
 the semantics are open (see Q-0012).
 
+**On "minimally".** The Issue's wording is 「watcher の fact state は最低限、次の閉じた集合にする」
+— *at minimum*, make it this closed set. That phrasing is doing two things at once and they pull in
+opposite directions: "closed set" forbids ad-hoc growth, while "at minimum" implies the six are a
+floor rather than the exact set. This document does not resolve that by choosing one reading. The
+operative rule below is therefore procedural, not numeric: **six states are decided, and any
+seventh requires a new `D-` entry.** Whether such an entry would be a permitted extension or a
+supersession of this decision is not settled by the Issue — see Q-0012, which must fix the exact
+enumeration before any persisted schema or replay-compatibility rule depends on it.
+
 **Consequences.**
 - Adding a seventh state is a decision that requires a new `D-` entry, not a code change.
 - Detectors emit one of these values plus a detector version (D-0007); this makes lifecycle, known
@@ -894,10 +903,17 @@ what counts as an `EXPLICIT_BLOCK` as opposed to an inferred one, and what disti
 contract items still to be produced, so the semantics are deferred by the source, not omitted by
 this document.
 
+This question also carries the **exact-enumeration** point. The Issue says 最低限 ("at minimum")
+about a set it simultaneously calls closed, which leaves it ambiguous whether the six are the
+complete vocabulary or a floor. Since the fact state is persisted, that ambiguity propagates into
+schema and replay compatibility: a reader must know whether encountering a seventh value is a
+corrupt record, a newer writer, or a legitimate extension.
+
 **What would settle it.** The P0 contract: for each state, its meaning, the predicate over observed
-evidence that yields it, its precedence when several predicates match, and fixtures pinning each.
-This pairs with Q-0009 (detector version), since a state is only deterministically replayable if
-"which detector, at which version, produced it" is unambiguous.
+evidence that yields it, its precedence when several predicates match, and fixtures pinning each —
+plus an explicit statement of whether the six are exhaustive, and if not, how a reader must behave
+on an unrecognised value. This pairs with Q-0009 (detector version), since a state is only
+deterministically replayable if "which detector, at which version, produced it" is unambiguous.
 
 ### Q-0013 — Does the "control plane outside the worker" principle survive into Interlock?
 
