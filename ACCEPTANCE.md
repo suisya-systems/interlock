@@ -60,7 +60,7 @@ a log line read by a human, or the absence of a visible symptom.
 | **Lease** | Kill the lease holder without release; expire a lease while its holder is paused (SIGSTOP) and let a second claimant take it; return the paused holder; skew the clock forward and backward across the expiry boundary. | At most one live holder per leased resource at any instant. A holder whose lease has expired must discover it has lost the lease and must not resume writing. | Lease rows in SQLite show a single active holder per resource across the whole timeline; the returning holder's write attempt is refused and that refusal is recorded, not silently dropped. |
 | **Outbox resend** | Drop the delivery, kill the sender after the outbox row is written but before delivery, kill after delivery but before the ack is recorded, and hold the recipient unavailable across several retry attempts. | Every enqueued message is eventually delivered at least once; nothing is lost by a kill at any of those points; retry count is durable across restarts. | Outbox row transitions to delivered/acked with a monotonically increasing, restart-surviving retry count; no outbox row remains in a state with no owner after recovery. |
 | **Ack** | Lose the ack in flight; duplicate the ack; deliver the ack after the sender has restarted; ack an already-acked message. | Ack is idempotent. A lost ack causes a resend (safe), never a lost message. A duplicate or late ack changes nothing. | Message identity in SQLite shows exactly one acked state regardless of ack multiplicity; the recipient's effect count is one. |
-| **Dedup** | Deliver the same message twice; raise the same incident condition repeatedly within a window; replay a persisted incident packet; restart between the duplicate arrivals. | Duplicate delivery causes exactly one effect. A repeated incident condition is collapsed under its dedup key rather than producing an unbounded stream of incidents; `dedup key` and `retry count` are required incident fields (D-0007). | One effect record per delivery dedup key. For incidents, the observable follows from whatever collapse rule Q-0002 settles on — **the Issue fixes the fields, not the semantics: whether a repeat increments `retry count` on the existing incident or opens a linked one is unresolved (Q-0002), as is the re-notification window in absolute time (Q-0003)**. Tests must parameterise both rather than hard-code either. |
+| **Dedup** | Deliver the same message twice; raise the same incident condition repeatedly within a window; replay a persisted incident packet; restart between the duplicate arrivals. | Duplicate delivery causes exactly one effect. A repeated incident condition is collapsed under its dedup key rather than producing an unbounded stream of incidents; `dedup key` and `retry count` are required incident fields (D-0007). | One effect record per delivery dedup key. For incidents, the observable follows from whatever collapse rule Q-0002 settles on — **the Issue fixes the fields, not the semantics: whether a repeat increments `retry count` on the existing incident or opens a linked one is unresolved, as is the re-notification window in absolute time — both are Q-0002** (Q-0003 covers the reconcile interval and tolerable detection latency that Q-0002 depends on). Tests must parameterise both rather than hard-code either. |
 | **Single-writer** | Two writers race for the same state item; a partitioned/stale writer returns after its lease expired; a write is attempted concurrently from a resumed process and its replacement. | Exactly one writer may write a given state item at a time; a stale writer is rejected, not merged. | The state item's history in SQLite is a linear sequence with no interleaving from the rejected writer; the rejection is itself recorded. **The per-item writer assignment table is unresolved — see Q-0001 in `DECISIONS.md`**; until it exists, tests assert the property per item exercised, not against a global table. |
 | **Observation outage** *(supporting D-0006)* | Make the observation path fail or return nothing while the worker is genuinely healthy. | Observation failure is classified `OBSERVATION_UNAVAILABLE`, never as an anomaly, and `NO_ACTIVITY_EVIDENCE` is not treated as an anomaly either. | Incident/fact-state rows show the outage classified as observation-unavailable; no termination or restart recommendation is produced from it. (See D-0005, D-0006 and inherited criteria AC-3/AC-4.) |
 
@@ -68,9 +68,23 @@ a log line read by a human, or the absence of a visible symptom.
 mid-flight must result in resumption **from unresolved incidents, without double execution**
 (D-0001, D-0007, and inherited criterion AC-8). The kill matrix must include, for each
 component: before the durable write, after the durable write but before the side effect, and after
-the side effect but before its result is recorded. The third case is the one that proves
-idempotency rather than luck — recovery must detect the completed side effect from SQLite and not
-repeat it.
+the side effect but before its result is recorded.
+
+The third case is the one that proves idempotency rather than luck, and it is also the one with a
+real limit: **SQLite alone cannot distinguish "the side effect completed" from "the side effect
+never started"**, because by construction the result was not recorded. Recovery must therefore not
+be specified as "infer the outcome from SQLite". Exactly-once has to come from one of two places,
+and each action handler must declare which one it uses:
+
+1. **A destination-supported idempotency key** — the effect is replayed with a key the destination
+   deduplicates, so a repeat is harmless whether or not the first attempt landed; or
+2. **Making the effect transactional with its durable record** — the effect and the record commit
+   together, which collapses the ambiguous window rather than resolving it after the fact.
+
+Where neither is achievable for a given action, the gap is explicit and the action requires a human
+gate (D-0004) rather than automatic recovery. The gate check is that every action handler names its
+mechanism and demonstrates it under injection — not that SQLite is queried for an answer it cannot
+hold (D-0001, D-0007, and inherited criterion AC-8).
 
 ---
 
