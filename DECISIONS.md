@@ -1087,11 +1087,19 @@ is the shape such a decision would formalise.
 **Question.** `tests/scrub/scrub_fixture.py` and `docs/scrub-policy.md` are both classified `carry`
 in `PORTING_LEDGER.md`, and both enumerate `pane_id` and `pane_name` among the structural
 identifiers that are **never** modified. The redaction rules themselves are transport-neutral and
-genuinely carry. But `schema/enums.py` was reclassified `rewrite` in this ledger precisely because
-it defines a pane vocabulary that the closed fact-state set (D-0005) replaces, and the fixtures the
-scrubber produces (`tests/fixtures/synthetic/`) are classified `rewrite` for being v1-specific.
-Does the scrubber's preserved-field allowlist, and the policy document that makes it normative,
-have to be re-derived along with the vocabulary it names?
+genuinely carry. But D-0014's Discard bucket names "tmux/pane layout, pane IDs and send-keys as a
+backend contract" outright, and the fixtures the scrubber produces (`tests/fixtures/synthetic/`)
+are classified `rewrite` for being v1-specific. Does the scrubber's preserved-field allowlist, and
+the policy document that makes it normative, have to be re-derived along with the identifiers it
+names?
+
+Note what this question is **not** based on. `schema/enums.py` is classified `rewrite` in this
+ledger, but not for defining `pane_id` / `pane_name` — those appear only in its module docstring,
+which is the very discrepancy that row records. Its enums define `WorkerStatus`,
+`JournalEventType` and `AnomalyKind`, including pane *events* (`PANE_CLOSED`, `PANE_SILENT`,
+`PANE_CRASHED`), and it is the free-vocabulary model behind those that the closed fact-state set
+(D-0005) replaces. The scrubber's allowlist is a different thing — pane *identifiers* — so the
+basis for reconsidering it is D-0014, not D-0005.
 
 **Why unresolved.** The distinction is real in both directions and the Issue settles neither. Read
 one way, an allowlist of field names is an implementation detail of a tool whose contract — redact
@@ -1135,8 +1143,11 @@ the neighbouring adopt tests reach a *different* pane-conditioned path — store
 detached pane's survival decides whether an expired adoption restores the previous instance (the
 `broker/store.py` row records that half). So two separate delivery invariants, one server-side and one
 store-side, are each conditioned on pane state. The boundary between the carried invariant and the discarded mechanism
-therefore runs *through* `broker/server.py` rather than between modules, and the ledger records it
-as if it ran between them.
+therefore runs *through* `broker/server.py` rather than between modules. And not only there: the
+`broker/store.py` row in this ledger now records the same shape one layer down, where adoption
+rollback is pane-conditioned inside `store.py` itself via the `_detach_owner_panes_locked` /
+`_reattach_owner_panes_locked` hooks. So the cut runs through both modules, and a per-file
+`carry` / `discard` verdict cannot express it on either.
 
 **What would settle it.** A decision, taken with the `MessageBus` contract, on whether an
 end-to-end carried test is landed as a failing specification against the new contract (see Q-0015)
