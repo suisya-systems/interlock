@@ -151,6 +151,8 @@ plus these, each of which is a way for the fence to look sound and not be:
 | `hook-matcher-too-narrow` | the quietest hole of all. Scope the deny hook to `"Bash"` and the fence still carries every Read / Write / WebFetch rule, and the self-battery still denies every probe — because it calls the decision function directly. The CLI simply never consults the hook for the exempted tools |
 | `hook-not-a-command` | only `type: "command"` entries are executed. An entry of another type carrying a `command` key reads as correct and never runs |
 | `permissions.deny` authored as a string | it iterates character by character and renders one rule per *letter*, each of which the battery cheerfully denies — while the rule that was meant is absent. A green battery over the wrong rules is the worst shape this fence can take |
+| `hook-invocation-wrong` | naming our hook is not running it at our fence. `hook.py --fence /tmp/stale.json` passes a substring check, reads somebody else's rules, and never consults the fence that was published |
+| `global-config-invalid` | a malformed `forbidden_allow_regex` would escape as `re.error` past the spawn's refusal handling, so a broken forbidden-allow list would produce no durable `spawn-refused` event at all |
 
 **The persisted fence is re-validated on read, not coerced.** Valid JSON is not a valid fence: a
 mistyped `layer` is skipped by the decision function and a `null` spec becomes the string `"None"`
@@ -161,6 +163,18 @@ and matches nothing. Either removes a denial while the hook goes on treating the
 two roles accidentally sharing one would mean a later spawn silently re-points the earlier one at
 somebody else's rules — a worker losing denials the curator never had, with nothing failing. The
 `--role` the renderer wires into the command line is compared against the fence on disk.
+
+**Hook commands are shell strings, so their substituted values are quoted.** An unquoted path with
+a space arrives as two arguments; one with a shell metacharacter arrives as something else entirely.
+
+**A failed republish restores the previous fence rather than deleting it.** A refused respawn must
+not disarm the session already running: unlinking the replacement would leave that session with no
+fence and every hook call denying, until the next successful publication — a refusal that breaks
+more than it prevents.
+
+**The readback refuses an incomplete `system/init` rather than comparing one.** A missing
+`permissionMode` defaulting to `None` and a missing `tools` to `()` would make two *empty*
+readbacks compare **equal**, reporting that the fence survived a restart it never observed.
 
 **The child starts outside the ledger lock.** A synchronous spawner for a real `claude -p` session
 would otherwise hold the cross-process lock for the whole session, blocking every other role —

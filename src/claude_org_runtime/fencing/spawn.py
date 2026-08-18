@@ -47,6 +47,21 @@ try:  # POSIX
 except ImportError:  # pragma: no cover - Windows
     fcntl = None  # type: ignore[assignment]
 
+def _fsync_dir(path: Path) -> None:
+    """Best effort: not every platform lets a directory be opened for fsync."""
+
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+    except OSError:  # pragma: no cover - platform dependent
+        return
+    try:
+        os.fsync(fd)
+    except OSError:  # pragma: no cover - platform dependent
+        pass
+    finally:
+        os.close(fd)
+
+
 EVENT_ADMITTED = "spawn-admitted"
 EVENT_REFUSED = "spawn-refused"
 EVENT_BATTERY = "battery-run"
@@ -93,11 +108,18 @@ class FenceLedger:
     def append(self, event: str, **payload: Any) -> dict[str, Any]:
         entry = {"event": event, "at": self._clock(), **payload}
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # ``fsync`` on a *newly created* file does not promise its directory
+        # entry survives a power loss -- the bytes would be on disk under a
+        # pathname that no longer exists. The parent is synced on creation so
+        # a refusal recorded seconds before a crash is still there afterwards.
+        is_new = not self.path.exists()
         line = json.dumps(entry, sort_keys=True) + "\n"
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
+        if is_new:
+            _fsync_dir(self.path.parent)
         return entry
 
     def events(self) -> list[dict[str, Any]]:
@@ -232,6 +254,14 @@ class FencedSpawner:
             # start and enforced as though it had been admitted -- the refusal
             # invariant says nothing is published, and half of something is
             # not nothing.
+            # A fence may already be live at this path from an earlier
+            # admitted session. Unlinking the replacement on failure would
+            # leave that session with no fence at all -- every hook call
+            # denying until the next successful publication -- so the previous
+            # bytes are kept and restored.
+            previous = (
+                ctx.fence_path.read_bytes() if Path(ctx.fence_path).is_file() else None
+            )
             fence_path = None
             try:
                 fence_path = write_fence(fence, ctx.fence_path)
@@ -239,7 +269,10 @@ class FencedSpawner:
             except OSError as exc:
                 if fence_path is not None:
                     try:
-                        fence_path.unlink()
+                        if previous is None:
+                            fence_path.unlink()
+                        else:
+                            fence_path.write_bytes(previous)
                     except OSError:
                         # The rollback itself failed, so the refusal must say
                         # so: an operator has a stale fence to remove by hand.
@@ -250,7 +283,7 @@ class FencedSpawner:
                                     RefusalReason.DOCUMENT_UNREADABLE,
                                     f"cannot publish fence: {exc}; and the partially "
                                     f"published fence at {fence_path} could not be "
-                                    f"removed -- delete it before the next spawn",
+                                    f"rolled back -- restore it before the next spawn",
                                 )
                             ],
                         )

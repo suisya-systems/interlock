@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from importlib.resources import files
@@ -64,6 +65,8 @@ class RefusalReason:
     HOOK_ABSENT = "hook-absent"
     HOOK_MATCHER_TOO_NARROW = "hook-matcher-too-narrow"
     HOOK_NOT_A_COMMAND = "hook-not-a-command"
+    HOOK_INVOCATION_WRONG = "hook-invocation-wrong"
+    GLOBAL_CONFIG_INVALID = "global-config-invalid"
     SANDBOX_PROFILE_ABSENT = "sandbox-profile-absent"
     RULE_SYNTAX = "rule-syntax"
     EMPTY_FENCE = "empty-fence"
@@ -188,6 +191,13 @@ def render_fence(
 
     mapping = ctx.mapping()
     rendered = _substitute(_strip_meta(body), mapping)
+    # Hook commands are *shell strings*, not argv, so a substituted path
+    # containing a space arrives as two arguments and one containing a shell
+    # metacharacter arrives as something else entirely. They are re-rendered
+    # from the unsubstituted source with a shell-quoted mapping.
+    if "hooks" in rendered:
+        quoted = {key: shlex.quote(value) for key, value in mapping.items()}
+        rendered["hooks"] = _substitute(_strip_meta(body).get("hooks"), quoted)
     reasons.extend(_check_placeholders(rendered))
 
     permissions = rendered.get("permissions", {})
@@ -253,7 +263,7 @@ def render_fence(
                 except RuleSyntaxError as exc:
                     reasons.append((RefusalReason.RULE_SYNTAX, str(exc)))
 
-    reasons.extend(_check_hooks(rendered.get("hooks"), ctx))
+    reasons.extend(_check_hooks(rendered.get("hooks"), ctx, role))
 
     deduped = _dedupe(rules)
     if not deduped:
@@ -316,8 +326,21 @@ def _check_forbidden_allow(
     if not isinstance(allow, list):
         return [(RefusalReason.RULE_SYNTAX, "permissions.allow must be a list")]
     exact = set(global_cfg.get("forbidden_allow_exact") or ())
-    patterns = [re.compile(p) for p in global_cfg.get("forbidden_allow_regex") or ()]
     found: list[tuple[str, str]] = []
+    patterns = []
+    for raw in global_cfg.get("forbidden_allow_regex") or ():
+        try:
+            patterns.append(re.compile(raw))
+        except (re.error, TypeError) as exc:
+            # Escaping as re.error would bypass FencedSpawner's refusal
+            # handling, so a broken forbidden-allow list would produce no
+            # durable spawn-refused event at all.
+            found.append(
+                (
+                    RefusalReason.GLOBAL_CONFIG_INVALID,
+                    f"forbidden_allow_regex entry {raw!r} is not a valid regex: {exc}",
+                )
+            )
     for entry in allow:
         if not isinstance(entry, str):
             found.append((RefusalReason.RULE_SYNTAX, f"allow entry not a string: {entry!r}"))
@@ -339,7 +362,7 @@ def _check_forbidden_allow(
     return found
 
 
-def _check_hooks(hooks: Any, ctx: FenceContext) -> list[tuple[str, str]]:
+def _check_hooks(hooks: Any, ctx: FenceContext, role: str) -> list[tuple[str, str]]:
     """Every hook command must name a file that exists *now*.
 
     "Hook path unresolvable" is one of the three broken configurations issue #9
@@ -381,6 +404,7 @@ def _check_hooks(hooks: Any, ctx: FenceContext) -> list[tuple[str, str]]:
             problems.extend(_check_command_resolves(hook["command"]))
             if str(ctx.hook_script) in hook["command"]:
                 interlock_matchers.append(group.get("matcher"))
+                problems.extend(_check_invocation(hook["command"], ctx, role))
     if not commands:
         problems.append((RefusalReason.HOOK_ABSENT, "no PreToolUse command hooks declared"))
     if not interlock_matchers:
@@ -416,6 +440,43 @@ def _matcher_is_universal(matcher: Any) -> bool:
     return matcher is None or (isinstance(matcher, str) and matcher.strip() in _UNIVERSAL_MATCHERS)
 
 
+def _check_invocation(command: str, ctx: FenceContext, role: str) -> list[tuple[str, str]]:
+    """Interlock's hook has to be invoked *at Interlock's fence*.
+
+    Containing the hook script's path is not enough. ``hook.py --fence
+    /tmp/stale.json`` names our hook and reads somebody else's rules, and the
+    published fence is simply never consulted -- an admitted spawn enforcing a
+    fence nobody rendered. So the flags are parsed and compared.
+    """
+
+    problems: list[tuple[str, str]] = []
+    try:
+        tokens = shlex.split(command)
+    except ValueError as exc:
+        return [(RefusalReason.RULE_SYNTAX, f"unparseable hook command: {exc}")]
+
+    expected = {"--fence": str(ctx.fence_path), "--role": role}
+    for flag, want in expected.items():
+        if flag not in tokens:
+            problems.append(
+                (
+                    RefusalReason.HOOK_INVOCATION_WRONG,
+                    f"Interlock's deny hook is invoked without {flag}: {command!r}",
+                )
+            )
+            continue
+        index = tokens.index(flag)
+        got = tokens[index + 1] if index + 1 < len(tokens) else None
+        if got != want:
+            problems.append(
+                (
+                    RefusalReason.HOOK_INVOCATION_WRONG,
+                    f"Interlock's deny hook is invoked with {flag}={got!r}, expected {want!r}",
+                )
+            )
+    return problems
+
+
 def _check_command_resolves(command: str) -> list[tuple[str, str]]:
     """Both halves of a hook command must resolve: the launcher and the script.
 
@@ -426,7 +487,10 @@ def _check_command_resolves(command: str) -> list[tuple[str, str]]:
     """
 
     problems: list[tuple[str, str]] = []
-    tokens = [token.strip("'\"") for token in command.split() if token.strip("'\"")]
+    try:
+        tokens = shlex.split(command)
+    except ValueError as exc:
+        return [(RefusalReason.RULE_SYNTAX, f"unparseable hook command: {exc}")]
     if not tokens:
         return [(RefusalReason.RULE_SYNTAX, "empty hook command")]
 

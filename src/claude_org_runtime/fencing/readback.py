@@ -59,6 +59,22 @@ class InitReadback:
 
 
 def parse_init_event(payload: Mapping[str, Any]) -> InitReadback:
+    """Parse one ``system/init`` event, refusing an incomplete one.
+
+    Defaulting a missing ``permissionMode`` to ``None`` and a missing ``tools``
+    to ``()`` would make two *empty* readbacks compare **equal**, and the
+    comparison would report that the fence survived a restart it never
+    observed. An absent field is an unsound readback, not a comparable one.
+    """
+
+    for key in ("permissionMode", "tools"):
+        if key not in payload:
+            raise ReadbackUnsound(f"system/init event has no {key!r}")
+    if not isinstance(payload["permissionMode"], str) or not payload["permissionMode"]:
+        raise ReadbackUnsound(f"permissionMode is not a mode: {payload['permissionMode']!r}")
+    if not isinstance(payload["tools"], list):
+        raise ReadbackUnsound(f"tools is not a list: {payload['tools']!r}")
+
     servers: list[tuple[str, str]] = []
     for entry in payload.get("mcp_servers") or ():
         if isinstance(entry, Mapping):

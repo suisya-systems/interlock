@@ -208,6 +208,34 @@ class TestPublicationIsAllOrNothing:
         assert ledger.refusals()
 
 
+    def test_a_failed_republish_restores_the_previous_fence(
+        self, ctx, document, ledger, monkeypatch
+    ):
+        """A refused respawn must not disarm the session that is already live.
+
+        Unlinking the replacement would leave the running session with no
+        fence at all, and every hook call denying, until the next successful
+        publication -- a refusal that breaks more than it prevents.
+        """
+
+        first = FencedSpawner(ledger=ledger, document=document).spawn(
+            "worker", ctx, RecordingSpawner()
+        )
+        assert first.admitted
+        original = ctx.fence_path.read_bytes()
+
+        monkeypatch.setattr(
+            FencedSpawner,
+            "_write_settings",
+            lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        outcome = FencedSpawner(ledger=ledger, document=document).spawn(
+            "worker", ctx, RecordingSpawner()
+        )
+        assert not outcome.admitted
+        assert ctx.fence_path.read_bytes() == original
+
+
 class TestTheRefusalIsRecordedDurably:
     def test_the_refusal_is_on_disk_with_its_reasons(self, ctx, document, ledger):
         FencedSpawner(ledger=ledger, document=document).spawn(

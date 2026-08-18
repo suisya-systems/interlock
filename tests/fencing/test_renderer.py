@@ -74,6 +74,35 @@ class TestRenders:
             assert any(str(ctx.hook_script) in command for command in commands)
             assert any(str(ctx.fence_path) in command for command in commands)
 
+    def test_paths_with_spaces_survive_into_the_hook_command(self, tmp_path, document):
+        """A hook command is a shell string, not argv.
+
+        An unquoted path containing a space arrives as two arguments; one
+        containing a shell metacharacter arrives as something else entirely.
+        """
+
+        import shlex
+        from claude_org_runtime.fencing import FenceContext, default_hook_script
+
+        root = tmp_path / "a dir with spaces"
+        root.mkdir()
+        ctx = FenceContext(
+            interlock_root=root,
+            worker_dir=root / "w",
+            claude_org_path=root / "org",
+            hook_script=default_hook_script(),
+            fence_path=root / "state dir" / "fence.json",
+        )
+        fence = render_fence("worker", ctx, document=document)
+        command = [
+            hook["command"]
+            for group in fence.settings["hooks"]["PreToolUse"]
+            for hook in group["hooks"]
+        ][0]
+        tokens = shlex.split(command)
+        assert str(ctx.fence_path) in tokens
+        assert tokens[tokens.index("--fence") + 1] == str(ctx.fence_path)
+
     def test_rendering_is_deterministic(self, ctx, document):
         """Two renders must be byte-identical, or a restart diff means nothing."""
 
@@ -307,6 +336,52 @@ class TestRefusals:
         with pytest.raises(FenceRefusal) as excinfo:
             render_fence("worker", ctx, document=broken)
         assert RefusalReason.HOOK_NOT_A_COMMAND in excinfo.value.codes
+
+    def test_a_hook_pointed_at_another_fence_refuses(self, ctx, document):
+        """Naming our hook is not the same as running it at our fence.
+
+        ``hook.py --fence /tmp/stale.json`` passes a substring check, reads
+        somebody else's rules, and never consults the fence that was
+        published -- an admitted spawn enforcing a fence nobody rendered.
+        """
+
+        hooks = json.loads(json.dumps(document["roles"]["worker"]["hooks"]))
+        hooks["PreToolUse"][0]["hooks"][0]["command"] = (
+            "{python} {hook_script} --role worker --fence /tmp/stale-fence.json"
+        )
+        broken = mutate(document, "worker", hooks=hooks)
+        with pytest.raises(FenceRefusal) as excinfo:
+            render_fence("worker", ctx, document=broken)
+        assert RefusalReason.HOOK_INVOCATION_WRONG in excinfo.value.codes
+
+    def test_a_hook_invoked_for_another_role_refuses(self, ctx, document):
+        hooks = json.loads(json.dumps(document["roles"]["worker"]["hooks"]))
+        hooks["PreToolUse"][0]["hooks"][0]["command"] = (
+            "{python} {hook_script} --role curator --fence {fence_path}"
+        )
+        broken = mutate(document, "worker", hooks=hooks)
+        with pytest.raises(FenceRefusal) as excinfo:
+            render_fence("worker", ctx, document=broken)
+        assert RefusalReason.HOOK_INVOCATION_WRONG in excinfo.value.codes
+
+    def test_a_hook_with_no_fence_flag_refuses(self, ctx, document):
+        hooks = json.loads(json.dumps(document["roles"]["worker"]["hooks"]))
+        hooks["PreToolUse"][0]["hooks"][0]["command"] = "{python} {hook_script}"
+        broken = mutate(document, "worker", hooks=hooks)
+        with pytest.raises(FenceRefusal) as excinfo:
+            render_fence("worker", ctx, document=broken)
+        assert RefusalReason.HOOK_INVOCATION_WRONG in excinfo.value.codes
+
+    def test_a_malformed_global_regex_refuses_rather_than_raising(self, ctx, document):
+        """Escaping as ``re.error`` would bypass the spawn's refusal handling
+        entirely, so a broken forbidden-allow list would produce no durable
+        ``spawn-refused`` event at all."""
+
+        broken = json.loads(json.dumps(document))
+        broken["global"]["forbidden_allow_regex"] = ["^Bash([unclosed"]
+        with pytest.raises(FenceRefusal) as excinfo:
+            render_fence("worker", ctx, document=broken)
+        assert RefusalReason.GLOBAL_CONFIG_INVALID in excinfo.value.codes
 
     def test_unsubstituted_placeholder_refuses(self, ctx, document):
         broken = mutate(

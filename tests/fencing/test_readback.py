@@ -87,6 +87,36 @@ class TestParsing:
         assert not readback.all_servers_connected
 
 
+class TestAnIncompleteReadbackIsUnsoundNotEqual:
+    """The falsest of false positives.
+
+    If a missing ``permissionMode`` defaulted to ``None`` and a missing
+    ``tools`` to ``()``, two *empty* readbacks would compare **equal** and the
+    restart check would report that the fence survived a restart it never
+    observed.
+    """
+
+    def test_a_readback_with_no_permission_mode_is_refused(self):
+        with pytest.raises(ReadbackUnsound):
+            parse_init_event({"type": "system", "subtype": "init", "tools": []})
+
+    def test_a_readback_with_no_tools_is_refused(self):
+        with pytest.raises(ReadbackUnsound):
+            parse_init_event(
+                {"type": "system", "subtype": "init", "permissionMode": "default"}
+            )
+
+    def test_a_malformed_tools_field_is_refused(self):
+        with pytest.raises(ReadbackUnsound):
+            parse_init_event(
+                {"type": "system", "subtype": "init", "permissionMode": "d", "tools": "Bash"}
+            )
+
+    def test_two_empty_events_cannot_be_compared_into_equality(self):
+        with pytest.raises(ReadbackUnsound):
+            parse_init_event({"type": "system", "subtype": "init"})
+
+
 class TestTheNormalisationRule:
     def test_two_runs_of_one_configuration_differ_before_normalisation(self):
         """§3.9's measurement, restated: the raw arrays are not equal."""
