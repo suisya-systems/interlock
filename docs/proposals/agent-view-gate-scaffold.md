@@ -80,7 +80,7 @@ Two methodological notes, because they affect how much weight the rows below car
 | V21 | `--session-id <uuid>` uses a specific session ID for the conversation and must be a valid UUID. `-r` / `--resume` resumes by session ID; from v2.1.223 the ID search covers every project on the machine, not only the current one. `--fork-session` creates a new ID instead of reusing the original. | `claude --help` (2.1.234); cli-reference |
 | V22 | `--output-format json` (print mode) returns the result, session ID and metadata; `stream-json` emits a `system/init` event carrying session metadata and, from v2.1.205, an optional `capabilities` array intended for feature detection **instead of** version-string comparison. | headless |
 | V23 | SIGTERM to a `claude -p` run aborts the turn, kills the Bash process tree, runs `SessionEnd` hooks, and exits 143. | headless |
-| V24 | The CLI's `--permission-mode` accepts `acceptEdits`, `auto`, `bypassPermissions`, `manual`. | `claude --help` (2.1.234) |
+| V24 | The CLI's `--permission-mode` accepts six choices: `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, `plan`. This is **not** the same set the Agent SDK documents (W3a) — the CLI has `manual` and no `default`. | `claude --help` (2.1.234) |
 | V25 | Agent view is in research preview: "The interface and keyboard shortcuts may change as the feature evolves." Background sessions are local — preserved across sleep, stopped when the machine shuts down — and consume subscription usage the same as interactive sessions. | agent-view |
 | V26 | The only stated qualifier on `claude agents --json` anywhere is "(for scripting; does not require a TTY)". No versioning statement, deprecation policy, schema document, or compatibility guarantee accompanies it. | `claude agents --help` (2.1.234); cli-reference; agent-view |
 
@@ -88,7 +88,9 @@ Two methodological notes, because they affect how much weight the rows below car
 
 | # | Fact | Source |
 |---|---|---|
-| W1 | The Agent SDK runs the agent loop **inside the host program's own process**, and is a library for Python and TypeScript only; other languages are directed to run the CLI as a subprocess with `-p` and `--output-format json`. | agent-sdk/overview |
+| W1 | The Agent SDK is described as "A library that runs the agent loop in your own process, in Python or TypeScript"; other languages are directed to run the CLI as a subprocess with `-p` and `--output-format json`. | agent-sdk/overview |
+| W1a | **That phrase is about ownership of the loop, not process topology.** The Python SDK reference documents a `transport` option as an "Optional custom transport for communicating with **the CLI process**", and its `Transport` base class as the way to "communicate with the Claude process over a custom channel (for example, a remote connection **instead of a local subprocess**)", with `end_input()` described as closing "stdin for subprocess transports". The default arrangement is therefore a spawned CLI child process, not agent execution inside the host interpreter. | agent-sdk/python |
+| W3a | The Agent SDK documents six permission modes — `default`, `dontAsk`, `acceptEdits`, `bypassPermissions`, `plan`, `auto`. Compare V24: the CLI's set differs (it has `manual`, and no `default`), so mode names are not portable between the two surfaces. | agent-sdk/permissions |
 | W2 | The SDK resumes and forks by a session ID read from the result message's `session_id`; `listSessions()` / `list_sessions()` and `getSessionInfo()` / `get_session_info()` enumerate and inspect sessions on disk; transcripts live under `~/.claude/projects/<encoded-cwd>/`. Session files are machine-local; the doc offers a session-store adapter, moving the file, or **not relying on session resume at all**. | agent-sdk/sessions |
 | W3 | SDK permission evaluation order is hooks → deny rules → ask rules → permission mode → allow rules → `canUseTool`. **A hook can deny outright and that deny applies even in `bypassPermissions`.** A hook `allow` does not skip deny/ask rules. | agent-sdk/permissions |
 | W4 | The only documented per-role permission mechanism in the SDK is subagent inheritance with a per-`AgentDefinition` override, and that override does not apply when the parent is in `bypassPermissions`, `acceptEdits`, or `auto`. | agent-sdk/permissions |
@@ -152,14 +154,29 @@ that adopts at most one session per intent — a strictly harder proof. **Implic
 one experiment worth running before anything else is built; it is a single command and it decides a
 design, not a detail. Until it is run, no scaffold should be designed to *depend* on pre-assigned IDs.
 
-**F4 — `--exec` gives a token-free lifecycle probe (V19).** `claude --bg --exec '<command>'` runs a
-shell command as a background job instead of a Claude session. That means the supervisor's lifecycle
-— spawn, roster listing, structured state, stop, respawn, removal, restart-after-unexpected-exit —
-can be exercised deterministically and repeatedly with a script whose behaviour we control
-(`sleep`, `exit 1`, `trap`), at zero model cost and with no subscription-quota consumption. Most of
-gate items 1, 2, 7 and 8's provider-side evidence can be produced this way. This materially lowers
-the cost of Tier 1 in §3 and makes the harness runnable in CI. *Caveat:* `--exec` does not appear in
-`claude --help` on 2.1.234, so its presence on this build is Appendix A/U2.
+**F4 — `--exec` gives a token-free lifecycle probe, for the part of the lifecycle that is not about a
+conversation (V19).** `claude --bg --exec '<command>'` runs a shell command as a background job
+**instead of** a Claude session. Within that limit it is genuinely useful: the supervisor's own
+behaviour — spawn, roster listing, structured-state readout, stop, removal, restart after an
+unexpected exit, behaviour under an ungraceful daemon kill, and readout latency with N jobs running —
+can be exercised deterministically with a script whose behaviour we control (`sleep`, `exit 1`,
+`trap`), at zero model cost and with no subscription-quota consumption, repeatably in CI.
+
+**What `--exec` cannot establish, and must not be used for.** A shell job has no conversation and no
+Claude in the loop, so three things are out of its reach and need **model-backed** `--bg` sessions:
+
+- *Conversation resume.* `claude respawn` is documented as restarting a session "with its conversation
+  intact" (V6). A job has no conversation, so a passing `--exec` respawn says nothing about O5.
+- *Worktree isolation and its lifecycle.* V10 is explicit that the move into `.claude/worktrees/`
+  happens "Before editing files, Claude moves the session into an isolated git worktree" — an action
+  of the agent, not of the supervisor. Gate item 7 therefore cannot be discharged with jobs at all.
+- *Session identity for a conversation.* See F3 and U1: `--session-id` identifies a conversation, and a
+  job does not have one.
+
+So `--exec` lowers the cost of the *supervisor-facing* half of Tier 1 (and of item 8's load
+generation) but not of items 1-resume or 7, which must be budgeted as real sessions consuming
+subscription quota (V25). *Caveat:* `--exec` does not appear in `claude --help` on 2.1.234, so its
+presence on this build is Appendix A/U2.
 
 **F5 — Documentation and local help disagree about `claude rm` (V5, V11).** `claude rm --help` on
 2.1.234 says flatly "Delete a background session and its worktree", while the agent-view page says
@@ -169,6 +186,24 @@ unpushed commits. Both are primary sources and they cannot both be a complete de
 either source, and the discrepancy is itself a data point about how much of this surface is
 contract and how much is current behaviour — which bears directly on `D-0010`'s fail-closed posture
 and on V26's absence of any compatibility guarantee.
+
+**F6 — If U1 fails, gate item 2 fails, and that is a `Q-0004` trigger rather than a design problem to
+absorb.** It is tempting to treat "identity cannot be pre-assigned" as an inconvenience to be handled
+with a spawn-intent row and a reconciliation pass that adopts the matching session afterwards. It is
+not. `ACCEPTANCE.md` item 2's predicate is that "A single-writer violation at any injection point is a
+gate failure", and post-hoc attribute matching cannot establish the absence of a violation: the only
+attributes available (`cwd`, `startedAt`, `name`) are all learned *after* the spawn, `name` is a
+display name by construction (V20), and the injection point that matters — a kill between spawn and
+commit, followed by a retry — is exactly the one that can leave two live sessions matching one intent
+before any reconciler runs. Adoption can pick a winner; it cannot prove the loser never wrote.
+
+What *would* rescue it is a pre-spawn fence rather than a post-hoc match: some identifier or token
+committed to SQLite before the spawn that the second writer's protected writes must carry and that the
+first commit invalidates — the same fencing-token discipline `ACCEPTANCE.md` §2 already requires of
+leases. Whether the provider offers any such handle if `--session-id` does not compose is not known
+from any source. **Implication:** phase 0's experiment is not a detail-gathering step; a negative
+result is a candidate gate failure that routes directly to `Q-0004`, and the honest thing is to say so
+in advance rather than to soften item 2 after the fact.
 
 ---
 
@@ -231,7 +266,7 @@ proposed; nothing else is required by any item.
 | **S1** | `SessionProvider` interface: five verbs, a session state model mapped onto `D-0005`'s closed fact-state set, a typed error/unavailable result (never an empty one — R4), and a capability/version probe with a fail-closed spawn precondition (`D-0010`). | interface + docstrings; ~150 LOC |
 | **S2** | Agent View provider implementing S1 over `--bg` / `agents --json` / `stop` / `respawn`, with a tolerant parser (V26 — no schema guarantee). | ~300 LOC |
 | **S3** | Stub provider implementing S1 over local child processes, with no Claude in the loop. Deliberately trivial (gate item 11 names it). | ~150 LOC |
-| **S4** | CLI probe harness: drives S2's underlying commands directly using `--exec` jobs (F4), asserts the internals-free negative (paths made unreadable), records CLI version and probe output. Throwaway by construction. | ~250 LOC + fixtures |
+| **S4** | CLI probe harness, in two halves (F4): **S4-jobs** drives supervisor-facing behaviour with `--exec` jobs at zero model cost, and **S4-sessions** drives conversation resume and the worktree lifecycle with a small number of model-backed `--bg` sessions, which no job can stand in for. Both assert the internals-free negative (paths made unreadable) and record CLI version and probe output. Throwaway by construction. | ~250 LOC + fixtures |
 | **S5** | SQLite schema slice: `run`, `session`, `lease`, `outbox`, `incident`, `action` — the minimum for the items below, not the full `Q-0001` DDL, explicitly marked as a spike schema. | ~200 LOC |
 | **S6** | Lease with a fencing token validated atomically as part of each protected write (`ACCEPTANCE.md` §2 requires this; check-then-write is named as insufficient). | ~150 LOC |
 | **S7** | Outbox with resend, ack, dedup key, durable retry count, and one action handler that declares its exactly-once mechanism (destination idempotency key *or* transactional commit). | ~350 LOC |
@@ -248,7 +283,7 @@ and flags where the evidence available makes the proposed method unrunnable as w
 | # | Tier | Minimum scaffold | Pass/fail predicate | Notes and departures |
 |---|---|---|---|---|
 | 1 | T1 | S4 | Every one of start / structured-state read / stop / resume completes using only documented public commands, and the harness behaves identically with `~/.claude/jobs`, internal sockets and transcript paths made unreadable. | Verbs are all present and documented (V1, V3, V5, V6, V7). Two caveats: "resume" for a background session is `claude respawn` (V6), not `--resume`, which reopens local history; and `claude attach` needs a terminal, so it is not a control-plane verb. Record the CLI version and probe output (V22 `capabilities`, else `--version`) per `D-0010`. |
-| 2 | T2 | S1 + S2 + S5 + S9 | After a kill at each injection point, re-identification yields **exactly one** session per run, and a second writer is refused and the refusal recorded. | Design must not assume pre-assigned IDs until U1 is settled (F3). If U1 fails, the fallback is a durable spawn-intent row plus an adoption rule keyed on `cwd` + `startedAt` + `name` from `agents --json` — weaker, and the weakness must be recorded, not papered over. |
+| 2 | T2 | S1 + S2 + S5 + S9 | After a kill at each injection point, re-identification yields **exactly one** session per run, and a second writer is refused and the refusal recorded. | Design must not assume pre-assigned IDs until U1 is settled (F3). **If U1 fails, this item fails** unless some other *pre-spawn* idempotent identity or fence is found — see F6. Attribute-matching on `cwd` + `startedAt` + `name` is not such a fence and does not rescue it: `startedAt` is only knowable after the spawn, `name` is documented as a display name and not an identity (V20), and a crash-then-retry can leave two matching workers alive before any reconciliation runs. `ACCEPTANCE.md` states that "A single-writer violation at any injection point is a gate failure"; recording a weaker guarantee instead would be reclassifying the item, not passing it. |
 | 3 | T1 | S4 + S10 | Restart preserves the fence, **and** a deliberately broken configuration causes a **refused** spawn, never a downgraded one, with the refusal recorded. A role-forbidden operation is denied after restart. | `ACCEPTANCE.md` proposes diffing the effective configuration before and after restart. **There is no public readback of effective configuration** (Appendix A/U3), so that method is not runnable as written. Proposed substitute: a *behavioural* breach probe — attempt one forbidden operation per role and assert denial — as the observable, with the config diff done on Interlock's own rendered inputs. And per F2 the fail-closed half must be Interlock's own spawn precondition; asserting it against the harness would be asserting something no source promises. |
 | 4 | T2 | S5 + S6 + S7 + S9 | State is reconstructed by query from SQLite alone; work resumes from unresolved incidents; every side effect is applied exactly once, evidenced by an idempotency/dedup record. | The "supervisor" in this row is Interlock's, not Claude Code's. What the *provider's* supervisor does under an ungraceful kill is separately unknown (Appendix A/U4) and should be probed as part of S4 rather than assumed. |
 | 5 | T2 | S6 + S7 + S9 | Every case in `ACCEPTANCE.md` §2 is automated and reproducible, and each external-effect case is additionally proven against the destination's own idempotency record. | The one handler in S7 must *name* its mechanism. If no candidate destination offers an idempotency key, `ACCEPTANCE.md` §2's second option — transactional commit of effect and record together — is the only route, and where neither is achievable the action needs a human gate (`D-0004`). R1/R2 supply the invariants; R3 rules out the "corrupt state recovers as empty" behaviour outright. |
@@ -271,7 +306,9 @@ the F3 experiment happen first; they are not alternatives on that point.
 Build S4 only (plus the F3 experiment). Take the provider verdict from T1 evidence — items 1, 3, 7
 plus the item-2 identity experiment — and defer every T2/T3 item to a second stage after the verdict.
 
-- *Scope:* S4, S10's breach probe, the identity experiment. **Estimated 3–5 engineer-days.**
+- *Scope:* S4 (both halves), S10's breach probe, the identity experiment. **Estimated 3–5
+  engineer-days**, plus a small, bounded amount of subscription quota for the model-backed probes
+  S4-sessions requires (F4).
 - *Strengths:* Cheapest possible answer to the question that actually decides everything — "does this
   backend hold?". Nothing built is wasted if the answer is no, because S4 is throwaway by design and
   the identity/fencing questions must be re-asked of any replacement anyway. Fastest route to
@@ -356,8 +393,9 @@ report to a human, not a reason to proceed to the next.
 
 | Phase | Work | Discharges | Exit condition |
 |---|---|---|---|
-| **0** | The F3 experiment: does `--session-id <uuid>` compose with `--bg`? One command. | Nothing directly | U1 answered either way and recorded |
-| **1** | S4 — CLI probe harness on `--exec` jobs; capability/version probe; internals-free negative | items 1, 7; provider-side inputs for 3, 8 | All four verbs work through documented commands; worktree behaviour on this build observed and recorded |
+| **0** | The F3 experiment: does `--session-id <uuid>` compose with `--bg`? Must be run against a **real** `--bg` Claude session, not an `--exec` job (F4), including the collision case where the UUID is already in use. Two model-backed sessions, minutes. | Nothing directly | U1 answered either way and recorded; if it fails, F6 is triggered before anything else is built |
+| **1a** | S4 (jobs) — `--exec`-based probe of the supervisor: roster, structured state, stop, removal, restart-after-unexpected-exit, ungraceful daemon kill (U4), readout latency under N jobs (U6); capability/version probe; internals-free negative | provider-side inputs for items 1, 3, 8 | Supervisor verbs work through documented commands; U2, U4, U6 answered |
+| **1b** | S4 (sessions) — the same harness driven by a small number of **model-backed** `--bg` sessions, for conversation resume via `respawn` and for the worktree lifecycle: uncommitted, untracked (U5) and unpushed cases across agent-view delete vs `claude rm` (V11, F5), and whether `WorktreeRemove` (V12) can veto | items 1, 7 | Resume preserves the conversation; working tree byte-identical or transition refused on every path |
 | **2** | S10 — carried fencing renderer + `PreToolUse` deny + breach probe + Interlock-side spawn precondition | item 3 | Restart preserves the fence; broken config refuses the spawn; forbidden operation denied |
 | **3** | S1 → S3 → S5 — interface, stub provider, spike schema | prerequisite for 2, 4, 5, 6, 11 | Interface written; stub passes an empty suite; schema marked as spike |
 | **4** | S6 + S7 — lease with fencing token; outbox with one handler declaring its exactly-once mechanism | prerequisite for 4, 5 | Handler names its mechanism |
@@ -368,8 +406,8 @@ report to a human, not a reason to proceed to the next.
 | **9** | Stub Secretary + load generator; Curator stub + approval digest | items 8, 9 | No blocking dependency; all five promotion negatives refused |
 | **10** | Routing point + writer audit rehearsal | item 10 (rehearsal only) | Rehearsed rollback changes only routing |
 
-Phase 9's item 9 has no dependency on phases 1–8 and can run in parallel from day 1 (§3.1). Phases 0
-and 1 are the ones that can *end* the sequence early by producing a `Q-0004` situation, which is why
+Phase 9's item 9 has no dependency on phases 1–8 and can run in parallel from day 1 (§3.1). Phases 0,
+1a and 1b are the ones that can *end* the sequence early by producing a `Q-0004` situation, which is why
 they come first.
 
 ---
@@ -428,14 +466,24 @@ carries a `capabilities` array explicitly intended for feature detection instead
 comparison (V22), which is a near-exact fit for `D-0010`'s probe; and SIGTERM semantics are documented
 down to the exit code (V23).
 
-**C3 — Claude Agent SDK, in-process.** The SDK runs the agent loop inside the host program's process
-and is Python/TypeScript only (W1) — and Interlock is Python, so this is available. It offers session
-enumeration and inspection, resume and fork (W2), and the richest permission surface of any candidate:
-a documented six-step evaluation order in which a hook deny applies even under `bypassPermissions`
-(W3). Its costs are structural: an in-process agent loop puts worker execution inside the control
-plane's own process, which sits badly with `D-0016` (Secretary must not block) and with `Q-0013`'s
-question about whether "control plane outside the worker" survives into Interlock. The docs also warn
-that session files are machine-local and suggest not relying on session resume at all (W2).
+**C3 — Claude Agent SDK.** A library for Python and TypeScript only (W1), and Interlock is Python, so
+this is available. It offers session enumeration and inspection, resume and fork (W2), and the richest
+permission surface of any candidate: a documented six-step evaluation order in which a hook deny
+applies even under `bypassPermissions` (W3).
+
+On the process boundary, note what the overview's "runs the agent loop in your own process" does and
+does not mean (W1a). The Python reference documents a pluggable `transport` for communicating with
+*the CLI process*, whose default is a local subprocess. So C3 does **not** put worker execution inside
+Interlock's own interpreter — the worker is a child process, as it is under C2 — and the objection
+that C3 collides with `D-0016` (Secretary must not block) or reopens `Q-0013` ("control plane outside
+the worker") **does not follow** and is withdrawn. What actually distinguishes C3 from C2 is narrower:
+the SDK owns spawn, transport framing and session bookkeeping, so Interlock inherits those
+implementations rather than writing them, at the cost of depending on a library API whose own
+reference calls the transport seam "a low-level internal API. The interface may change in future
+releases." Its other documented cost stands: session files are machine-local and the docs suggest not
+relying on session resume at all (W2). Against C2, C3 is therefore a real alternative rather than a
+worse one — it trades code Interlock would otherwise write for a dependency surface Interlock does not
+control.
 
 **C4 — Cloud sessions and self-hosted environments.** `claude --cloud` creates and targets cloud
 sessions, and `-p "msg" --cloud <id> --output-format json` queues a message and returns a structured
@@ -490,14 +538,14 @@ only — an unknown is never scored as a pass.
 | **O1** start | Y (V1) | Y | Y (W1) | Y (W5) | Y (W8) | ? | Y |
 | **O2** list | Y (V3) | Y — Interlock's own roster | Y (W2) | ~ UI-centric | Y (W8) | ? | Y |
 | **O3** structured state | Y (V3, V4) but no schema guarantee (V26) | Y (V22 `stream-json` + `capabilities`) | Y (W2) | ~ (W5 json only for queueing) | **Y** — designed status enum (W8) | ? | N — screen text only |
-| **O4** stop one session | Y (V5) | Y — signal, semantics documented (V23) | Y — in-process | ~ (W5, UI delete) | Y (W8, interrupt-then-act) | ? | Y |
+| **O4** stop one session | Y (V5) | Y — signal, semantics documented (V23) | Y — SDK owns the child process (W1a) | ~ (W5, UI delete) | Y (W8, interrupt-then-act) | ? | Y |
 | **O5** resume | Y (V6 `respawn`) | Y (V21 `--resume`) | Y (W2) — but docs advise not relying on it | ~ (W5 `--teleport` preconditions) | Y (W8 idle→running) | ? | ~ |
 | **O6** identity across crash window | **?** — the decisive unknown (F3/U1) | **Y** — caller-supplied UUID before spawn (V21) | Y (W2 session_id) | ~ | Y (server-assigned, durable) | ? | N — pane IDs are not durable identity |
 | **O7** per-role fence, fail closed | ~ persists (V13); fail-closed **not** promised, evidence of fail-open (V15, V16) | ~ same harness; but Interlock owns the spawn precondition end to end | ~ best surface (W3) yet per-role override void under three modes (W4) | ? | ~ mid-session policy replacement (W8), idle-only | ? | ~ same as C1/C2 |
 | **O8** workspace lifecycle | ~ documented, partly contradictory (V11, F5); `WorktreeRemove` is the veto handle (V12) | **Y** — Interlock owns the working tree; no provider reclaims it | Y — same | N — VM reclaimed (W5); untracked files excluded from bundling | ~ delete destroys sandbox files (W8) | ? | Y |
-| **O9** readout not serialised | ? (U6) | Y — reading Interlock's own rows | ~ in-process contention | ? | ~ read endpoints rate-limited, not blocked (W8) | ? | ~ |
-| **O10** bus independent of provider | Y by force (F1 — no ingress exists) | Y | ~ in-process coupling is easy to introduce | ~ has an ingress (W5), which is a temptation not a requirement | ~ same | ? | Y |
-| **O11** capability probe | ~ `--version` only; no probe on this surface (U7) | **Y** (V22) | ~ SDK version | ? | ~ dated beta header | ? | N |
+| **O9** readout not serialised | ? (U6) | Y — reading Interlock's own rows | Y — worker is a child process (W1a) | ? | ~ read endpoints rate-limited, not blocked (W8) | ? | ~ |
+| **O10** bus independent of provider | Y by force (F1 — no ingress exists) | Y | ~ the SDK's own transport seam invites coupling (W1a) | ~ has an ingress (W5), which is a temptation not a requirement | ~ same | ? | Y |
+| **O11** capability probe | ~ `--version` only; no probe on this surface (U7) | **Y** (V22) | ~ SDK version; transport seam self-described as internal and changeable (W1a) | ? | ~ dated beta header | ? | N |
 | **O12** provider not SoT | Y — Interlock's obligation | Y | Y | ~ server-side state (W5) | **N-ish** — state is server-side by design (W8) | Y | Y |
 
 **Reading the matrix.** Two things stand out and neither is a recommendation.
@@ -653,13 +701,16 @@ U1 is unresolved and is the riskiest single unknown (F3).
 
 | Option | Summary |
 |---|---|
-| **6a** | Run the one-command experiment first (phase 0); if it succeeds, commit the binding before spawn; if not, fall back to a durable spawn-intent row plus a single-adoption rule, and record the weaker guarantee explicitly |
+| **6a** | Run the experiment first (phase 0, on a real `--bg` session including the UUID-collision case); if it succeeds, commit the binding before spawn. If it fails, search for any other **pre-spawn** fence, and if none exists, **fail item 2 and open the `Q-0004` path** rather than substituting post-hoc adoption (F6) |
 | 6b | Assume pre-assignment works and design on it |
 | 6c | Assume it does not and design the harder path unconditionally |
 
-**Recommendation: 6a.** The experiment costs one command and decides a design. 6b builds on an
-untested assumption in the one place where being wrong is most expensive; 6c pays for the harder path
-without knowing it is needed.
+**Recommendation: 6a.** The experiment costs two short sessions and decides a design. 6b builds on an
+untested assumption in the one place where being wrong is most expensive; 6c pays for a path that, per
+F6, does not actually satisfy the item it is meant to satisfy. The part of 6a that matters is its tail:
+a negative result must be allowed to fail the gate, because an adoption rule that picks a winner
+without proving the loser never wrote is a reclassification of item 2 wearing the clothes of a
+mitigation.
 
 ---
 
@@ -684,17 +735,20 @@ adopted.
 | Option | Summary |
 |---|---|
 | **8a** | C2 — Interlock-supervised `claude -p` subprocesses |
-| 8b | C3 — Agent SDK in-process |
+| 8b | C3 — Agent SDK |
 | 8c | C8 — panes as session lifecycle only |
 | 8d | Name none; re-evaluate on the failure's specifics |
 
 **Recommendation: 8a.** C2 scores best on precisely the obligations that cannot be compensated for
 from the control-plane side (O6, O8, O11), it is the most `D-0010`-consistent candidate — every fact
 about it comes from documented flags rather than from undocumented subcommands — and it is the only
-candidate whose capability probe (V22) matches what `D-0010` asks for. 8b puts worker execution inside
-the control plane's process, which collides with `D-0016` and reopens `Q-0013`. 8d is defensible but
-leaves the gate's "only the `SessionProvider` is replaced" promise without a concrete referent, which
-is what `Q-0004` was opened to fix.
+candidate whose capability probe (V22) matches what `D-0010` asks for. 8b is a genuine second choice
+rather than a weak one — the earlier objection that it runs the worker inside the control plane's own
+process does not survive W1a and has been withdrawn — but it trades code Interlock would write once
+for a dependency whose own reference calls the transport seam internal and subject to change, which is
+the same class of risk that produced this gate. 8d is defensible but leaves the gate's "only the
+`SessionProvider` is replaced" promise without a concrete referent, which is what `Q-0004` was opened
+to fix.
 
 ---
 
@@ -765,8 +819,8 @@ Nothing here is used as the basis of a recommendation. Each entry names what wou
 
 | ID | Question | Status | How to settle |
 |---|---|---|---|
-| **U1** | Does `--session-id <uuid>` compose with `--bg`, letting the caller choose a background session's identity before spawn? | **Unverified.** Both flags exist on 2.1.234 (V21, V1). No source states they compose. The cli-reference `--bg` entry lists `--exec` and `--agent` as combinable and `-p` as excluded; `--session-id` appears in neither list. What *is* documented is the opposite direction: the ID is printed after the fact (V2). Not tested — testing requires spawning a session. | One command: `claude --bg --session-id <uuid> --exec 'true'`, then check `claude agents --json` for that `sessionId`. Also test the collision case (an ID already in use). |
-| **U2** | Is `--exec` present on CLI 2.1.234? | **Unverified.** Documented on the agent-view page (V19) but absent from `claude --help` on this build. | Run `claude --bg --exec 'true'` once; if unsupported, F4's token-free harness assumption fails and S4 must budget for model-backed sessions. |
+| **U1** | Does `--session-id <uuid>` compose with `--bg`, letting the caller choose a background session's identity before spawn? | **Unverified.** Both flags exist on 2.1.234 (V21, V1). No source states they compose. The cli-reference `--bg` entry lists `--exec` and `--agent` as combinable and `-p` as excluded; `--session-id` appears in neither list. What *is* documented is the opposite direction: the ID is printed after the fact (V2). Not tested — testing requires spawning a session. | A **real** `--bg` Claude session, not an `--exec` job: a job has no conversation and `--session-id` identifies a conversation, so a job-based probe could return a job identifier and yield a false positive (F4). Run `claude --bg --session-id <uuid> "reply with ok"`, then check `claude agents --json` for that `sessionId`; then repeat with an ID already in use to observe the collision behaviour. If the answer is no, see F6. |
+| **U2** | Is `--exec` present on CLI 2.1.234? | **Unverified.** Documented on the agent-view page (V19) but absent from `claude --help` on this build. | Run `claude --bg --exec 'true'` once; if unsupported, F4's token-free half fails and all of S4 must be budgeted as model-backed sessions. |
 | **U3** | Is there a public way to read back a running or resumed session's **effective** permission mode, permission/deny rules, sandbox profile, and resolved hook set as machine-readable output? | **Unverified — no such surface found.** `system/init` (V22) is documented for `-p` and reports model, tools, MCP servers and plugins, not permissions or hooks. | Search for a documented readback; if none, adopt Decision 4a. |
 | **U4** | What happens to running background sessions when the supervisor dies **ungracefully** (SIGKILL, OOM, host crash), and can a restarted supervisor re-adopt them? Separately: does "the daemon runs on demand and exits when the last client disconnects" (V9) mean sessions terminate whenever no client is attached? | **Unverified.** Documentation covers graceful `claude daemon stop` and `--keep-workers` only. V8 states the supervisor restarts a session whose *process* exits unexpectedly, which is the inverse case. | Probe as part of S4, using `--exec` jobs so nothing real is at risk. |
 | **U5** | What happens to **untracked** files on each session-deletion path? | **Unverified.** The agent-view page names "uncommitted changes" and "unpushed commits" as distinct cases; untracked files are never mentioned on any deletion path. A summarising fetch asserted they follow the uncommitted path; the verbatim source does not say this. (Separately verified and *not* transferable: for `--cloud` bundling, "Untracked files are not included".) | Observe directly on the running build as part of gate item 7. |
