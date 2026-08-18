@@ -5,8 +5,8 @@ record, and the desk applies changes made here to the issue bodies. No `gh` comm
 here.
 **Date:** 2026-08-18 (created); **revised 2026-08-18** for the C2 ruling — see the banner below.
 **Task:** `interlock-spike-issue-decomposition-20260818`; revision `interlock-c2-issue-rewrite-20260818`
-**Refs:** `#740`; `DECISIONS.md` D-0020…D-0026 and the 2026-08-18 enactment entry (D- number
-pending); `docs/proposals/agent-view-gate-scaffold.md` §3 (scaffold inventory S1–S10, per-item
+**Refs:** `#740`; `DECISIONS.md` D-0020…D-0027 (**D-0027** is the 2026-08-18 enactment entry this
+revision applies); `docs/proposals/agent-view-gate-scaffold.md` §3 (scaffold inventory S1–S10, per-item
 minimum scaffold, phase order 0–10); `ACCEPTANCE.md` §1, §2 and §4;
 `investigation/u1-session-id-bg-experiment.md` (phase 0, answered **negative**);
 `investigation/pre-spawn-fence-search.md` (F6, **came up empty**; U27 negative, U28 positive, U32).
@@ -22,8 +22,9 @@ at spawn, undeduplicated, post-spawn, or out of scope under D-0025). The operato
 > **Gate item 2 fails on Agent View (C1). The `Q-0004` path is taken, and per D-0025 the spike's
 > `SessionProvider` is C2 — Interlock-supervised `claude -p` subprocesses.**
 
-Recorded in the 2026-08-18 enactment entry (D- number pending at the time of this revision; a reader
-with `origin/main` newer than that should substitute the real number wherever this phrase appears).
+Recorded as **D-0027**, whose own "Consequences for the 19-issue plan" names §4 of this file as the
+reference for what the verdict does to the issue set and states that rewriting the issue texts onto C2
+is explicit follow-up work — which is what this revision is.
 
 Three consequences run through the whole file:
 
@@ -41,6 +42,12 @@ Three consequences run through the whole file:
    token, validated atomically as part of each protected write, is the only exclusion in the
    system.** Where that changes an acceptance criterion, it is written into the issue rather than
    left in the investigation note.
+
+**Status note, same date.** I-17 (item 9, `#22`) — the one issue with no dependency on anything and
+the one the ruling could not have touched — has since been **discharged on `main`**, with U8 answered
+affirmative by a runtime probe (`investigation/u8-skill-hot-reload-probe.md`) and the approval gate
+placed at the filesystem write. It is recorded here so this plan is not read as still waiting on it;
+its definition below is unchanged.
 
 **What is *not* changed by the ruling.** The gate items, their predicates and `ACCEPTANCE.md` §1 are
 untouched — item 2 failing on C1 is a failure of the provider, not a reclassification of the item
@@ -297,7 +304,7 @@ sequence_precondition:
   ruling: |
     Per D-0024's tail the operator has settled it: gate item 2 FAILS on Agent View (C1), the
     Q-0004 path is taken, and the spike's SessionProvider is C2 — Interlock-supervised `claude -p`
-    subprocesses (D-0025 part 2). Recorded in the 2026-08-18 enactment entry (D- number pending).
+    subprocesses (D-0025 part 2). Recorded as D-0027.
     This is a failure of the provider, not a reclassification of item 2 (F6).
   dispatch_state: |
     The block is discharged. Every issue below is dispatchable subject only to `depends_on`.
@@ -460,7 +467,7 @@ issues:
       ## Dependencies
 
       None. Phase 0 is closed: U1 negative, the fence search empty, the provider ruled to be C2
-      (`investigation/pre-spawn-fence-search.md`; the 2026-08-18 enactment entry, D- number pending).
+      (`investigation/pre-spawn-fence-search.md`; D-0027).
 
       ## Notes
 
@@ -662,8 +669,9 @@ issues:
       probed. Nothing here is a reclassification of item 3 — its predicate is unchanged, and I-04
       still has to discharge it.
 
-      Refs: `investigation/pre-spawn-fence-search.md`; D-0023, D-0025; the 2026-08-18 enactment entry
-      (D- number pending).
+      Refs: `investigation/pre-spawn-fence-search.md`; D-0023, D-0025, D-0027. D-0027 states the
+      property this closure rests on in its own words: under C2 the fail-closed spawn precondition
+      covers every start — "which is a property of the adoption, not a licence to skip it".
   - id: I-04
     github: 9
     title: "S10: carry the per-role fencing renderer, add the `PreToolUse` deny hook and the breach-probe battery"
@@ -1344,8 +1352,8 @@ issues:
 
       Its footing is now known, which it was not when this issue was first written. The pre-spawn
       fence search came up empty on Agent View, gate item 2 failed there, and per D-0025 the provider
-      is **C2 — Interlock-supervised `claude -p` subprocesses** (the 2026-08-18 enactment entry,
-      D- number pending). What C2 supplies, and what it does not, is settled by experiment
+      is **C2 — Interlock-supervised `claude -p` subprocesses** (D-0027). What C2 supplies, and what
+      it does not, is settled by experiment
       (`investigation/pre-spawn-fence-search.md` §4–§5):
 
       | Property | On C2 | Source |
@@ -1855,7 +1863,7 @@ issues:
       **The record now has a provider history to carry, not just a verdict.** The gate was designed
       against Agent View (C1); item 2 failed there on 2026-08-18 after the pre-spawn fence search
       came up empty, and the spike continued against **C2 — Interlock-supervised `claude -p`
-      subprocesses** (D-0025, and the 2026-08-18 enactment entry, D- number pending). A record that
+      subprocesses** (D-0025, D-0027). A record that
       shows only the C2 outcome would present a second attempt as a first one.
 
       ## Scope
@@ -1936,9 +1944,10 @@ issues:
 
 ## 7. Sources
 
-- `DECISIONS.md` — D-0019 through D-0026, and the 2026-08-18 enactment entry that fails gate item 2
-  on Agent View and takes the `Q-0004` path to C2 (D- number pending at the time of this revision);
-  `Q-0001`, `Q-0002`, `Q-0004`, `Q-0005`, `Q-0011`, `Q-0012`, `Q-0021`.
+- `DECISIONS.md` — D-0019 through D-0027. **D-0027** fails gate item 2 on Agent View, adopts C2 as
+  the spike's `SessionProvider`, records that the exclusion is Interlock's own under either provider,
+  and names this file's §4 as the reference for what that costs the issue set; `Q-0001`, `Q-0002`,
+  `Q-0004`, `Q-0005`, `Q-0011`, `Q-0012`, `Q-0021`.
 - `docs/proposals/agent-view-gate-scaffold.md` — §1.5 (F1–F6), §3.1 (tiers), §3.2 (S1–S10), §3.3
   (per-item minimum scaffold and pass/fail predicates), §3.4 (strategies), §3.5 (phase order and exit
   conditions), §5 (Q-0004 candidates), Appendix A (U-register).
