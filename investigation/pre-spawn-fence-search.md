@@ -33,16 +33,21 @@ exists anywhere. The claim this note is willing to defend is: *no such handle is
 documented CLI surface of 2.1.234, and the two handles that looked most promising were refuted by
 experiment rather than by reading.*
 
-The strongest new fact in Part A is **A1**: `--resume <uuid>` under `--bg` is discarded **silently** —
-no warning at all, exit 0, brand-new CLI-assigned identity. That is a *worse* fail-open than U1 §5.2's,
-which at least printed a warning line.
+The strongest new fact in Part A is **A1/A4**: under `--bg`, `--resume <uuid>` is honoured as a
+*content* handle but **not** as an *identity* handle. The conversation really is carried over — a
+resumed background session answered a question that only the earlier turn could answer — but it is
+registered under a **new CLI-assigned session id**, with the original transcript left untouched and a
+copy written under the new id. In other words `--bg --resume` behaves like `--fork-session`, silently:
+exit 0, no warning of any kind. A caller that committed the requested UUID before the spawn would hold
+an identity that names *no running session*, while the work it asked for runs under an id it never
+saw.
 
 ### Part B — U27 and U28
 
 | # | Question | Result |
 |---|----------|--------|
-| **U27** | Is the `-p` `--session-id` refusal atomic under a genuine race? | **NEGATIVE.** It is a check-then-create with a window of roughly **2 to 3 seconds** on this machine. In 5 of 5 simultaneous trials **both** processes were admitted, **both** exited 0, **both** reported the same `session_id`, and **both wrote to the same transcript**. |
-| **U28** | After a SIGKILL of the holder, does `--resume` still succeed *and* is a fresh `--session-id` claimant still refused? | **POSITIVE, both halves.** The claim never released (refused at t+2s, at t+65s, and again after a successful resume), and `--resume` returned the same `session_id` with exit 0. |
+| **U27** | Is the `-p` `--session-id` refusal atomic under a genuine race? | **NEGATIVE.** There is an admission window of roughly **2 to 3 seconds** on this machine. In 5 of 5 simultaneous trials **both** processes were admitted, **both** exited 0, **both** reported the same `session_id`, and **both wrote to the same transcript**. |
+| **U28** | After a SIGKILL of the holder, does `--resume` still succeed *and* is a fresh `--session-id` claimant still refused? | **POSITIVE, both halves.** The claim held through every probe taken — refused at t+2 s, at t+65 s, again after a successful resume, and again about 25 minutes later — and `--resume` returned the same `session_id` with exit 0. |
 
 A third result was obtained while probing U28 and is reported here because it changes what U28's
 positive is worth:
@@ -89,8 +94,8 @@ command was therefore run with the sandbox lifted**, and control C1 (§4.2) conf
 mechanism was live in the environment where the U27 races ran. The `--bg` spawns needed the sandbox
 lifted anyway, for the same reason U1's E2 did.
 
-Sessions started: four `--bg` sessions (A1, A2a, A2b, A3), all stopped and removed (§6), plus a number
-of short `-p` runs, which hold no roster row and no process.
+Sessions started: five `--bg` sessions (A1, A2a, A2b, A3, A4), all stopped and removed (§6), plus a
+number of short `-p` runs, which hold no roster row and no process.
 
 ---
 
@@ -135,7 +140,7 @@ Every candidate is a public handle that could conceivably be committed to SQLite
 | # | Candidate | Source | Verdict |
 |---|-----------|--------|---------|
 | 1 | `--session-id <uuid>` with `--bg` | `claude --help`; cli-reference | **No.** Discarded with a warning, exit 0, CLI-assigned identity (U1 E2/E3). |
-| 2 | `--resume <uuid>` with `--bg` | cli-reference; *and the U1 warning text itself suggests it*: "use `--resume <id>` to continue an existing session" | **No — and silently.** A1 below: exit 0, **no warning of any kind**, brand-new identity; the requested UUID appears nowhere in the roster. |
+| 2 | `--resume <uuid>` with `--bg` | cli-reference; *and the U1 warning text itself suggests it*: "use `--resume <id>` to continue an existing session" | **No — and silently.** A1/A4 below: exit 0, **no warning of any kind**, and the requested UUID appears nowhere in the roster. The *conversation* is resumed (A4 proves it), but into a **new** CLI-assigned session id — a silent fork. The caller cannot commit the identity, which is what a fence needs. |
 | 3 | `-n, --name <name>` | `claude --help`; cli-reference; sessions | **No.** The sessions page states outright that Claude Code "doesn't check the `--name` of a background or `-p` session at startup". A2 confirms it on the build: two live background sessions, same caller-set name, both exit 0, no variant suffix, no refusal. |
 | 4 | `-w, --worktree <name>` | worktrees | **No.** "Passing `--worktree` a name whose directory already exists **opens that existing worktree** instead of creating a new one" — reuse, not refusal. The `git worktree lock` Claude Code takes is worse than useless as a fence here: it is taken *after* the session starts, its stated purpose is to stop *cleanup* from removing the worktree, and the periodic sweep "releases a lock Claude Code set for a session whose process has exited" — i.e. it **releases on crash**, the exact opposite of what a fence must do. Not tested on the build; see §5.4. |
 | 5 | An environment variable fixing the session id | env-vars page; plus a direct probe of the plausible name | **No.** No such variable is documented. A3 probes `CLAUDE_SESSION_ID=<uuid> claude --bg` anyway: ignored, new identity. Even a positive would have failed `D-0010`'s documented-capability posture. |
@@ -197,17 +202,64 @@ $ claude agents --json --all | grep -c "8f3b1c02"
 0
 ```
 
-A new identity, unrelated to the one requested. The session later reached `state: failed`, and its
-logs could not be read (`Couldn't read logs for 92f1437a - connect ENOENT
-/tmp/cc-daemon-1000/60743f15/control.sock`), so **this note does not claim to know whether the
-conversation was resumed or a fresh one was started.** That question does not affect the verdict: the
-identity input was not honoured either way, which is what a fence needs. It is recorded as U33.
+A new identity, unrelated to the one requested. This session later reached `state: failed` and its logs
+could not be read (`Couldn't read logs for 92f1437a - connect ENOENT
+/tmp/cc-daemon-1000/60743f15/control.sock`), which left one question open: was the conversation
+resumed at all, or was a fresh one started under a new id? A1 cannot tell, so **A4 was run to settle
+it** — the distinction matters, because "the flag was ignored" and "the flag worked but re-registered
+the session" are different facts about the provider.
+
+### 3.3.1 A4 — what `--bg --resume` actually does
+
+A `-p` session was created with a chosen UUID and a codeword, then resumed under `--bg` with a
+question only that conversation could answer:
+
+```
+$ claude -p --session-id 7c9e5510-1a2b-4c3d-8e9f-0a1b2c3d4e5f \
+    "Remember this codeword: PLUMBAGO. Reply with just: stored" --output-format json
+session_id: 7c9e5510-1a2b-4c3d-8e9f-0a1b2c3d4e5f
+result: stored
+
+$ claude --bg --resume 7c9e5510-1a2b-4c3d-8e9f-0a1b2c3d4e5f \
+    "What codeword did I ask you to remember? Reply with just the word."
+backgrounded · ef3e58d6
+--- EXIT CODE: 0 ---
+```
+
+Roster, and the session's own screen via `claude logs ef3e58d6` (ANSI stripped):
+
+```
+[('done', 'ef3e58d6-b776-4488-a860-efc85ee81915')]
+
+❯ Remember this codeword: PLUMBAGO. Reply with just: stored
+● stored
+❯ What codeword did I ask you to remember? Reply with just the word.
+● PLUMBAGO
+```
+
+The two transcripts on disk complete the picture:
+
+```
+7c9e5510-....jsonl   11 lines   user "Remember this codeword: PLUMBAGO…" / assistant "stored"
+ef3e58d6-....jsonl   24 lines   the same two turns, re-stamped sessionId ef3e58d6,
+                                plus  user "What codeword…" / assistant "PLUMBAGO"
+```
+
+**So `--resume` under `--bg` is honoured as a content handle and ignored as an identity handle.** The
+history is copied into a new transcript under a new session id, the original transcript is left
+untouched, and the background session is registered as `ef3e58d6-…`. That is the documented behaviour
+of `--fork-session` — applied without being asked for, and without a word of output. (The original
+UUID also stays claimed afterwards: a later `-p --session-id 7c9e5510-…` was refused with `already in
+use`.) **U33 is therefore answered here**, and the answer makes the candidate's verdict firmer, not
+weaker: there is no way to name the identity the background session will have.
 
 Compared with U1's `--session-id` case, this is the more dangerous shape. There, a caller who reads
 the CLI's output at least sees a warning. Here a caller passing `--resume` gets exit 0, a management
-banner that looks entirely normal, and a different session than the one named — with **nothing at all**
-to read. §5.2 of the U1 note ("treat exit 0 as insufficient and read the identity back from the
-roster") applies with more force, not less.
+banner that looks entirely normal, and a *different session running its work* — with **nothing at all**
+to read. A control plane that committed the requested UUID would hold an identity naming no live
+session while the work proceeded under an id it never saw: not a lost spawn, a lost *binding*. §5.2 of
+the U1 note ("treat exit 0 as insufficient and read the identity back from the roster") applies with
+more force, not less.
 
 ### 3.4 A2 — duplicate `--name` under `--bg`
 
@@ -365,7 +417,9 @@ SUMMARY: {"claim_t+2s":1,"claim_t+65s":1,"resume":0,"claim_after_resume":1}
 **Both halves hold.** The identity survives an ungraceful kill: `--resume` reaches the crashed session
 and returns the same `session_id`, and a fresh `--session-id` claimant stays refused — at t+2 s, at
 t+65 s, and again after the resume. This is exactly the direction U28 named as *desired*: the claim
-does **not** release on crash, so a prompt retry cannot create a second live writer *by re-claiming*.
+did **not** release on crash within any interval probed, so a prompt retry cannot create a second live
+writer *by re-claiming*. Note the bound: expiry, a cleanup sweep, or manual state removal at some
+longer horizon was not tested (U36).
 
 ### 4.5 U32 (new) — `--resume` excludes nothing
 
@@ -411,8 +465,9 @@ The proposed statement, for a human to accept or reject in a `D-` entry:
 > `D-0025` to C2 as the designated second spike — opens.**
 
 What would overturn it, stated so the proposal is falsifiable: a documented handle on a surface not in
-§3.1's list; a future CLI release that honours `--session-id` or `--resume` under `--bg`, or that
-refuses a duplicate `--name` for background sessions; or a `WorktreeCreate` hook arrangement that
+§3.1's list; a future CLI release that honours `--session-id` under `--bg`, or that adopts the id named
+by `--resume` as the background session's own identity rather than forking, or that refuses a
+duplicate `--name` for background sessions; or a `WorktreeCreate` hook arrangement that
 turns worktree creation into a genuine pre-spawn exclusive claim (§5.4). None of these is available
 today, and `D-0024` asks for the verdict on what exists, not on what might.
 
@@ -430,7 +485,7 @@ holds, but the reason must change again:
 | Identity chosen pre-spawn | yes (E4) | unchanged |
 | Late second claimant refused | yes (E5, E7) | unchanged — control C1 reproduces it |
 | Claim atomic under a race | untested (U27) | **no** — ~2-3 s window; both writers admitted *and both wrote* |
-| Identity durable across SIGKILL | untested (U28) | **yes** — claim never releases, `--resume` works |
+| Identity durable across SIGKILL | untested (U28) | **yes** — claim held through every probe, `--resume` works |
 | Second *user* of a session excluded | not asked | **no** (U32) — concurrent `--resume` is unrestricted |
 
 **Proposed: C2's O6 grade stays `~`, on a materially worse footing than U1 left it.** What is now
@@ -483,13 +538,14 @@ about as a design of Interlock's, with its own `D-` entry. It was not tested her
 
 ## 6. Cleanup
 
-All four background sessions started by this experiment were stopped and removed:
+All five background sessions started by this experiment were stopped and removed:
 
 ```
 $ claude stop 92f1437a → stopped;  claude rm 92f1437a → removed
 $ claude stop 214f1076 → stopped;  claude rm 214f1076 → removed
 $ claude stop 3811ccb3 → stopped;  claude rm 3811ccb3 → removed
 $ claude stop 4f459d6f → stopped;  claude rm 4f459d6f → removed
+$ claude stop ef3e58d6 → stopped;  claude rm ef3e58d6 → removed
 ```
 
 Roster verification afterwards:
@@ -521,7 +577,7 @@ was tested here.
 | # | Question | Why it matters |
 |---|----------|----------------|
 | **U32** | *(answered here, listed for the register)* Does `--resume` exclude a second concurrent user of the same session? **No** — both admitted, simultaneously and at a 5 s stagger. | This is the path C2 uses after a crash. It means U28's positive is about identity durability only, and carries no single-writer content. |
-| **U33** | Under `--bg --resume <uuid>`, is the named conversation actually resumed into the new session id, or is a fresh conversation started? A1 could not tell: the session reached `state: failed` and its logs were unreadable. | Only affects how the fail-open is *described*. The identity verdict is the same either way, and no design should depend on the answer. |
+| **U33** | *(answered here, listed for the register)* Under `--bg --resume <uuid>`, is the named conversation resumed, or is a fresh one started? **Resumed** — A4 (§3.3.1): the history is copied into a **new** session id, the original transcript is untouched, and the original UUID stays claimed. `--bg --resume` behaves like `--fork-session`, without saying so. | Fixes how the fail-open must be described: the flag is not inert, it is honoured for content and ignored for identity. A control plane keyed on the requested UUID would hold a binding to no live session while the work ran elsewhere. |
 | **U34** | What sets the width of U27's admission window, and is ~2-3 s stable across machines, load, and CLI versions? Is it bounded by transcript-file creation, by the first API response, or by something else? | A supervisor's retry delay is a design parameter. If it can be placed reliably outside the window, the exposure shrinks (it does not vanish — the window still exists). Do **not** design on the measured figure without this. |
 | **U35** | Can a `WorktreeCreate` hook be made to acquire a genuine exclusive claim *before* the CLI proceeds, and does the CLI honour a hook failure by refusing to start? | The only route by which a worktree could become a real pre-spawn fence (§5.4). Note it would be Interlock's fence, not the provider's. |
 | **U36** | Is the "already in use" refusal keyed to the persisted transcript, to a lock file, or to a live process? Evidence is mixed: it survives SIGKILL (U28) and outlives a finished process (E5, C1), and under this worker's sandbox — where transcripts are never written — no state persisted at all. | Determines whether the refusal is inherited by other entry paths (relates to U29) and whether it can be cleared or spoofed by state on disk. |
@@ -533,15 +589,16 @@ was tested here.
 
 The pre-spawn fence search that `D-0024` triggered **came up empty**: on CLI 2.1.234 the `--bg`
 surface offers no way to commit an identity or acquire an exclusive claim before the spawn. The two
-best candidates were refuted by experiment — `--resume` is discarded under `--bg` with **no warning at
-all**, and a duplicate `--name` is accepted for two live background sessions exactly as the
-documentation says it will be. This note therefore **proposes** that gate item 2 fails on Agent View
+best candidates were refuted by experiment — under `--bg`, `--resume` silently forks the conversation
+into a **new** CLI-assigned identity instead of adopting the one named, and a duplicate `--name` is
+accepted for two live background sessions exactly as the documentation says it will be. This note therefore **proposes** that gate item 2 fails on Agent View
 and that the `Q-0004` path opens, and leaves the enactment to a human and a subsequent `D-` entry.
 
-On the `-p` surface, **U27 is negative**: the "already in use" refusal is a check-then-create with a
-window of roughly 2 to 3 seconds, and inside that window two processes were admitted to one session
+On the `-p` surface, **U27 is negative**: the "already in use" refusal has an admission window of
+roughly 2 to 3 seconds, and inside that window two processes were admitted to one session
 id, both exiting 0 and both writing to one transcript. **U28 is positive on both halves**: after a
-SIGKILL the claim never releases and `--resume` still reaches the session. But `--resume` itself
+SIGKILL the claim held through every probe taken (out to about 25 minutes) and `--resume` still
+reaches the session. But `--resume` itself
 (U32) excludes nothing, so the property that survives the crash is *durable identity*, not *single
 writer*.
 
