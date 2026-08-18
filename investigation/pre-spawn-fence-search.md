@@ -20,7 +20,7 @@ Two independent results, one per part of the task.
 ### Part A — the pre-spawn fence search on Agent View
 
 **The search came up empty.** On CLI 2.1.234 no public `--bg` surface lets a caller commit a session
-identity, or acquire an exclusive claim, *before* the spawn. Eleven candidate handles were examined
+identity, or acquire an exclusive claim, *before* the spawn. Twelve candidate handles were examined
 (§3.2); every one is either discarded at spawn, documented as explicitly *not* deduplicated, a
 post-spawn artifact, or out of scope under `D-0025`'s local-execution pre-filter.
 
@@ -30,8 +30,8 @@ what would overturn it.
 
 Exhaustiveness cannot be proved, so §3.1 states the **surfaces searched** rather than claiming none
 exists anywhere. The claim this note is willing to defend is: *no such handle is reachable from the
-documented CLI surface of 2.1.234, and the two handles that looked most promising were refuted by
-experiment rather than by reading.*
+documented CLI surface of 2.1.234, and every handle that looked promising — `--resume`, `--name`,
+`respawn`, and a `WorktreeCreate` hook — was refuted by experiment rather than by reading.*
 
 The strongest new fact in Part A is **A1/A4**: under `--bg`, `--resume <uuid>` is honoured as a
 *content* handle but **not** as an *identity* handle. The conversation really is carried over — a
@@ -94,8 +94,8 @@ command was therefore run with the sandbox lifted**, and control C1 (§4.2) conf
 mechanism was live in the environment where the U27 races ran. The `--bg` spawns needed the sandbox
 lifted anyway, for the same reason U1's E2 did.
 
-Sessions started: six `--bg` sessions (A1, A2a, A2b, A3, A4, A5), all stopped and removed (§6), plus a
-number of short `-p` runs, which hold no roster row and no process.
+Sessions started: seven `--bg` sessions (A1, A2a, A2b, A3, A4, A5, A6), all stopped and removed (§6),
+plus a number of short `-p` runs, which hold no roster row and no process.
 
 ---
 
@@ -151,9 +151,10 @@ Every candidate is a public handle that could conceivably be committed to SQLite
 | 9 | `--exec` job identity | agent-view; F4 | **Out of scope by construction** — a job has no conversation (F4/U30). |
 | 10 | `--cloud` / `--environment` / `--teleport` / `--remote-control [name]` | `claude --help`; cli-reference | **Out of scope** under `D-0025` part 1 (local execution mandatory). |
 | 11 | `claude respawn <id>` | `claude respawn --help` (2.1.234); V5/V6 | **No — but for an instructive reason.** It takes an id the **CLI already assigned**, so there is nothing to commit before the first spawn. A5 below shows it *does* preserve identity exactly across a restart, which is a real durability property for C1 and is reported as such; it is simply not a pre-spawn one. |
+| 12 | A `WorktreeCreate` hook as an admission gate | worktrees page (hooks); raised in review | **No, on both counts.** A6 (§3.4.2): the hook fires **~9 s after the spawn**, once the session is live and has already taken model turns — far too late to gate admission — and a hook that **exits non-zero does not abort the session**; the CLI falls back to its default git worktree logic and the session completes normally. |
 
-Rows 1-3, 5 and 11 were refuted by experiment; rows 4, 6 and 8 by documentation plus the help text;
-rows 7, 9 and 10 by observation or by prior decision.
+Rows 1-3, 5, 11 and 12 were refuted by experiment; rows 4, 6 and 8 by documentation plus the help
+text; rows 7, 9 and 10 by observation or by prior decision.
 
 ### 3.3 A1 — `--bg --resume <uuid>`, the most promising candidate
 
@@ -326,6 +327,57 @@ Two concurrent respawns of the same session were also run, since a restart race 
 the roster held **exactly one row with one pid**. Whether one process was started and replaced, or two
 were started and one reaped, was not observed, so this is recorded as an observation and not as an
 exclusion guarantee.
+
+### 3.4.2 A6 — can a `WorktreeCreate` hook gate admission?
+
+The one remaining way a *provider-enforced* pre-spawn claim might exist is a documented extension
+point: a `WorktreeCreate` hook replaces the CLI's git logic, so if it ran before the session did any
+work, and if its failure aborted the session, an operator's script could acquire an exclusive claim
+and refuse a second worker. Both conditions were tested.
+
+A scratch git repository was given a hook that timestamps its own invocation and then **fails**:
+
+```sh
+#!/bin/sh
+date +%s.%N >> "$WT/hook.log"
+echo "HOOK RAN, refusing" >> "$WT/hook.log"
+exit 1
+```
+
+It was passed to a background session with `--settings` (so no settings file had to be planted), with
+a prompt that forces a file edit and therefore a worktree:
+
+```
+spawn_ts=1787028988.680101188
+$ claude --bg --settings '{"hooks":{"WorktreeCreate":[{"hooks":[{"type":"command","command":".../wtcreate.sh"}]}]}}'     "Create a file called probe.txt containing the word hello, then reply done."
+backgrounded · 81e8fe3c
+--- EXIT CODE: 0 ---
+```
+
+Observations, from the roster polls and the hook's own log:
+
+```
+poll1  working   cwd = .../wt                              # session live, model turns under way
+poll2  working   cwd = .../wt
+poll3  working   cwd = .../wt/.claude/worktrees/probe       # moved into a worktree
+poll5  done      cwd = .../wt/.claude/worktrees/probe
+
+hook.log: 1787028997.629638715
+          HOOK RAN, refusing                                # = 8.95 s after the spawn
+```
+
+**Both conditions fail.**
+
+1. **Too late.** The hook fired **8.95 s after the spawn**, when Claude first needed a worktree — the
+   session was already live, already `working`, and had already taken model turns. Nothing about it is
+   pre-spawn; it is not even pre-*work*.
+2. **Not a refusal.** The hook exited **1**, and the session **did not abort**. The CLI fell back to
+   its own git logic, created `.claude/worktrees/probe`, wrote `probe.txt` there, and reached
+   `state: done`. A failing admission gate that admits is not a gate.
+
+**U35 is answered**, and §5.4's reasoning is strengthened rather than replaced: the worktree route
+cannot fence Agent View, both because it happens after the session is a writer and because refusing
+inside it does not refuse the session.
 
 ### 3.5 A3 — undocumented environment variable probe
 
@@ -544,15 +596,21 @@ atomically as part of each protected write (`ACCEPTANCE.md` §2).**
 
 - On C1 there is no identity input at all, so there is nothing to fence with (Part A).
 - On C2 there *is* an identity, and it is durable across a crash (U28) — but it admits two writers
-  within a ~2-3 s window at creation (U27) and any number of concurrent writers via `--resume` (U32).
+  within a ~2-3 s window at creation (U27) and two concurrent writers via `--resume` (U32 — two is the
+  number tested, and it is already one too many).
 
-The dangerous shape is worth spelling out, because it is exactly item 2's predicate: a supervisor
-crashes, is restarted promptly, and retries the spawn. In the environment measured here, a retry
-issued within a couple of seconds — which is what a healthy supervisor does — landed **inside** the
-admission window, and both claimants were admitted. The window's width is a one-machine, one-load
-measurement (§4.3, U34), so the timing must not be read as a constant of the provider; what *is*
-general is that a window exists and that nothing outside Interlock closes it. Per `D-0023` part 3,
-fail-closed is Interlock's own obligation regardless.
+The dangerous shape is worth spelling out, and it must be stated precisely, because the window is
+measured **from the original spawn** and not from the crash. U28 shows the benign case directly: a
+holder that had been established for 10 s was SIGKILLed, and a retry 2 s later was **refused**. The
+exposure is therefore *not* "any prompt retry"; it is the narrower case where the **original claimant
+is still inside the admission window when it dies** — a crash between the spawn and the moment the
+claim becomes visible, followed by a retry that also lands inside that interval. That is precisely
+F3's crash window, and it is the injection point item 2 names.
+
+The width of that interval is a one-machine, one-load measurement (§4.3, U34), so the timing must not
+be read as a constant of the provider. What *is* general is that a window exists, that two claimants
+inside it are both admitted and both write, and that nothing outside Interlock closes it. Per `D-0023`
+part 3, fail-closed is Interlock's own obligation regardless.
 
 The practical reading: Interlock's fencing token is not a belt-and-braces addition to a provider
 guarantee. On the evidence available today it is **the only exclusion in the system**, and its tests
@@ -570,16 +628,18 @@ and all three would have to be overturned together:
 3. The sweep **releases** that lock when the owning process has exited — release-on-crash, the
    opposite of a fence's requirement.
 
-A `WorktreeCreate` hook could in principle be made to acquire a real exclusive claim before returning
-a path. That is not a pre-spawn fence *for Agent View* though: it would be Interlock's own fence,
-executed by a hook, which is §5.3's answer wearing a different hat — and it would have to be reasoned
-about as a design of Interlock's, with its own `D-` entry. It was not tested here; recorded as U35.
+A `WorktreeCreate` hook looked like it might acquire a real exclusive claim before the CLI proceeded.
+**A6 tested it and it does not** (§3.4.2): the hook fires about nine seconds after the spawn, once the
+session is live and has taken model turns, and a hook that exits non-zero does not stop the session —
+the CLI falls back to its own git logic and the session completes. So the route fails on ordering and
+on enforcement independently. Even had it worked, the exclusion would have been Interlock's own,
+executed by a hook, which is §5.3's answer wearing a different hat.
 
 ---
 
 ## 6. Cleanup
 
-All six background sessions started by this experiment were stopped and removed:
+All seven background sessions started by this experiment were stopped and removed:
 
 ```
 $ claude stop 92f1437a → stopped;  claude rm 92f1437a → removed
@@ -588,6 +648,7 @@ $ claude stop 3811ccb3 → stopped;  claude rm 3811ccb3 → removed
 $ claude stop 4f459d6f → stopped;  claude rm 4f459d6f → removed
 $ claude stop ef3e58d6 → stopped;  claude rm ef3e58d6 → removed
 $ claude stop 146e3885 → stopped;  claude rm 146e3885 → removed
+$ claude stop 81e8fe3c → stopped;  claude rm 81e8fe3c → removed
 ```
 
 Roster verification afterwards:
@@ -605,7 +666,8 @@ $ ls <config-dir>/jobs
 ```
 
 Exactly the three pre-existing sessions from U1's E1 baseline remain, and no job directory from this
-experiment survives. No worktrees were created (the scratch cwd was not a git repository). As in U1,
+experiment survives. One worktree was created, by A6's session, inside the throwaway scratch git repository that A6 built
+for the purpose; no worktree was created in or near the Interlock worktree. As in U1,
 the `-p` runs leave transcripts on disk under the CLI's per-user project directory (15 files under the
 scratch project) and hold no roster row and no process.
 
@@ -621,7 +683,7 @@ was tested here.
 | **U32** | *(answered here, listed for the register)* Does `--resume` exclude a second concurrent user of the same session? **No** — both admitted, simultaneously and at a 5 s stagger. | This is the path C2 uses after a crash. It means U28's positive is about identity durability only, and carries no single-writer content. |
 | **U33** | *(answered here, listed for the register)* Under `--bg --resume <uuid>`, is the named conversation resumed, or is a fresh one started? **Resumed** — A4 (§3.3.1): the history is copied into a **new** session id, the original transcript is untouched, and the original UUID stays claimed. `--bg --resume` behaves like `--fork-session`, without saying so. | Fixes how the fail-open must be described: the flag is not inert, it is honoured for content and ignored for identity. A control plane keyed on the requested UUID would hold a binding to no live session while the work ran elsewhere. |
 | **U34** | What sets the width of U27's admission window, and is ~2-3 s stable across machines, load, and CLI versions? Is it bounded by transcript-file creation, by the first API response, or by something else? | A supervisor's retry delay is a design parameter. If it can be placed reliably outside the window, the exposure shrinks (it does not vanish — the window still exists). Do **not** design on the measured figure without this. |
-| **U35** | Can a `WorktreeCreate` hook be made to acquire a genuine exclusive claim *before* the CLI proceeds, and does the CLI honour a hook failure by refusing to start? | The only route by which a worktree could become a real pre-spawn fence (§5.4). Note it would be Interlock's fence, not the provider's. |
+| **U35** | *(answered here, listed for the register)* Can a `WorktreeCreate` hook acquire an exclusive claim *before* the CLI proceeds, and does a hook failure make the CLI refuse to start? **No to both** — A6 (§3.4.2): the hook fires ~9 s after the spawn, after model turns have run, and a non-zero exit is absorbed by a fallback to the default git logic. | Closes the last route by which a worktree could have been a pre-spawn fence, and shows the fallback is fail-**open** — worth remembering wherever a hook is relied on for anything. |
 | **U36** | Is the "already in use" refusal keyed to the persisted transcript, to a lock file, or to a live process? Evidence is mixed: it survives SIGKILL (U28) and outlives a finished process (E5, C1), and under this worker's sandbox — where transcripts are never written — no state persisted at all. | Determines whether the refusal is inherited by other entry paths (relates to U29) and whether it can be cleared or spoofed by state on disk. |
 | **U37** | Does the U27 race exist on the interactive and Agent-View dispatch paths, or only on `-p`? | Not directly actionable for C1 (no identity input) but bears on any provider that shells out to the CLI. |
 
