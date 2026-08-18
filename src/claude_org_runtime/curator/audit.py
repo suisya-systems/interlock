@@ -10,7 +10,7 @@ An audit that only inspects today's tree satisfies the first and not the second,
 so the audit is written as a checkable predicate over the source tree and run
 from ``tests/curator/test_path_audit.py``. Adding a bypass turns that test red.
 
-Three rules, each aimed at a way the gate could be routed around:
+Four rules, each aimed at a way the gate could be routed around:
 
 ``skill-root-reference-outside-gate``
     Skill material is only nameable through
@@ -353,7 +353,7 @@ def _write_call_detail(node: ast.Call) -> str | None:
     func = node.func
     if isinstance(func, ast.Name):
         if func.id == "open":
-            mode = _open_mode(node)
+            mode = _open_mode(node, 1)
             if mode is None or any(flag in mode for flag in "wax+"):
                 return f"open() in a write mode ({mode or 'mode not statically known'})"
             return None
@@ -363,9 +363,12 @@ def _write_call_detail(node: ast.Call) -> str | None:
 
     if isinstance(func, ast.Attribute):
         if func.attr == "open":
-            mode = _open_mode(node)
-            if mode is not None and any(flag in mode for flag in "wax+"):
-                return f".open({mode!r})"
+            mode = _open_mode(node, 0)
+            # Same fail-closed rule as the builtin: a mode the audit cannot read
+            # statically is assumed to write, or `.open(mode)` would be a hole
+            # exactly where `open(path, mode)` is not.
+            if mode is None or any(flag in mode for flag in "wax+"):
+                return f".open({mode or 'mode not statically known'})"
             return None
         if func.attr == "write":
             return "writes to a file handle"
@@ -377,9 +380,16 @@ def _write_call_detail(node: ast.Call) -> str | None:
     return None
 
 
-def _open_mode(node: ast.Call) -> str | None:
-    if len(node.args) >= 2:
-        arg = node.args[1]
+def _open_mode(node: ast.Call, mode_index: int) -> str | None:
+    """The mode argument, or ``None`` when it is not a literal.
+
+    ``mode_index`` differs between the two call shapes: ``open(path, mode)``
+    carries it second, ``Path(...).open(mode)`` first. Reading the wrong slot
+    made a dynamic ``.open(mode)`` look like a default-mode read.
+    """
+
+    if len(node.args) > mode_index:
+        arg = node.args[mode_index]
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             return arg.value
         return None

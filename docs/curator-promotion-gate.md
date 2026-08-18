@@ -133,4 +133,10 @@ a schema commitment — Q-0001 stays open.
   `skill-path-write` rule follows module-level constants, not arbitrary dataflow.
 - The candidate store is immutable only by convention: the Curator stub does not enforce
   write-once. The digest is what makes that safe — a mutated candidate is refused rather than
-  silently promoted — but a store that rejected rewrites would fail earlier and louder.
+  silently promoted — but a store that rejected rewrites would fail earlier and louder. What the
+  stub *does* enforce is confinement: a candidate id or file name that would escape the store is
+  refused, because such a write could land in skill material directly and never pass the gate.
+- Publication is a staged tree plus a single directory rename, so a session never sees a
+  half-promoted mixture and a file the new candidate dropped does not stay live. The rename is
+  atomic; the retire-then-swap pair around it is not, so a crash in that window can leave the target
+  missing (recoverable by re-running the promotion) — it cannot leave an unapproved tree in place.

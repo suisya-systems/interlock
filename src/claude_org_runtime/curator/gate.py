@@ -24,10 +24,12 @@ in every one of them nothing is written into skill material.
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .digest import candidate_digest, read_tree
 from .ledger import EVENT_APPLIED, EVENT_REFUSED, ApprovalLedger
 from .records import ApprovalRecord, Candidate
 from .skill_root import SkillRoot
@@ -149,10 +151,14 @@ class PromotionGate:
                 approval_id=approval.approval_id,
             )
 
-        # 4. mutated after approval -- the candidate is re-digested from disk
-        # here, at write time, not trusted from whatever produced it.
+        # 4. mutated after approval -- the candidate is read from disk here,
+        # once, and *these bytes* are both what gets digested and what gets
+        # written. Digesting the candidate and then re-reading it at write time
+        # would leave a window in which the two differ, which is the very
+        # substitution the digest exists to catch.
         try:
-            observed_digest = candidate.digest()
+            snapshot = read_tree(candidate.root)
+            observed_digest = candidate_digest(snapshot)
         except (OSError, ValueError) as exc:
             return self._refuse(
                 RefusalReason.CANDIDATE_UNREADABLE,
@@ -183,7 +189,7 @@ class PromotionGate:
                 approval_id=approval.approval_id,
             )
 
-        written = self._write(candidate, destination)
+        written = self._write(snapshot, destination)
         self._ledger.append(
             EVENT_APPLIED,
             candidate_id=candidate.candidate_id,
@@ -196,30 +202,49 @@ class PromotionGate:
 
     # -- the write itself ------------------------------------------------
 
-    def _write(self, candidate: Candidate, destination: Path) -> tuple[str, ...]:
-        """Copy the approved bytes in. The only filesystem write in the package
-        that targets skill material."""
+    def _write(self, snapshot: dict[str, bytes], destination: Path) -> tuple[str, ...]:
+        """Publish the approved bytes. The only filesystem write in the package
+        that targets skill material.
 
-        from .digest import read_tree  # local import keeps the module surface small
+        The whole tree is staged beside the destination and swapped in with a
+        single rename, for two reasons that both come from U8's answer. A
+        running session reads these files at any moment, so a target that is
+        half old tree and half new tree is a state no human approved -- and a
+        file the approved candidate *dropped* would otherwise stay live, making
+        the promoted tree something other than the approved digest.
+        """
 
-        files = read_tree(candidate.root)
-        written: list[str] = []
-        for relative in sorted(files):
-            path = destination / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            handle, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".promote-")
-            try:
-                with os.fdopen(handle, "wb") as stream:
-                    stream.write(files[relative])
+        parent = destination.parent
+        parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(dir=str(parent), prefix=".promote-"))
+        retired: Path | None = None
+        try:
+            for relative in sorted(snapshot):
+                path = staging / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "wb") as stream:
+                    stream.write(snapshot[relative])
                     stream.flush()
                     os.fsync(stream.fileno())
-                os.replace(tmp_name, path)
+
+            if destination.exists() or destination.is_symlink():
+                retired = Path(tempfile.mkdtemp(dir=str(parent), prefix=".retired-"))
+                os.replace(destination, retired / "previous")
+            try:
+                os.replace(staging, destination)
             except BaseException:
-                if os.path.exists(tmp_name):
-                    os.unlink(tmp_name)
+                if retired is not None:
+                    os.replace(retired / "previous", destination)
+                    retired = None
                 raise
-            written.append(str(path))
-        return tuple(written)
+        except BaseException:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        finally:
+            if retired is not None:
+                shutil.rmtree(retired, ignore_errors=True)
+
+        return tuple(str(destination / relative) for relative in sorted(snapshot))
 
     def _refuse(self, reason: str, detail: str, **payload) -> Decision:
         self._ledger.append(EVENT_REFUSED, reason=reason, detail=detail, **payload)

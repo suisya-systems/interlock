@@ -18,7 +18,7 @@ from dataclasses import replace
 import pytest
 
 from claude_org_runtime.curator.gate import RefusalReason
-from claude_org_runtime.curator.records import ApprovalRecord
+from claude_org_runtime.curator.records import ApprovalRecord, Candidate
 
 from .conftest import SKILL_BODY_V1, SKILL_BODY_V2
 
@@ -282,3 +282,102 @@ def test_curator_cannot_reach_skill_material_on_its_own(harness):
 
     assert harness.skill_material() == {}
     assert (harness.store_root / "demo" / "SKILL.md").is_file()
+
+
+# -- the writer itself (review round 1) -----------------------------------
+
+
+def test_curator_cannot_escape_the_candidate_store(harness):
+    """A candidate id that traverses upwards would be a write into skill
+    material, and a write into skill material is a promotion (U8). The Curator
+    is refused the escape rather than trusted not to take it."""
+
+    escape = f"../../{harness.skill_root.name}/evil"
+
+    with pytest.raises(ValueError, match="traverse upwards"):
+        harness.curator.propose(escape, {"SKILL.md": SKILL_BODY_V2})
+
+    with pytest.raises(ValueError, match="traverse upwards"):
+        harness.curator.propose("demo", {"../../evil/SKILL.md": SKILL_BODY_V2})
+
+    with pytest.raises(ValueError, match="must be relative"):
+        harness.curator.propose(str(harness.skill_root / "evil"), {"SKILL.md": "x"})
+
+    assert harness.skill_material() == {}
+
+
+def test_promotion_writes_the_snapshot_it_digested_not_a_later_re_read(harness):
+    """The gate digests and writes one read of the candidate.
+
+    Modelled with a Candidate that lies: it reports the approved digest while
+    the bytes on disk are something else. A gate that trusted the object -- or
+    that digested once and re-read at write time -- would publish the bytes
+    nobody approved.
+    """
+
+    candidate = harness.propose()
+    approval = harness.authority.approve(candidate, "demo")
+    harness.mutate(candidate, SKILL_BODY_V2)
+
+    class LyingCandidate(Candidate):
+        def digest(self) -> str:
+            return approval.content_digest
+
+    decision = harness.gate.promote(
+        LyingCandidate(candidate_id=candidate.candidate_id, root=candidate.root),
+        "demo",
+        approval,
+    )
+
+    assert not decision.allowed
+    assert decision.reason == RefusalReason.DIGEST_MISMATCH
+    assert harness.skill_material() == {}
+
+
+def test_promotion_publishes_exactly_the_approved_tree(harness):
+    """A file the new candidate dropped must not stay live: the promoted tree
+    has to be the tree the digest names, not a merge with what was there."""
+
+    first = harness.curator.propose(
+        "demo", {"SKILL.md": SKILL_BODY_V1, "extra.md": "stale\n"}
+    )
+    first_approval = harness.authority.approve(first, "demo")
+    assert harness.gate.promote(first, "demo", first_approval).allowed
+    assert set(harness.skill_material()) == {"demo/SKILL.md", "demo/extra.md"}
+
+    (first.root / "extra.md").unlink()
+    (first.root / "SKILL.md").write_text(SKILL_BODY_V2, encoding="utf-8")
+    second_approval = harness.authority.approve(first, "demo")
+
+    assert harness.gate.promote(first, "demo", second_approval).allowed
+    assert harness.skill_material() == {"demo/SKILL.md": SKILL_BODY_V2}
+
+
+def test_promotion_leaves_no_staging_directories_behind(harness):
+    """The staging tree is an implementation detail of the swap; a session
+    watching this directory must not find it."""
+
+    candidate = harness.propose()
+    approval = harness.authority.approve(candidate, "demo")
+    assert harness.gate.promote(candidate, "demo", approval).allowed
+
+    leftovers = [
+        path.name
+        for path in harness.skill_root.parent.iterdir()
+        if path.name.startswith((".promote-", ".retired-"))
+    ]
+    assert leftovers == []
+    assert [path.name for path in harness.skill_root.iterdir()] == ["demo"]
+
+
+def test_nested_candidate_files_are_promoted(harness):
+    candidate = harness.curator.propose(
+        "demo", {"SKILL.md": SKILL_BODY_V1, "references/notes.md": "detail\n"}
+    )
+    approval = harness.authority.approve(candidate, "demo")
+
+    assert harness.gate.promote(candidate, "demo", approval).allowed
+    assert harness.skill_material() == {
+        "demo/SKILL.md": SKILL_BODY_V1,
+        "demo/references/notes.md": "detail\n",
+    }

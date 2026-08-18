@@ -269,3 +269,47 @@ def test_every_allowlisted_module_exists(module):
 def test_every_allowlisted_reader_exists_and_is_justified(module):
     assert (PACKAGE_ROOT / module).is_file()
     assert audit.SKILL_PATH_READERS[module].strip()
+
+
+def test_control_path_open_with_a_dynamic_mode_is_treated_as_a_write(tmp_path):
+    """`Path(p).open(mode)` must fail closed exactly like `open(p, mode)`,
+    or it is a hole precisely where the builtin is not."""
+
+    root = build_package(
+        tmp_path,
+        {
+            "curator/exporter.py": """
+                from pathlib import Path
+
+                def export(destination, mode):
+                    return Path(destination).open(mode)
+                """
+        },
+    )
+    assert "unallowlisted-writer" in rules(audit_synthetic(root))
+
+
+def test_control_skill_path_open_with_a_dynamic_mode_is_a_skill_path_write(tmp_path):
+    root = build_package(
+        tmp_path,
+        {
+            "reader.py": """
+                from pathlib import Path
+
+                TEMPLATE = '.claude/skills/org-delegate/references/t.md'
+
+                def touch_it(mode):
+                    return Path(TEMPLATE).open(mode)
+                """
+        },
+    )
+    findings = audit.audit_tree(
+        root,
+        writer_allowlist={
+            "curator/gate.py": "the gate",
+            "curator/ledger.py": "the ledger",
+            "curator/stub.py": "the candidate store",
+        },
+        reader_allowlist={"reader.py": "read-only consumer"},
+    )
+    assert "skill-path-write" in rules(findings)

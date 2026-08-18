@@ -19,6 +19,28 @@ from .ledger import ApprovalLedger
 from .records import ApprovalRecord, Candidate
 
 
+def _confined(component: str, what: str) -> Path:
+    """A relative path that cannot leave the directory it is joined to."""
+
+    if not component or component != component.strip():
+        raise ValueError(f"empty or untrimmed {what}: {component!r}")
+    path = Path(component)
+    if path.is_absolute() or path.drive or path.root:
+        raise ValueError(f"{what} must be relative: {component!r}")
+    if any(part in ("..", "") for part in path.parts):
+        raise ValueError(f"{what} must not traverse upwards: {component!r}")
+    return path
+
+
+def _assert_within(store_root: Path, path: Path) -> None:
+    """Belt and braces: symlinks inside the store could still lead outside."""
+
+    root = store_root.resolve()
+    resolved = path.resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f"candidate escapes the candidate store: {path}")
+
+
 class CuratorStub:
     """Writes candidate knowledge into an immutable-by-convention store."""
 
@@ -26,12 +48,22 @@ class CuratorStub:
         self.store_root = Path(store_root)
 
     def propose(self, candidate_id: str, files: Mapping[str, str | bytes]) -> Candidate:
-        root = self.store_root / candidate_id
+        """Write a candidate into the store.
+
+        Both the candidate id and every file name are confined to the store.
+        Without that, ``propose("../../.claude/skills/evil", ...)`` would be a
+        write into live skill material -- which, per U8, is a promotion -- and it
+        would never pass anywhere near the gate. The Curator's inability to
+        reach skill material is not a matter of it choosing not to.
+        """
+
+        root = self.store_root / _confined(candidate_id, "candidate id")
         for relative, payload in files.items():
-            path = root / relative
+            path = root / _confined(relative, "candidate file")
             path.parent.mkdir(parents=True, exist_ok=True)
             data = payload.encode("utf-8") if isinstance(payload, str) else payload
             path.write_bytes(data)
+        _assert_within(self.store_root, root)
         return Candidate(candidate_id=candidate_id, root=root)
 
 
