@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -36,7 +37,9 @@ OUT_DIR = os.environ.get("I02_OUT", "./results")
 
 # Prepended to every child argv. Used by the internals-free negative so that a
 # restricted harness can still hand the child normal access to its own state.
-CHILD_WRAPPER = os.environ.get("I02_CHILD_WRAPPER", "").split() or []
+# shlex, not .split(): the wrapper argv carries filesystem paths, and a path
+# containing whitespace would otherwise be torn into several bwrap arguments.
+CHILD_WRAPPER = shlex.split(os.environ.get("I02_CHILD_WRAPPER", "")) or []
 
 
 # --------------------------------------------------------------------------
@@ -484,12 +487,14 @@ def do_turn(cwd, prompt, session_id=None, resume=None, kill_after=None,
     deadline = t0 + timeout
     kill_at = None
     signalled = False
+    deadline_fired = False
     watched = []
     while True:
         now = time.time()
         if p.poll() is not None and reader.eof and err_reader.eof:
             break
         if now > deadline:
+            deadline_fired = p.poll() is None
             break
         for ln in reader.drain():
             if first_event_t is None:
@@ -524,8 +529,11 @@ def do_turn(cwd, prompt, session_id=None, resume=None, kill_after=None,
         time.sleep(0.05)
 
     try:
-        p.wait(timeout=30)
-        timed_out = False
+        # A child still running when the deadline fired gets no grace period:
+        # waiting here would let --timeout be exceeded and then record the run
+        # as timed_out: false, which misclassifies the experiment.
+        p.wait(timeout=0 if deadline_fired else 30)
+        timed_out = deadline_fired
     except subprocess.TimeoutExpired:
         # Kill the CLI itself and everything under it, then the spawned process.
         # p.kill() alone signals the spawned pid, which is bwrap when a wrapper

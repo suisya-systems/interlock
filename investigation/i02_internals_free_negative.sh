@@ -72,7 +72,10 @@ cycle "negative:unrestricted" "$UNRESTRICTED_SID" "ZEPHYR-41"
 
 echo
 echo "=== B. negative: harness denied, child not ==="
-I02_CHILD_WRAPPER="${inner[*]}" \
+# %q-quoted, and parsed back with shlex on the Python side, so a path with
+# whitespace in it stays one argument.
+printf -v inner_q '%q ' "${inner[@]}"
+I02_CHILD_WRAPPER="$inner_q" \
   "${outer[@]}" -- bash -c '
     set -euo pipefail
     python3 "$1" selfcheck --label "negative:restricted" --deny-paths "${@:5}"

@@ -141,6 +141,14 @@ and the figures quoted for it below are the re-run ones; the pre-correction runs
 too, and they agree. No other section spawns a detached child, none hit a timeout, and every
 foreground run recorded an empty stderr, so the remaining three defects could not have touched them.
 
+A second review round raised two more, both fixed and neither able to reach a recorded run: the
+timeout path granted a 30 s grace period after the deadline and could then record `timed_out: false`
+(no run in this note hit a timeout at all), and the negative passed the child's `bwrap` argv through
+a space-joined string that a path containing whitespace would have torn apart. The second one changes
+a file that had already produced §3.4's record, so the equivalence was checked rather than assumed:
+the `%q`-quoted, `shlex`-parsed path reconstructs the **same 13-element wrapper argv, byte for byte**,
+as the run recorded in §3.4. None of the paths involved here contains whitespace.
+
 **Harness self-test before any quota was spent.** Every instrument — the SIGTERM path, the CLI-pid
 resolution under a wrapper, the child-`cwd` sampler, the tree-hash differ, both supervisor-restart
 branches, and the negative's `bwrap` plumbing — was first exercised against a stub `claude` binary
