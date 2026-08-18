@@ -13,8 +13,10 @@
 # Usage: i01_internals_free_negative.sh <scratch-dir> <path-to-i01_supervisor_probe.py>
 set -euo pipefail
 
-SCR=${1:?scratch dir}
-PROBE=${2:?probe script}
+SCR=$(readlink -f "${1:?scratch dir}")
+# Resolved before any cd: the runs below execute from inside $SCR, so a
+# relative probe path would not resolve there.
+PROBE=$(readlink -f "${2:?probe script}")
 CFG=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 OUT=${I01_OUT:-$SCR/results}
 

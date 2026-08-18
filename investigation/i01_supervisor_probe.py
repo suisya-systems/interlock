@@ -219,7 +219,12 @@ def comm(p, timeout=180):
     except subprocess.TimeoutExpired:
         p.kill()
         out, err = p.communicate()
-    return (out or b"").decode("utf-8", "replace"), (err or b"").decode("utf-8", "replace")
+    def dec(x):
+        if x is None:
+            return ""
+        return x.decode("utf-8", "replace") if isinstance(x, bytes) else x
+
+    return dec(out), dec(err)
 
 
 def run(args, cwd, timeout=180, env_extra=None):
@@ -696,8 +701,12 @@ def cmd_readback(a):
     with open(spath, "w", encoding="utf-8") as f:
         json.dump(settings, f)
 
+    # The first two cases are deliberately IDENTICAL. Without them, differences
+    # between the flag cases cannot be attributed to instability rather than to
+    # the flags, and no claim about equality checking is supportable.
     for label, extra in (
-        ("baseline", []),
+        ("identical-control-a", []),
+        ("identical-control-b", []),
         ("settings+plan", ["--settings", spath, "--permission-mode", "plan"]),
         ("disallowed-tools", ["--disallowed-tools", "Bash", "--permission-mode",
                               "acceptEdits"]),

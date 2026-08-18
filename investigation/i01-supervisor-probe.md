@@ -33,7 +33,7 @@ Three questions the issue named are answered:
 |---|----------|--------|
 | **U34** | What bounds the admission window? | **Session persistence, not the first API response.** On this machine the transcript file appears at **2.92 s** and `system/init` at **2.83 s**, while the first assistant token arrives at **19.0 s**. The refusal boundary falls between the 2.5 s (admitted) and 3.0 s (refused) sweep rows — i.e. on top of persistence, an order of magnitude before the model answers. |
 | **U36** | What is the refusal keyed to? | **The persisted transcript, within the project directory derived from `cwd`.** A session created with `--no-session-persistence` is re-claimable (exit 0); a persisted one is refused; the same persisted id is admitted from another cwd. No second file carrying the id was found anywhere under the config directory, so no separate lock file is implied. One half is left open: whether deleting the transcript releases the claim — see §3.8.4. |
-| **U3** | Is there a public effective-configuration readback? | **Partly — and it is not a sound equality oracle as it stands.** The `system/init` event on `--output-format stream-json` reports the effective `permissionMode`, the effective `tools` list, `mcp_servers` with status, `model`, `cwd`, `skills`, `plugins`, `agents` and a `capabilities` array. It reports **no hooks and no sandbox** key. And its `tools` list varies between runs for reasons unrelated to the flags (§3.9). |
+| **U3** | Is there a public effective-configuration readback? | **Partly, and it needs a normalisation rule.** The `system/init` event on `--output-format stream-json` reports the effective `permissionMode`, the effective `tools` list, `mcp_servers` with status, `model`, `cwd`, `skills`, `plugins`, `agents` and a `capabilities` array. It reports **no hooks and no sandbox** key. Two runs of an *identical* configuration returned 107 and 128 tools, the entire difference being one MCP server that was `pending` in one and `connected` in the other — so a naive diff is unsound, and requiring every server to read `connected` first is the fix (§3.9). |
 
 Gate-item-8's provider-side input is unambiguous and cheap: obtaining state from N children is
 **not** a blocking operation in the supervisor. A full non-blocking sweep of 8 children costs about
@@ -580,34 +580,46 @@ slash_commands, subtype, terminal_slash_commands, tools, type, uuid
 
 The readback is **effective**, not an echo of argv — the flags change what is reported:
 
-| Case | `permissionMode` reported | `tools` diff vs baseline |
-|------|---------------------------|--------------------------|
-| baseline | `auto` | — (128 tools) |
-| `--settings <deny Bash,WebFetch> --permission-mode plan` | `plan` | removed `Bash`, `WebFetch` |
-| `--disallowed-tools Bash --permission-mode acceptEdits` | `acceptEdits` | removed `Bash` (+ see below) |
+| Case | `permissionMode` reported | `tools` diff vs the control |
+|------|---------------------------|------------------------------|
+| identical-control-a | `auto` | — (107 tools) |
+| identical-control-b | `auto` | — (128 tools) |
+| `--settings <deny Bash,WebFetch> --permission-mode plan` | `plan` | removed `Bash`, `WebFetch`; added `Glob`, `Grep` |
+| `--disallowed-tools Bash --permission-mode acceptEdits` | `acceptEdits` | removed `Bash`; added `Glob`, `Grep` |
 
-`mcp_servers` reports each server with a `status` (`"connected"`), and `capabilities`,
-`claude_code_version` and `memory_paths` are reported too.
+`mcp_servers` reports each server with a `status`, and `capabilities`, `claude_code_version` and
+`memory_paths` are reported too.
 
 **So a public effective-configuration readback exists — for permission mode, the effective tool set,
 and MCP servers. It does not exist for hooks or sandbox.** There is no `hooks` key, no `sandbox`
 key, and no `permissions` key: the *rules* are not reported, only the tool list they produce. That
 matters because item 3's predicate names "permission / sandbox / hook configuration" as one object.
 
-**And the readback is not a sound equality oracle as it stands.** Comparing the three runs' `tools`
-lists shows differences that no flag explains:
+**And the `tools` array is not stable across identical runs — but the instability is explained, and
+that changes what item 3 should do about it.** The first version of this experiment compared three
+runs with three *different* configurations and inferred instability from their differences; that
+inference was unsound, because the flags could have caused every difference. Two runs of an
+**identical** configuration were therefore added as a control:
 
 ```
-settings+plan      | removed vs baseline: [Bash, WebFetch]              | added: [Glob, Grep]
-disallowed-tools   | removed vs baseline: [Bash, ListMcpResourcesTool,
-                     ReadMcpResourceDirTool, ReadMcpResourceTool,
-                     mcp__claude_ai_Slack__* (18 tools)]                | added: [Glob, Grep]
+identical-control-a : 107 tools   mcp_servers: [... "claude.ai Slack": pending   ...]
+identical-control-b : 128 tools   mcp_servers: [... "claude.ai Slack": connected ...]
+
+in a but not b: (nothing)
+in b but not a: ListMcpResourcesTool, ReadMcpResourceDirTool, ReadMcpResourceTool,
+                mcp__claude_ai_Slack__* (18 tools)      -- 21 tools in total
+permissionMode a/b: auto / auto
 ```
 
-`Glob` and `Grep` appear in both non-baseline runs and not in the baseline; the entire Slack MCP tool
-family vanishes in the third run, which asked only to disallow `Bash`. The plausible cause is MCP
-connection timing and deferred tool loading at startup, not configuration — but whatever the cause,
-**two runs of the same configuration can report different `tools` arrays**.
+**Two runs of one configuration do return different `tools` arrays**, and the whole difference is
+the tool family of the one MCP server whose `status` differs. So `init` is emitted before every MCP
+server has finished connecting, and `tools` is a snapshot of whatever was connected at that instant.
+
+That is a better result than "unstable", because the same event carries the explanation: **the
+`mcp_servers` statuses are the normalisation rule.** A comparison that requires every server to read
+`connected` before it trusts the `tools` array — or that compares only the non-MCP tools — is sound;
+a naive diff is not. It also corrects the earlier reading of `Glob` and `Grep`: they appear in both
+flag cases and in neither control run, so they are caused by the flags, not by timing.
 
 **Proposed reading for item 3.** The equality check in `ACCEPTANCE.md` §1 item 3 becomes *partly*
 runnable as written — `permissionMode` can be diffed across a restart directly. It does **not**
@@ -795,11 +807,14 @@ Two provisos a reader should carry forward:
 ### 5.2 Item 3 — effective configuration
 
 **Proposed: partial readback exists; D-0023's weakening is still needed, and can be narrowed.**
-`permissionMode` is directly readable and reflects the flags; the effective tool list and MCP server
-statuses are readable but **not stable across runs**; hooks and sandbox are reported by no public
-surface examined (§3.9). So item 3's equality check becomes runnable for permission mode, remains
-unrunnable for hooks and sandbox, and needs a normalisation rule before the tool list can be diffed
-at all. #9's breach battery cannot be reduced to a complement on this evidence.
+`permissionMode` is directly readable and reflects the flags. The effective tool list is readable but
+is a snapshot taken while MCP servers are still connecting, so it is diffable only under the
+normalisation the same event supplies — every `mcp_servers` entry `connected`, or MCP tools excluded
+from the comparison (§3.9). Hooks and sandbox are reported by no public surface examined. So item 3's
+equality check becomes runnable for permission mode, runnable-with-normalisation for the tool set,
+and remains unrunnable for hooks and sandbox. #9's breach battery therefore cannot be reduced to a
+complement on this evidence, and D-0023 stands — but the part of item 3 it has to cover is smaller
+than it was.
 
 ### 5.3 Item 8 — Secretary responsiveness under worker load
 
@@ -845,7 +860,7 @@ assign.
 | **U38** | Does **removing the persisted transcript release the "already in use" claim**? Attempted here and **blocked by this worker's own classifier** (§3.8.4); not answered. | Closes U36's remaining half. If removal releases the claim, on-disk state can clear or spoof it, and the id is not durable in the way U28's positive suggested. |
 | **U39** | *(answered here, listed for the register)* Is the `-p` claim **global or per-project**? **Per-project** — the same id is admitted from a different `cwd`, leaving two transcripts under one session id (§3.8.3). | A second admission route needing no race. A worktree-per-worker arrangement plus a retry reproduces it deterministically. |
 | **U40** | Is there **any** public surface reporting a running worker's effective **hooks** and **sandbox** configuration? None was found (§3.9); only permission mode, the tool list and MCP status are exposed. | Decides how far D-0023's weakening of item 3 must extend, and whether #9's battery can ever shrink. |
-| **U41** | What normalisation makes the `init` **`tools`** array a sound equality oracle? Two runs of the same configuration reported different arrays — `Glob`/`Grep` appearing, an entire MCP tool family vanishing (§3.9). | Without it, item 3's diff produces false mismatches, which is worse than no check: a flapping oracle trains people to ignore it. |
+| **U41** | *(partly answered here)* The `init` **`tools`** array differs between two runs of an identical configuration, and the difference is exactly the tool family of the one MCP server reported `pending` rather than `connected` (§3.9). Does requiring every `mcp_servers` entry to read `connected` make the array a sound equality oracle, or are there other sources of drift — plugin load order, deferred tools, skills? | Decides whether item 3's tool-set diff is usable at all. A flapping oracle is worse than no check, and the normalisation has to be shown sufficient rather than assumed. |
 | **U42** | Is **SIGINT exiting 0** with `is_error: true` intentional and stable across versions, or an artifact? (§3.4) | A supervisor's cancel path runs through exactly this case. If a future version changes it, code that reads the body rather than rc is unaffected — which is the argument for writing it that way now. |
 | **U43** | Is there any public CLI way to **enumerate or reclaim running `-p` children** after a supervisor restart? `claude agents` covers background sessions only, and §3.6's orphans held no roster row. | Determines whether C2's restart-side reclaim can use the provider at all, or must be entirely Interlock's durable pid/pgid record. |
 | **U44** | Does `--no-session-persistence` mean a session has **no claim at all** for its whole life (§3.8.3a), and if so, is any `-p` mode both non-persistent and fenced? | Rules a mode in or out for any use that assumed the refusal applies universally. |
