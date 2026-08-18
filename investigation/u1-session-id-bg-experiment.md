@@ -30,7 +30,7 @@ change what the negative result *means*:
 |---|---|---|
 | **A** | Under `--bg`, the UUID-collision case is **not detected at all** — the flag is discarded before any collision check runs, so a colliding UUID behaves identically to a fresh one (warning, exit 0, brand-new id). | There is no `--bg` collision behaviour to design against, because there is no `--bg` identity input. |
 | **B** | On the `-p` surface `--session-id` **is** honoured exactly: the requested UUID comes back as `session_id` in `--output-format json`. | The flag is functional. The discard is specific to `--bg`, not a broken flag. |
-| **C** | On the `-p` surface a **second** process asking for an in-use UUID is **refused**: `Error: Session ID <uuid> is already in use.`, exit **1**, no session started. | This is exactly the pre-spawn fence F6 asks for — and it exists. It is simply not reachable from `--bg` (V18, re-confirmed below). It closes the single-writer half of **U13** for the `-p`/SDK surface. |
+| **C** | On the `-p` surface a **second** process asking for an in-use UUID is **refused**: `Error: Session ID <uuid> is already in use.`, exit **1**, no session started. Tested both against a *finished* session (E5) and against a **live, mid-turn** one (E7), where the first process kept the UUID and completed normally. | This is exactly the pre-spawn fence F6 asks for — and it exists. It is simply not reachable from `--bg` (V18, re-confirmed below). It answers the single-writer half of **U13** for the `-p` **CLI** surface. It is *not* evidence about the SDK (see U29) and not about the crash case (U28). |
 
 Result **C** is the most consequential finding beyond U1 itself, and it is a *new* fact: the proposal
 recorded (§5.3, O6) that "no source states a second process using the same UUID is **refused**". One
@@ -74,8 +74,8 @@ only at runtime, as the warning in §3.2.
 
 ## 3. Transcript
 
-All commands and raw output, verbatim and in execution order. Four model-backed invocations were made
-in total: two real `--bg` sessions (E2, E3) and two `-p` runs (E4, E5). Both background sessions were
+All commands and raw output, verbatim and in execution order. Six model-backed invocations were made
+in total: two real `--bg` sessions (E2, E3) and four `-p` runs (E4, E5, and E7's two). Both background sessions were
 stopped and removed afterwards (§4).
 
 ### 3.1 E1 — baseline roster
@@ -218,7 +218,11 @@ Error: Session ID 02be33b3-d084-4f9a-b4f8-a39e2d8cfe71 is already in use.
 --- EXIT CODE: 1 ---
 ```
 
-Refused, exit 1, nothing on stdout, no session started. **The second writer is excluded.**
+Refused, exit 1, nothing on stdout, no session started.
+
+**Read this narrowly.** E4's process had already exited when E5 ran, so on its own E5 shows only that a
+*persisted* session id cannot be re-claimed. That is not the same as excluding a **live** second
+writer, which is what U13 asks and what gate item 2 needs. E7 was run to close that gap.
 
 ### 3.6 E6 — re-confirming V18 on this build
 
@@ -232,6 +236,42 @@ so the job would be unattachable. The prompt is the positional — drop --print:
 V18 holds on 2.1.234, and the message states the *reason*: `--print` never starts the interactive
 session that `claude agents` attaches to. The two surfaces are mutually exclusive by construction, not
 by oversight — which matters for §5.
+
+### 3.7 E7 — concurrent claimant against a **live** session
+
+*Run after the others, to close the gap E5 leaves.* A first process was started with a chosen UUID
+and a prompt long enough to keep it mid-turn; while it was still running (verified with `kill -0` immediately before launching the second), a second process
+claimed the same UUID:
+
+```
+UUID_C=c54a9db9-a4d1-4445-940d-05d84408d385
+
+# P1, backgrounded by the shell, still running:
+$ claude -p --session-id $UUID_C "Count from 1 to 30, writing one short sentence about each number. Take your time." --output-format json &
+P1 pid=979196
+
+CONFIRMED: P1 still running at moment of P2 launch
+
+# P2, launched ~3s later while P1 is alive and mid-turn:
+$ claude -p --session-id $UUID_C "reply with ok" --output-format json
+--- P2 stdout ---
+(empty)
+--- P2 stderr ---
+Error: Session ID c54a9db9-a4d1-4445-940d-05d84408d385 is already in use.
+P2 EXIT CODE: 1
+
+# P1 then completed normally, keeping the id:
+P1 EXIT CODE: 0
+P1 session_id: c54a9db9-a4d1-4445-940d-05d84408d385
+```
+
+**The live second writer is excluded, and the first writer is unaffected** — it neither aborted nor
+lost the id. This is the property item 2 needs from a fence: one claimant proceeds, the other is
+refused rather than admitted alongside it.
+
+Still not shown by E7: behaviour when the two processes start *simultaneously* (a genuine race on the
+claim itself, rather than a second claim arriving after the first is established), and behaviour after
+the holder is killed ungracefully. See U27/U28.
 
 ---
 
@@ -300,18 +340,28 @@ This is the result that should shape the `Q-0004` conversation. F6 asks what wou
 > some identifier or token committed to SQLite before the spawn that the second writer's protected
 > writes must carry and that the first commit invalidates
 
-E4 and E5 together show the CLI already implements precisely that, on the `-p` surface: the caller
-chooses the UUID before the spawn (E4), and a second process claiming it is **refused with exit 1**
-(E5). That is a pre-spawn fence with second-writer exclusion — the exact shape item 2 needs.
+E4, E5 and E7 together show the CLI already implements precisely that, on the `-p` surface: the caller
+chooses the UUID before the spawn (E4), a second process claiming a finished session's id is refused
+(E5), and — the case that actually matters — a second process claiming a **live** session's id is
+**refused with exit 1 while the first writer proceeds unharmed** (E7). That is a pre-spawn fence with
+second-writer exclusion, the exact shape item 2 needs.
 
 Two consequences, both proposals:
 
-1. **`U13` is answered for the `-p`/SDK surface, and O6 should be re-scored.** §5.3 grades C2 as `~`
-   on O6 with the reason "no source states a second process using the same UUID is **refused**". One
-   now does. If a human accepts this experiment as evidence, C2's O6 grade moves toward `Y` — which
-   materially changes the `Q-0004` comparison, because O6 was named as *the* decisive obligation.
-   Whether the refusal is a property of the shared session store (and so would apply to any surface
-   that let you name an id) or only of the `-p` code path is **not** established here; see §6.
+1. **`U13` is answered for the `-p` CLI surface, and O6 should be re-scored for C2.** §5.3 grades C2
+   as `~` on O6 with the reason "no source states a second process using the same UUID is
+   **refused**". One now does, including for a live session. If a human accepts this experiment as
+   evidence, C2's O6 grade moves toward `Y` — which materially changes the `Q-0004` comparison,
+   because O6 was named as *the* decisive obligation.
+
+   **Two limits on how far this may be carried, both deliberate.** First, it is evidence about the
+   `-p` **CLI** surface only. C3 is the Agent SDK, and although `W1a` records that the SDK's default
+   arrangement is a spawned CLI child — which makes inheritance plausible — plausibility is not what
+   this document trades in (§1.1). C3's O6 grade should not move on this result; see U29. Second,
+   E7 establishes exclusion against an *established* holder, not atomicity under a simultaneous race,
+   and says nothing about what happens after an ungraceful kill — which is the injection point item 2
+   actually names. So this raises C2's floor; it does not by itself discharge item 2 for C2. See
+   U27/U28.
 
 2. **The exclusion is unreachable from Agent View, and E6 says why.** `--bg` and `-p` conflict because
    `--print` never starts the interactive session `claude agents` attaches to. So this is not a gap
@@ -327,9 +377,10 @@ Two consequences, both proposals:
 - It does not propose softening item 2. Per F6, an adoption rule that picks a winner without proving
   the loser never wrote would be a reclassification wearing the clothes of a mitigation; the honest
   move on a negative U1 is to fail the item and change providers, not to redefine the predicate.
-- The `-p` refusal was observed once, against a session created seconds earlier in the same directory.
-  It was not tested across directories, across concurrent live processes racing for the same id, or
-  after an ungraceful kill — the injection points item 2 actually names. See §6.
+- The `-p` refusal was observed against a finished holder (E5) and a live one (E7), both in the same
+  directory. It was **not** tested across directories, under a simultaneous race on the claim itself,
+  or after an ungraceful kill of the holder — and that last one is the injection point item 2 actually
+  names. See U27/U28.
 
 ---
 
@@ -339,9 +390,9 @@ Proposed additions to the Appendix A register, in its style. None was tested her
 
 | # | Question | Why it matters |
 |---|---|---|
-| **U27** | Is the `-p` "already in use" refusal (E5) atomic against *concurrent* claimants, or is it a check-then-create with a race window? Item 2's predicate is about a kill-and-retry race, so a non-atomic check does not discharge it. | Decides whether §5.3's rescue is real for C2 or only apparent. This is the single highest-value follow-up. |
-| **U28** | Does the refusal survive the injection points item 2 names — a kill between claim and first write, a stale session file from an ungracefully-killed process, an id whose session is `done` vs still live? E5 tested only the live-and-healthy case. | A fence that releases on crash is not a fence for the crash window. |
-| **U29** | Is the refusal enforced by the shared session store or only by the `-p` entry path? If the former, a provider built on the SDK (`W1a`: a spawned CLI child) inherits it; if the latter, it may not. | Determines whether C2 and C3 both inherit the E5 property or only C2. |
+| **U27** | Is the `-p` refusal **atomic** under a genuine race — two processes issuing the claim simultaneously — or a check-then-create with a window? E7 shows exclusion of a claimant arriving *after* the holder is established, which is weaker. | Item 2's predicate is a kill-and-retry race. A non-atomic check does not discharge it. Highest-value follow-up. |
+| **U28** | Does the refusal survive an **ungraceful kill** of the holder — and in which direction does it fail? Both failure modes are live: a lock that *releases* leaves the crash window open, and one that *never* releases makes the id permanently unusable and breaks retry. E5 covered the cleanly-finished case, E7 the live case; neither covers SIGKILL. | A fence that releases on crash is not a fence for the crash window; one that never releases is an availability bug. |
+| **U29** | Is the refusal enforced by the shared session store or only by the `-p` entry path? If the former, a provider built on the SDK (`W1a`: a spawned CLI child) inherits it; if the latter, it may not. | Determines whether C3 inherits the E5/E7 property or only C2 has it. §5.3 deliberately does **not** move C3's O6 grade pending this. |
 | **U30** | Does `--session-id` compose with `--bg --exec`? Not tested — and per F4 a job has no conversation, so a positive result there would be a false positive for U1 and must not be read as one. | Guards against a later probe "re-answering" U1 the wrong way. |
 | **U31** | Is the E2/E3 warning emitted on stdout or stderr, and is it stable enough to detect programmatically? Not separated in this run (output was captured combined). | Only matters as a stopgap; §5.2's roster readback is the sound approach regardless. |
 
