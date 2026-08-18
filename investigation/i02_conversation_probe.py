@@ -785,14 +785,20 @@ def cmd_restart(a):
                 pass
     else:
         resolution.update({"action": "confirmed_already_gone"
-                                     if not alive(pid) else "pid_not_ours"})
-    resolution["alive_after_resolution"] = alive(pid) and is_ours
+                                     if not alive(pid) else "unresolved_but_alive"})
+    # Fail closed. A live pid that could not be positively identified is still a
+    # candidate second writer -- its command line may simply have become
+    # unreadable -- so it blocks the resume exactly as an identified one would.
+    # Only a pid confirmed gone clears the way.
+    resolution["alive_after_resolution"] = alive(pid)
     rec("restart_child_resolution", {"label": a.label, "resolution": resolution,
                                      "persisted_state": state})
     if resolution["alive_after_resolution"]:
         rec("restart_aborted", {"label": a.label,
-                                "reason": "child still alive; refusing to resume "
-                                          "past a live writer"})
+                                "reason": "the persisted pid is still alive "
+                                          "(identified: %s); refusing to resume "
+                                          "past a possible second writer"
+                                          % resolution["identified_as_our_child"]})
         return
     do_turn(cwd=state["cwd"], prompt=a.prompt, resume=sid,
             label=a.label + ":resume-after-restart",
@@ -916,6 +922,42 @@ def cmd_selfcheck(a):
                       "harness_view": denial_selfcheck(a.deny_paths or [])})
 
 
+def cmd_verify_cycle(a):
+    """Assert the recorded outcome of a create-and-resume pair.
+
+    A negative that cannot fail proves nothing. The shell driver used to finish
+    successfully as long as a transcript existed -- which the *first* turn
+    creates -- so a resume that returned the wrong word, or returned nonzero,
+    would still have read as a pass. This checks both turns and exits nonzero.
+    """
+    path = os.path.join(OUT_DIR, "records.jsonl")
+    rows = [json.loads(l) for l in open(path, encoding="utf-8")]
+    turns = {r["label"]: r for r in rows if r.get("step") == "turn"
+             and r.get("label", "").startswith(a.prefix)}
+    bad = []
+    for suffix in ("create", "resume"):
+        r = turns.get(a.prefix + ":" + suffix)
+        if r is None:
+            bad.append("%s:%s missing" % (a.prefix, suffix))
+            continue
+        if r["rc"] != 0:
+            bad.append("%s:%s rc=%s" % (a.prefix, suffix, r["rc"]))
+        want = r.get("requested_session_id") or r.get("resumed")
+        got = (r.get("init") or {}).get("session_id")
+        if want and got != want:
+            bad.append("%s:%s reported session id %s, wanted %s"
+                       % (a.prefix, suffix, got, want))
+    resume = turns.get(a.prefix + ":resume") or {}
+    result = ((resume.get("result") or {}).get("result")) or ""
+    if a.codeword not in result:
+        bad.append("%s:resume did not recall %s (result=%r)"
+                   % (a.prefix, a.codeword, result[:120]))
+    rec("verify_cycle", {"prefix": a.prefix, "codeword": a.codeword,
+                         "failures": bad, "passed": not bad})
+    if bad:
+        raise SystemExit("NEGATIVE FAILED: " + "; ".join(bad))
+
+
 def cmd_env(a):
     for argv in (["--version"], ["doctor"]):
         r = run_plain([CLAUDE] + argv, os.path.abspath(a.cwd), timeout=120)
@@ -1005,6 +1047,11 @@ def main():
     p.add_argument("--arms", nargs="*",
                    default=["default", "strict-mcp", "strict-mcp+user-settings"])
     p.set_defaults(fn=cmd_costab)
+
+    p = sub.add_parser("verify-cycle")
+    p.add_argument("--prefix", required=True)
+    p.add_argument("--codeword", required=True)
+    p.set_defaults(fn=cmd_verify_cycle)
 
     p = sub.add_parser("selfcheck")
     p.add_argument("--label", default="")

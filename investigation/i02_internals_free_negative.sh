@@ -69,6 +69,9 @@ cycle() {                      # $1 label, $2 session id, $3 codeword
 echo
 echo "=== A. control: harness unrestricted ==="
 cycle "negative:unrestricted" "$UNRESTRICTED_SID" "ZEPHYR-41"
+# A negative that cannot fail proves nothing: the transcript check in C is
+# satisfied by the FIRST turn, so continuity is asserted here instead.
+python3 "$PROBE" verify-cycle --prefix negative:unrestricted --codeword ZEPHYR-41
 
 echo
 echo "=== B. negative: harness denied, child not ==="
@@ -86,6 +89,7 @@ I02_CHILD_WRAPPER="$inner_q" \
       --label "negative:restricted:resume" \
       --prompt "What codeword did I ask you to remember? Reply with just the word."
   ' _ "$PROBE" "$FIXTURE" "$RESTRICTED_SID" "MARJORAM-92" "${deny[@]}"
+python3 "$PROBE" verify-cycle --prefix negative:restricted --codeword MARJORAM-92
 
 echo
 echo "=== C. observer (outside the harness): did the restricted run's child write"

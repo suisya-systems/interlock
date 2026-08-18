@@ -149,6 +149,19 @@ a file that had already produced §3.4's record, so the equivalence was checked 
 the `%q`-quoted, `shlex`-parsed path reconstructs the **same 13-element wrapper argv, byte for byte**,
 as the run recorded in §3.4. None of the paths involved here contains whitespace.
 
+A third round raised two more, both fixed and neither reaching a recorded run either. The restart path
+computed "is the child still alive?" as *alive **and** positively identified*, so a live pid whose
+command line had become unreadable would have been treated as gone and the resume issued past it —
+the exact unsafe order §3.3 says the harness refuses. It now fails closed on **any** live persisted
+pid, identified or not, and the check was exercised against a live process the state file does not
+describe. And the negative's shell driver could not fail: its transcript check is satisfied by the
+*first* turn, so a resume returning the wrong word would still have read as a pass. Continuity is now
+asserted from the records (`verify-cycle`), which exits nonzero on a wrong codeword, a nonzero rc or
+a session id that does not match. Run against the records §3.4 already produced, it **passes on both
+halves**; run against the same records with the codeword doctored, it fails. Neither defect could have
+altered §3.3 or §3.4, because every recorded restart resolved to a pid confirmed gone or positively
+identified, and both recorded cycles returned rc 0 with the right codeword.
+
 **Harness self-test before any quota was spent.** Every instrument — the SIGTERM path, the CLI-pid
 resolution under a wrapper, the child-`cwd` sampler, the tree-hash differ, both supervisor-restart
 branches, and the negative's `bwrap` plumbing — was first exercised against a stub `claude` binary
