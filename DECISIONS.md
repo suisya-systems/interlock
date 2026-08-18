@@ -1129,10 +1129,12 @@ itself still runs on every registration before delegating to `StoreMixin`, but i
 does — every scenario builds the broker with `adapter=None` — so what that row carries is transport-neutral
 even though the object it drives is not. In `tests/broker/test_delivery.py` it is driven
 deliberately: `test_stale_lease_is_released_when_the_pane_died_out_of_band` (test_delivery.py:1378)
-builds the broker with a live fake adapter, kills the pane, and asserts the lease is released and
-the delivery credential revoked, and several adopt tests do the same. So a lease-release invariant
-is, in that file, *defined by* pane death — the same entanglement the `broker/store.py` row now
-records on the source side. The boundary between the carried invariant and the discarded mechanism
+builds the broker with a live fake adapter, calls `kill_pane`, and asserts the stale lease is released and the
+delivery credential revoked. It is the only test in the file that kills a pane, and the distinction matters:
+the neighbouring adopt tests reach a *different* pane-conditioned path — store-side adoption rollback, where a
+detached pane's survival decides whether an expired adoption restores the previous instance (the
+`broker/store.py` row records that half). So two separate delivery invariants, one server-side and one
+store-side, are each conditioned on pane state. The boundary between the carried invariant and the discarded mechanism
 therefore runs *through* `broker/server.py` rather than between modules, and the ledger records it
 as if it ran between them.
 
