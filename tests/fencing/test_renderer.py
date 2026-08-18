@@ -131,28 +131,51 @@ class TestRenders:
         # Renders rather than refusing -- the actual regression.
         assert render_fence("worker", ctx, document=document).rules
 
-    def test_a_backslash_bearing_path_survives_into_the_hook_command(
-        self, tmp_path, document
-    ):
-        """Windows paths are the reason the quoting is not optional.
+    def test_shlex_mangles_an_unquoted_backslash_path_and_quoting_prevents_it(self):
+        """The hazard the quoting exists for, at the string level.
 
-        ``shlex.split`` treats a backslash as an escape, so an *unquoted*
-        ``C:\\Users\\...`` is silently mangled -- and the mangled token then
-        fails the hook-path check, refusing every render on that platform.
-        This asserts the roundtrip on any platform, using a literal backslash.
+        ``shlex.split`` treats a backslash as an escape *on every platform*, so
+        an unquoted ``C:\\Users\\...`` is silently mangled -- and the mangled
+        token then fails the hook-path check, refusing every render there.
+
+        This asserts both halves: that the hazard is real, and that quoting
+        removes it. It touches no filesystem, because the property is about
+        string handling and the first version of this test failed on Windows
+        for a reason that had nothing to do with the property -- it tried to
+        ``mkdir`` a directory whose name contained a literal backslash, which
+        Windows cannot represent at all.
         """
 
         import shlex
+
+        raw = "C:\\Users\\happy\\interlock\\fence.json"
+        assert "\\" in raw
+        # The hazard: unquoted, the backslashes are eaten.
+        assert shlex.split("py " + raw)[1] != raw
+        # The fix: quoted, the token survives intact.
+        assert shlex.split("py " + shlex.quote(raw))[1] == raw
+
+    def test_the_renderers_own_output_roundtrips_through_shlex(self, tmp_path, document):
+        """The same property, on the bytes the renderer actually emits.
+
+        The context paths are never created: rendering does not touch the
+        filesystem for them, so a synthetic path exercises the quoting without
+        needing a directory name the host may forbid. On Windows these paths
+        carry real backslashes; on POSIX the space in the name is what forces
+        the quoting.
+        """
+
+        import shlex
+
         from claude_org_runtime.fencing import FenceContext, default_hook_script
 
-        odd = tmp_path / "back\\slash dir"
-        odd.mkdir()
+        root = tmp_path / "a dir with spaces" / "never created"
         ctx = FenceContext(
-            interlock_root=odd,
-            worker_dir=odd / "w",
-            claude_org_path=odd / "org",
+            interlock_root=root,
+            worker_dir=root / "w",
+            claude_org_path=root / "org",
             hook_script=default_hook_script(),
-            fence_path=odd / "fence.json",
+            fence_path=root / "state" / "fence.json",
         )
         fence = render_fence("worker", ctx, document=document)
         command = [
@@ -162,6 +185,7 @@ class TestRenders:
         ][0]
         tokens = shlex.split(command)
         assert tokens[tokens.index("--fence") + 1] == str(ctx.fence_path)
+        assert tokens[0] == ctx.python
 
     def test_rendering_is_deterministic(self, ctx, document):
         """Two renders must be byte-identical, or a restart diff means nothing."""
