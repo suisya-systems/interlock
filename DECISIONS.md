@@ -82,6 +82,8 @@ figures are **measured baseline**.
 | Q-0019 | Who owns each of the retired loop's non-detection duties | proposed |
 | Q-0020 | What an incompatible CLI capability probe implies for already-running sessions | proposed |
 | Q-0021 | What scaffold makes each Agent View gate item checkable before implementation | proposed |
+| Q-0022 | Whether a carried artifact may keep enumerating v1 pane vocabulary as a normative list | proposed |
+| Q-0023 | Whether a carried test may drive a `discard`-classed module to reach the contract it pins | proposed |
 
 ---
 
@@ -1077,3 +1079,56 @@ handler) built as part of the Agent View spike specifically so the gate is check
 distinction between "proven on the spike slice" and "re-proven on the real implementation" made
 explicit. `ACCEPTANCE.md` separates the pre-implementation gate from the inherited criteria, which
 is the shape such a decision would formalise.
+
+### Q-0022 — May a carried artifact keep enumerating v1 pane vocabulary as a normative list?
+
+**Status.** proposed
+
+**Question.** `tests/scrub/scrub_fixture.py` and `docs/scrub-policy.md` are both classified `carry`
+in `PORTING_LEDGER.md`, and both enumerate `pane_id` and `pane_name` among the structural
+identifiers that are **never** modified. The redaction rules themselves are transport-neutral and
+genuinely carry. But `schema/enums.py` was reclassified `rewrite` in this ledger precisely because
+it defines a pane vocabulary that the closed fact-state set (D-0005) replaces, and the fixtures the
+scrubber produces (`tests/fixtures/synthetic/`) are classified `rewrite` for being v1-specific.
+Does the scrubber's preserved-field allowlist, and the policy document that makes it normative,
+have to be re-derived along with the vocabulary it names?
+
+**Why unresolved.** The distinction is real in both directions and the Issue settles neither. Read
+one way, an allowlist of field names is an implementation detail of a tool whose contract — redact
+PII and secrets deterministically, preserve identifiers the tests assert on — survives the move
+intact, and rewriting it is churn. Read the other way, `docs/scrub-policy.md` is a **policy**: it
+states which identifiers are structural, and that statement is v1's answer, made under a scheme
+where a pane was an identity. Carrying it unchanged re-authorises the vocabulary as normative in v2
+by omission rather than by decision. This audit found the tension but not the evidence to settle it,
+so neither row was reclassified.
+
+**What would settle it.** A decision taken when the SQLite fixture shape is fixed (Q-0001), naming
+which identifiers are structural in Interlock and whether the scrub policy is re-authored or
+amended. Related: Q-0006 (retention and scrubbing policy for evidence references), Q-0016 (which
+quarry lessons become decisions).
+
+### Q-0023 — May a carried test drive a `discard`-classed module to reach the contract it pins?
+
+**Status.** proposed
+
+**Question.** Several hybrid test rows reach their subject only through a module this ledger
+classifies `discard`. `tests/attention/test_broker_journal_contract.py` — carried specifically
+because it is an accident-derived fixture that pins a producer↔consumer contract end to end —
+imports and instantiates `Broker` from `broker/server.py`. `tests/broker/test_store.py` and
+`tests/broker/test_delivery.py` do the same. The invariant under test is Carry-bucket material; the
+only available way to exercise it end to end is the discarded module. What does "carried" mean for
+such a test before its subject's replacement exists?
+
+**Why unresolved.** The `discard` verdict on `broker/server.py` rests on the claim that the
+delivery-relevant logic lives in `store.py`, leaving server.py as pane machinery. That is not quite
+exact: server.py overrides `register_delivery_instance` to add pane-liveness-driven lease release.
+The override is dormant in these tests — every scenario constructs the broker with `adapter=None`,
+so the branch never executes — which is why no row was reclassified here. But it means the boundary
+between the carried invariant and the discarded mechanism runs *through* a module rather than
+between modules, and the ledger currently records it as if it ran between them.
+
+**What would settle it.** A decision, taken with the `MessageBus` contract, on whether an
+end-to-end carried test is landed as a failing specification against the new contract (see Q-0015)
+or is permitted to keep driving the old module until the replacement lands — and, either way, an
+explicit statement of where the delivery/session boundary inside `broker/server.py` actually falls.
+Related: Q-0015 (sequencing of carried tests), D-0009 (`SessionProvider` / `MessageBus` separation).
