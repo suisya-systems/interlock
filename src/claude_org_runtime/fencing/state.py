@@ -119,7 +119,11 @@ def write_fence(fence: Fence, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     body = json.dumps(fence_to_json(fence), sort_keys=True, indent=2) + "\n"
-    with tmp.open("w", encoding="utf-8") as handle:
+    # ``newline=""`` pins the line endings to the ``\n`` in ``body``. Text mode
+    # would emit CRLF on Windows, making the same fence a different file
+    # byte-for-byte depending on where it was published -- and the rollback in
+    # ``spawn.py`` restores this file by bytes.
+    with tmp.open("w", encoding="utf-8", newline="") as handle:
         handle.write(body)
         handle.flush()
         os.fsync(handle.fileno())

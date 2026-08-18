@@ -209,6 +209,47 @@ class TestPersistenceFailsClosed:
         with pytest.raises(FenceStateError):
             read_fence(outcome.plan.fence_path)
 
+    def test_the_published_files_carry_lf_endings_on_every_platform(
+        self, ctx, document, ledger
+    ):
+        """Same convention as ``curator.ledger`` (PR #35).
+
+        Text mode emits CRLF on Windows, which would make the same fence a
+        different file byte-for-byte depending on where it was published --
+        and the publication rollback in ``spawn.py`` restores this file **by
+        bytes**, so a platform-dependent separator would turn "put it back" into
+        "put something else back".
+        """
+
+        outcome = spawn(ctx, document, ledger)
+        for path in (outcome.plan.fence_path, outcome.plan.settings_path, ledger.path):
+            raw = path.read_bytes()
+            assert b"\r\n" not in raw, path
+            assert raw.endswith(b"\n"), path
+
+    def test_a_crlf_rewrite_of_the_fence_does_not_survive_a_republish(
+        self, ctx, document, ledger
+    ):
+        """The Windows failure, reproduced deliberately on any platform.
+
+        A fence rewritten with CRLF is different bytes. Re-publishing must put
+        the LF form back, or the rollback path would be restoring a file the
+        renderer never produced.
+        """
+
+        outcome = spawn(ctx, document, ledger)
+        path = outcome.plan.fence_path
+        # Read before opening for write: "w" truncates, so reading inside the
+        # ``with`` would have written an empty file and asserted on nothing.
+        body = path.read_text(encoding="utf-8")
+        with open(path, "w", encoding="utf-8", newline="\r\n") as handle:
+            handle.write(body)
+        assert b"\r\n" in path.read_bytes()
+
+        write_fence(outcome.fence, path)
+        assert b"\r\n" not in path.read_bytes()
+        assert read_fence(path).rule_ids() == outcome.fence.rule_ids()
+
     def test_publication_is_atomic(self, ctx, document, tmp_path):
         """A hook reading a half-written fence would enforce a *subset* of it.
 

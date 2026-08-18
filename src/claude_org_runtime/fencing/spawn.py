@@ -114,7 +114,10 @@ class FenceLedger:
         # a refusal recorded seconds before a crash is still there afterwards.
         is_new = not self.path.exists()
         line = json.dumps(entry, sort_keys=True) + "\n"
-        with self.path.open("a", encoding="utf-8") as handle:
+        # ``newline=""`` pins the JSONL record separator to the ``\n`` written
+        # above rather than a platform-dependent CRLF, matching
+        # ``curator.ledger.ApprovalLedger``.
+        with self.path.open("a", encoding="utf-8", newline="") as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
@@ -315,7 +318,7 @@ class FencedSpawner:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
         body = json.dumps(fence.settings, sort_keys=True, indent=2) + "\n"
-        with tmp.open("w", encoding="utf-8") as handle:
+        with tmp.open("w", encoding="utf-8", newline="") as handle:
             handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
