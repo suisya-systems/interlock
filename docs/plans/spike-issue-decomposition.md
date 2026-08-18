@@ -103,7 +103,7 @@ graph TD
   I13 -. "if item 2 fails: record the failure" .-> I19
 ```
 
-**Three things the graph is saying that are easy to miss.**
+**Four things the graph is saying that are easy to miss.**
 
 1. **I-17 has no edges in.** Item 9 has zero session-backend dependency (§3.1, and `ACCEPTANCE.md`
    §4 deliberately omits it from the re-run list). It can start on day 1 in parallel with I-01 and is
