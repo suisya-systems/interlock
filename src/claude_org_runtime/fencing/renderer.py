@@ -29,6 +29,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
@@ -113,7 +114,13 @@ class FenceContext:
     claude_org_path: Path
     hook_script: Path
     fence_path: Path
-    python: str = "python3"
+    #: The interpreter the deny hook runs under. Defaults to the *running*
+    #: interpreter rather than the literal ``"python3"`` for two reasons: that
+    #: name is frequently absent on Windows (only ``python.exe`` / ``py.exe``
+    #: exist), which would make every render refuse with
+    #: ``hook-unresolvable``; and the hook has to import Interlock, so the one
+    #: interpreter guaranteed to be able to is the one Interlock is running on.
+    python: str = field(default_factory=lambda: sys.executable or "python3")
     extra: Mapping[str, str] = field(default_factory=dict)
 
     def mapping(self) -> dict[str, str]:

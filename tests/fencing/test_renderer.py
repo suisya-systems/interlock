@@ -103,6 +103,66 @@ class TestRenders:
         assert str(ctx.fence_path) in tokens
         assert tokens[tokens.index("--fence") + 1] == str(ctx.fence_path)
 
+    def test_the_default_hook_launcher_resolves_on_this_platform(self, tmp_path, document):
+        """The default must be launchable *here*, not on the author's machine.
+
+        A literal ``"python3"`` is frequently absent on Windows -- only
+        ``python.exe`` / ``py.exe`` exist -- so every render there would refuse
+        with ``hook-unresolvable``, and the fence would be unspawnable rather
+        than merely mis-launched. The hook also has to import Interlock, so the
+        one interpreter guaranteed to manage it is the running one.
+        """
+
+        import shutil
+        import sys
+        from pathlib import Path
+
+        from claude_org_runtime.fencing import FenceContext, default_hook_script
+
+        ctx = FenceContext(
+            interlock_root=tmp_path,
+            worker_dir=tmp_path / "w",
+            claude_org_path=tmp_path / "org",
+            hook_script=default_hook_script(),
+            fence_path=tmp_path / "fence.json",
+        )
+        assert Path(ctx.python).is_file() or shutil.which(ctx.python)
+        assert ctx.python == (sys.executable or "python3")
+        # Renders rather than refusing -- the actual regression.
+        assert render_fence("worker", ctx, document=document).rules
+
+    def test_a_backslash_bearing_path_survives_into_the_hook_command(
+        self, tmp_path, document
+    ):
+        """Windows paths are the reason the quoting is not optional.
+
+        ``shlex.split`` treats a backslash as an escape, so an *unquoted*
+        ``C:\\Users\\...`` is silently mangled -- and the mangled token then
+        fails the hook-path check, refusing every render on that platform.
+        This asserts the roundtrip on any platform, using a literal backslash.
+        """
+
+        import shlex
+        from claude_org_runtime.fencing import FenceContext, default_hook_script
+
+        odd = tmp_path / "back\\slash dir"
+        odd.mkdir()
+        ctx = FenceContext(
+            interlock_root=odd,
+            worker_dir=odd / "w",
+            claude_org_path=odd / "org",
+            hook_script=default_hook_script(),
+            fence_path=odd / "fence.json",
+        )
+        fence = render_fence("worker", ctx, document=document)
+        command = [
+            hook["command"]
+            for group in fence.settings["hooks"]["PreToolUse"]
+            for hook in group["hooks"]
+        ][0]
+        tokens = shlex.split(command)
+        assert tokens[tokens.index("--fence") + 1] == str(ctx.fence_path)
+
     def test_rendering_is_deterministic(self, ctx, document):
         """Two renders must be byte-identical, or a restart diff means nothing."""
 

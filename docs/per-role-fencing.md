@@ -175,6 +175,17 @@ somebody else's rules — a worker losing denials the curator never had, with no
 
 **Hook commands are shell strings, so their substituted values are quoted.** An unquoted path with
 a space arrives as two arguments; one with a shell metacharacter arrives as something else entirely.
+The quoting is POSIX, and it does double duty on Windows — `shlex.split` treats a backslash as an
+escape, so an unquoted `C:\Users\...` is silently mangled and then fails the hook-path check,
+refusing every render on that platform. **Known limit:** a `cmd.exe` executing the rendered string
+would take the single quotes literally. This spike targets POSIX hosts; the limit is recorded rather
+than papered over.
+
+**The hook launcher defaults to the running interpreter, not the literal `python3`.** That name is
+frequently absent on Windows (only `python.exe` / `py.exe` exist), which would make every render
+refuse with `hook-unresolvable` — unspawnable rather than merely mis-launched. And since the hook
+has to import Interlock, the one interpreter guaranteed to manage it is the one Interlock is running
+on.
 
 **A failed republish restores the previous fence rather than deleting it.** A refused respawn must
 not disarm the session already running: unlinking the replacement would leave that session with no
