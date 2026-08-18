@@ -1121,14 +1121,24 @@ such a test before its subject's replacement exists?
 
 **Why unresolved.** The `discard` verdict on `broker/server.py` rests on the claim that the
 delivery-relevant logic lives in `store.py`, leaving server.py as pane machinery. That is not quite
-exact: server.py overrides `register_delivery_instance` to add pane-liveness-driven lease release.
-The override is dormant in these tests — every scenario constructs the broker with `adapter=None`,
-so the branch never executes — which is why no row was reclassified here. But it means the boundary
-between the carried invariant and the discarded mechanism runs *through* a module rather than
-between modules, and the ledger currently records it as if it ran between them.
+exact: server.py overrides `register_delivery_instance` (server.py:817) to release a stale lease
+when a liveness probe says the owner's pane died out of band
+(`_probe_dead_pane_for_stale_lease`, server.py:845-851). How live that override is differs by test
+and the difference is instructive. In `tests/attention/test_broker_journal_contract.py` it never
+executes — every scenario builds the broker with `adapter=None`, so the accident-derived fixture
+that row carries is genuinely transport-neutral. In `tests/broker/test_delivery.py` it is driven
+deliberately: `test_stale_lease_is_released_when_the_pane_died_out_of_band` (test_delivery.py:1378)
+builds the broker with a live fake adapter, kills the pane, and asserts the lease is released and
+the delivery credential revoked, and several adopt tests do the same. So a lease-release invariant
+is, in that file, *defined by* pane death — the same entanglement the `broker/store.py` row now
+records on the source side. The boundary between the carried invariant and the discarded mechanism
+therefore runs *through* `broker/server.py` rather than between modules, and the ledger records it
+as if it ran between them.
 
 **What would settle it.** A decision, taken with the `MessageBus` contract, on whether an
 end-to-end carried test is landed as a failing specification against the new contract (see Q-0015)
 or is permitted to keep driving the old module until the replacement lands — and, either way, an
-explicit statement of where the delivery/session boundary inside `broker/server.py` actually falls.
+explicit statement of where the delivery/session boundary inside `broker/server.py` actually falls,
+including whether pane-liveness-driven lease release has any transport-neutral successor at all or
+is simply discarded with the pane.
 Related: Q-0015 (sequencing of carried tests), D-0009 (`SessionProvider` / `MessageBus` separation).
