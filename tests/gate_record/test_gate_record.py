@@ -110,18 +110,30 @@ def sections(text: str) -> dict[int, str]:
     return out
 
 
-def _field(section: str, name: str) -> str:
-    """One ``- **Name:** value`` line.
+def _fields(section: str, name: str) -> list[str]:
+    """Every ``- **Name:** value`` line, in order.
 
     The name may carry a parenthesised qualifier — item 2 splits its evidence
     into a C1 half and a C2 half, which is the shape a row takes when the same
     item has been attempted against two providers.
     """
-    match = re.search(
+    values = re.findall(
         rf"^- \*\*{re.escape(name)}(?: \([^)]*\))?:\*\* (.+)$", section, re.MULTILINE
     )
-    assert match, f"missing field {name!r}"
-    return match.group(1)
+    assert values, f"missing field {name!r}"
+    return values
+
+
+def _field(section: str, name: str) -> str:
+    """The one and only ``- **Name:** value`` line for a singleton field.
+
+    An edit that appends a second verdict instead of replacing the first would
+    otherwise be read as the first alone, and the contradiction would sit in the
+    record unread.
+    """
+    values = _fields(section, name)
+    assert len(values) == 1, f"field {name!r} appears {len(values)} times; it is a singleton"
+    return values[0]
 
 
 def test_all_eleven_items_present_none_omitted_none_merged(table_rows, sections):
@@ -158,8 +170,37 @@ def test_table_and_section_agree(item, table_rows, sections):
 @pytest.mark.parametrize("item", range(1, 12))
 def test_every_row_names_its_provider_and_its_evidence(item, table_rows, sections):
     assert _tokens(table_rows[item][4], PROVIDERS)
-    assert _field(sections[item], "Evidence").strip()
+    assert all(value.strip() for value in _fields(sections[item], "Evidence"))
     assert table_rows[item][5].strip()
+
+
+@pytest.mark.parametrize("item", range(1, 12))
+def test_a_terminal_verdict_brings_its_label_provider_and_evidence_with_it(item, table_rows, sections):
+    """A verdict is only as good as what is recorded beside it.
+
+    §7 asks for the verdict, its D-0022 label, the provider the evidence came
+    from and the evidence itself in the *same* edit. Values are positional: item
+    2 reads "failed on C1, pending on C2" across all three fields, so a terminal
+    verdict is checked against the label and provider standing in its own slot.
+    """
+    verdicts = _tokens(table_rows[item][2], VERDICTS)
+    labels = _tokens(table_rows[item][3], LABELS)
+    providers = _tokens(table_rows[item][4], PROVIDERS)
+    assert len(verdicts) == len(labels) == len(providers), (
+        f"item {item}: one label and one provider per verdict"
+    )
+
+    terminal = {"discharged", "failed"}
+    for index, verdict in enumerate(verdicts):
+        if verdict in terminal:
+            assert labels[index] != "pending", f"item {item}: a settled verdict needs its label"
+            assert providers[index] != "pending", f"item {item}: name the provider it was proven on"
+
+    if verdicts and set(verdicts) <= terminal:
+        for evidence in _fields(sections[item], "Evidence"):
+            assert "not yet landed" not in evidence.lower(), (
+                f"item {item}: settled, so its evidence has to be evidence"
+            )
 
 
 @pytest.mark.parametrize("item", DEFERRED_ITEMS)
