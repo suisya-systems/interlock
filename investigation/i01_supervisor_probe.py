@@ -33,7 +33,6 @@ Subcommands:
 import argparse
 import json
 import os
-import select
 import signal
 import subprocess
 import sys
@@ -145,9 +144,70 @@ def spawn(args, cwd, env_extra=None, new_session=True):
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=False,          # binary: see LineReader, and codex review P2
+        bufsize=0,
         start_new_session=new_session,
     )
+
+
+class LineReader:
+    """Non-blocking, complete-line reader over a raw pipe.
+
+    A select() on a buffered TextIOWrapper is unsound: one readline() can pull
+    several lines into user space, after which the fd is no longer readable
+    while complete lines still sit in the buffer. This reads the raw fd
+    non-blockingly and does its own line framing, so drain() really does return
+    everything currently available.
+    """
+
+    def __init__(self, stream):
+        self.stream = stream
+        self.fd = stream.fileno()
+        os.set_blocking(self.fd, False)
+        self.buf = b""
+        self.eof = False
+
+    def drain(self):
+        """Return every complete line available right now (no blocking)."""
+        while True:
+            try:
+                chunk = os.read(self.fd, 65536)
+            except BlockingIOError:
+                break
+            except OSError:
+                self.eof = True
+                break
+            if not chunk:
+                self.eof = True
+                break
+            self.buf += chunk
+        lines = []
+        while b"\n" in self.buf:
+            raw, self.buf = self.buf.split(b"\n", 1)
+            lines.append(raw.decode("utf-8", "replace"))
+        return lines
+
+    def rest(self):
+        """Whatever is left, complete lines or not."""
+        self.drain()
+        out, self.buf = self.buf, b""
+        return out.decode("utf-8", "replace")
+
+
+def cli_pid(p):
+    """The pid of the CLI itself.
+
+    Without a wrapper that is the spawned pid. With I01_CHILD_WRAPPER set the
+    spawned pid is the wrapper (bwrap), so signalling it would exercise the
+    wrapper's termination behaviour and not the CLI's (codex review P1).
+    """
+    if not CHILD_WRAPPER:
+        return p.pid
+    for d in descendants(p.pid):
+        cmd = cmdline(d) or ""
+        if "claude" in cmd and "bwrap" not in cmd.split()[0]:
+            return d
+    return p.pid
 
 
 def run(args, cwd, timeout=180, env_extra=None):
@@ -166,8 +226,8 @@ def run(args, cwd, timeout=180, env_extra=None):
         "rc": p.returncode,
         "dur_s": round(time.time() - t0, 2),
         "timed_out": timed_out,
-        "stdout": out,
-        "stderr": err,
+        "stdout": out.decode("utf-8", "replace"),
+        "stderr": err.decode("utf-8", "replace"),
     }
 
 
@@ -244,10 +304,11 @@ def cmd_streams(a):
     p = spawn(["-p", SHORT_PROMPT, "--output-format", "stream-json", "--verbose"], a.cwd)
     t0 = time.time()
     lines = []
-    for line in p.stdout:
+    for raw in iter(p.stdout.readline, b""):
+        line = raw.decode("utf-8", "replace")
         lines.append({"t": round(time.time() - t0, 3), "len": len(line),
                       "ends_nl": line.endswith("\n"), "raw": line.rstrip("\n")})
-    err = p.stderr.read()
+    err = p.stderr.read().decode("utf-8", "replace")
     p.wait()
     parsed = []
     for ln in lines:
@@ -269,19 +330,17 @@ def cmd_streams(a):
                   a.cwd)
         t0 = time.time()
         got = []
+        reader = LineReader(p.stdout)
         deadline = t0 + a.kill_after
-        while time.time() < deadline:
-            r, _, _ = select.select([p.stdout], [], [], 0.2)
-            if r:
-                ln = p.stdout.readline()
-                if not ln:
-                    break
-                got.append({"t": round(time.time() - t0, 3), "raw": ln.rstrip("\n"),
-                            "complete_line": ln.endswith("\n")})
-        os.kill(p.pid, sig)
+        while time.time() < deadline and not reader.eof:
+            for ln in reader.drain():
+                got.append({"t": round(time.time() - t0, 3), "raw": ln,
+                            "complete_line": True})
+            time.sleep(0.05)
+        os.kill(cli_pid(p), sig)
         time.sleep(1.5)
-        tail = p.stdout.read()
-        err = p.stderr.read()
+        tail = "".join(x + "\n" for x in reader.drain()) + reader.rest()
+        err = p.stderr.read().decode("utf-8", "replace")
         p.wait()
         rec("abnormal_exit_flush", {
             "signal": label, "kill_after_s": a.kill_after, "rc": p.returncode,
@@ -543,7 +602,8 @@ def cmd_concurrency(a):
     for i in range(a.n):
         p = spawn(["-p", SHORT_PROMPT, "--output-format", "stream-json", "--verbose"],
                   a.cwd)
-        children.append({"i": i, "p": p, "lines": [], "done": False})
+        children.append({"i": i, "p": p, "lines": [], "done": False,
+                         "reader": LineReader(p.stdout)})
     spawn_dur = time.time() - t_start
 
     # Readout A: liveness + exit-status poll (non-blocking).
@@ -562,15 +622,8 @@ def cmd_concurrency(a):
         lat = []
         for c in children:
             t = time.time()
-            while True:
-                r, _, _ = select.select([c["p"].stdout], [], [], 0)
-                if not r:
-                    break
-                ln = c["p"].stdout.readline()
-                if not ln:
-                    c["done"] = True
-                    break
-                c["lines"].append(ln.rstrip("\n"))
+            c["lines"].extend(c["reader"].drain())
+            c["done"] = c["reader"].eof
             lat.append((time.time() - t) * 1000.0)
         return lat
 
@@ -581,15 +634,21 @@ def cmd_concurrency(a):
         samples_struct.append(readout_structured())
         time.sleep(0.1)
 
-    # Blocking-readout control: a naive supervisor that calls readline() per child.
+    # Blocking-readout control: a naive supervisor that calls readline() per
+    # child. Only meaningful while a child is still live -- on a finished child
+    # readline() hits EOF at once and measures nothing, so record liveness with
+    # each sample rather than reporting a bare number.
     block_lat = []
     for c in children:
+        was_live = c["p"].poll() is None
         t = time.time()
         try:
+            os.set_blocking(c["p"].stdout.fileno(), True)
             c["p"].stdout.readline()
         except Exception:
             pass
-        block_lat.append((time.time() - t) * 1000.0)
+        block_lat.append({"child_was_live": was_live,
+                          "ms": round((time.time() - t) * 1000.0, 3)})
 
     for c in children:
         try:
@@ -612,7 +671,7 @@ def cmd_concurrency(a):
         "sweeps": len(samples_live),
         "liveness_readout": stats(samples_live),
         "structured_readout": stats(samples_struct),
-        "blocking_readline_per_child_ms": [round(x, 2) for x in block_lat],
+        "blocking_readline_control": block_lat,
         "rcs": [c["p"].returncode for c in children],
         "lines_per_child": [len(c["lines"]) for c in children],
     })
@@ -685,12 +744,9 @@ def cmd_scenario(a):
     t0 = time.time()
     events = []
     first_event_t = None
-    while time.time() - t0 < a.kill_after:
-        r, _, _ = select.select([p.stdout], [], [], 0.2)
-        if r:
-            ln = p.stdout.readline()
-            if not ln:
-                break
+    reader = LineReader(p.stdout)
+    while time.time() - t0 < a.kill_after and not reader.eof:
+        for ln in reader.drain():
             if first_event_t is None:
                 first_event_t = round(time.time() - t0, 3)
             try:
@@ -699,17 +755,39 @@ def cmd_scenario(a):
                                "session_id": j.get("session_id")})
             except Exception:
                 events.append({"type": "UNPARSEABLE"})
-    os.kill(p.pid, signal.SIGTERM)
+        time.sleep(0.05)
+
+    # Who gets the signal, and what has to be watched afterwards. Both are
+    # recorded so the restricted and unrestricted runs can be compared on the
+    # same terms: the signal goes to the CLI itself even when a wrapper process
+    # was spawned in front of it, and the descendants are enumerated BEFORE the
+    # signal, because once the parent is reaped they are reparented away and
+    # can no longer be found from its pid.
+    target = cli_pid(p)
+    watched = proc_snapshot(p.pid) + ([{"pid": target, "ppid": ppid_of(target),
+                                        "cmdline": (cmdline(target) or "")[:160]}]
+                                      if target != p.pid else [])
+    os.kill(target, signal.SIGTERM)
     try:
-        tail, err = p.communicate(timeout=30)
+        p.wait(timeout=30)
     except subprocess.TimeoutExpired:
         p.kill()
-        tail, err = p.communicate()
-    survivors = [d for d in proc_snapshot(p.pid) if alive(d["pid"])]
+        p.wait()
+    tail = "".join(x + "\n" for x in reader.drain()) + reader.rest()
+    err = p.stderr.read().decode("utf-8", "replace")
+    time.sleep(2.0)
+    survivors = [d for d in watched if alive(d["pid"])]
+    for d in survivors:                      # leave nothing behind either way
+        try:
+            os.kill(d["pid"], signal.SIGKILL)
+        except Exception:
+            pass
     rec("scenario", {
         "label": a.label,
         "requested_session_id": u,
-        "child_pid": p.pid,
+        "spawned_pid": p.pid,
+        "signalled_pid": target,
+        "signalled_the_wrapper": target == p.pid and bool(CHILD_WRAPPER),
         "n_events_before_signal": len(events),
         "event_types": [e["type"] for e in events],
         "init_session_id": next((e["session_id"] for e in events
@@ -717,9 +795,11 @@ def cmd_scenario(a):
         "first_event_s": first_event_t,
         "rc": p.returncode,
         "reaped": p.returncode is not None,
-        "survivors": survivors,
+        "watched_before_signal": watched,
+        "survivors_2s_after_reap": survivors,
         "stderr": err.strip(),
         "tail_len": len(tail),
+        "tail_first_line": tail.splitlines()[0][:300] if tail.strip() else "",
     })
 
 
@@ -739,6 +819,7 @@ def cmd_observe(a):
     first_init_event = None
     first_assistant = None
     claims = []
+    reader = LineReader(p.stdout)
     next_claim = t0 + a.claim_every
     while time.time() - t0 < a.observe_seconds:
         for root, _dirs, files in os.walk(cfg):
@@ -748,41 +829,50 @@ def cmd_observe(a):
                     if fp not in seen:
                         seen[fp] = {"first_seen_s": round(time.time() - t0, 3),
                                     "size_at_first_seen": os.path.getsize(fp)}
-        r, _, _ = select.select([p.stdout], [], [], 0.02)
-        if r:
-            ln = p.stdout.readline()
-            if ln:
-                if first_stream_event is None:
-                    first_stream_event = round(time.time() - t0, 3)
-                try:
-                    j = json.loads(ln)
-                except Exception:
-                    j = {}
-                if (j.get("type") == "system" and j.get("subtype") == "init"
-                        and first_init_event is None):
-                    first_init_event = round(time.time() - t0, 3)
-                if j.get("type") == "assistant" and first_assistant is None:
-                    first_assistant = round(time.time() - t0, 3)
+        for ln in reader.drain():
+            if first_stream_event is None:
+                first_stream_event = round(time.time() - t0, 3)
+            try:
+                j = json.loads(ln)
+            except Exception:
+                j = {}
+            if (j.get("type") == "system" and j.get("subtype") == "init"
+                    and first_init_event is None):
+                first_init_event = round(time.time() - t0, 3)
+            if j.get("type") == "assistant" and first_assistant is None:
+                first_assistant = round(time.time() - t0, 3)
         if time.time() >= next_claim:
-            at = round(time.time() - t0, 3)
-            c = run(["-p", SHORT_PROMPT, "--output-format", "json",
-                     "--session-id", u], a.cwd, timeout=120)
-            claims.append({"issued_at_s": at, "rc": c["rc"],
-                           "stderr": c["stderr"].strip()[:200],
-                           "verdict": "admitted" if c["rc"] == 0 else "refused"})
+            # Launched asynchronously and collected at the end. A synchronous
+            # claimant would stop the scan for several seconds -- inside the
+            # very interval being measured -- and an admitted one would itself
+            # create a file carrying this uuid, so the landmark times could no
+            # longer be attributed to the holder (codex review P1).
+            claims.append({"issued_at_s": round(time.time() - t0, 3),
+                           "proc": spawn(["-p", SHORT_PROMPT, "--output-format",
+                                          "json", "--session-id", u], a.cwd)})
             next_claim = time.time() + a.claim_every
+        time.sleep(0.02)
     try:
         p.communicate(timeout=300)
     except subprocess.TimeoutExpired:
         p.kill()
         p.communicate()
+    collected = []
+    for c in claims:
+        cp = c.pop("proc")
+        out, cerr = cp.communicate(timeout=180)
+        c["rc"] = cp.returncode
+        c["stderr"] = cerr.decode("utf-8", "replace").strip()[:200]
+        c["verdict"] = "admitted" if cp.returncode == 0 else "refused"
+        collected.append(c)
     rec("observe_u34", {
         "uuid": u,
+        "claims_were_issued": bool(collected),
         "config_dir_paths_carrying_the_uuid": seen,
         "first_stream_event_s": first_stream_event,
         "first_init_event_s": first_init_event,
         "first_assistant_event_s": first_assistant,
-        "claims": claims,
+        "claims": collected,
     })
 
 

@@ -22,7 +22,7 @@ The negative half is four hazards, none of which a supervisor can be written wit
 
 | # | Hazard | Evidence |
 |---|--------|----------|
-| **H1** | **The child's own children outlive it.** An MCP server started by the CLI survives `SIGTERM`, `SIGINT` **and** `SIGKILL` delivered to the CLI's pid. Only a kill of the **process group** reaps it. | §3.5 |
+| **H1** | **The CLI does not reap its own children; whether they die is up to them.** An MCP server that exits when its stdin closes does go away with the CLI. One that does not survives `SIGTERM`, `SIGINT` **and** `SIGKILL` delivered to the CLI's pid. Only a kill of the **process group** reaps it either way, so the supervisor cannot make the outcome depend on a third party's politeness. | §3.5, §3.10 |
 | **H2** | **`-p` children survive the supervisor's death and keep working.** After `SIGKILL` of the parent, both children were reparented to `init` (pid 1 equivalent, 837), ran to completion, wrote their full result, and exited 0. Nothing reclaimed them. There is no public CLI surface that enumerates or stops a running `-p` child. | §3.6 |
 | **H3** | **Exit 0 is evidence of nothing, again — and now on the interrupt path.** A `SIGINT`-interrupted run exits **0** while its own JSON says `is_error: true`, `terminal_reason: "aborted_streaming"`. So does `--add-dir /nonexistent` (silently ignored), and so does `claude capabilities`, which is not a subcommand at all and is silently executed as a **prompt**. | §3.4, §3.1 |
 | **H4** | **The `--session-id` claim is scoped to the cwd-derived project directory.** The same session id, refused in the directory that created it, is **admitted in a different cwd** — producing two transcripts carrying one session id. This admits a second writer with no race at all. | §3.8 |
@@ -348,12 +348,21 @@ signal=SIGKILL delivered_to="process group"
   survivors_after_2s: []                            <-- reaped
 ```
 
-The CLI spawned exactly one descendant here (the MCP stub); no other subprocesses appeared. But that
-one descendant survives **every** signal aimed at the CLI's pid, including SIGKILL — and it would
-survive holding whatever the MCP server holds.
+The CLI spawned exactly one descendant here (the MCP stub, because `--strict-mcp-config` excluded
+the user's own servers); no other subprocesses appeared. That descendant survives **every** signal
+aimed at the CLI's pid, including SIGKILL.
 
-**A supervisor must own the process group, not the pid.** Spawn with `start_new_session=True` (or
-`setsid`) and terminate with `killpg`. A pid-only stop leaves the child's children running.
+**One qualification, established by §3.10 and stated here so H1 is not overread.** The stub used in
+this experiment is *deliberately* badly behaved: on stdin EOF it sleeps rather than exiting. In
+§3.10, where the user's real MCP servers were inherited (`renga mcp-peer`, a `bun` server), those
+children were gone two seconds after the CLI was SIGTERMed. So the precise finding is not "MCP
+servers always survive" but **"the CLI does not reap them; a server that exits on stdin EOF goes
+away, and one that does not, stays"**. The CLI is not the thing making the difference.
+
+**A supervisor must therefore own the process group, not the pid.** Spawn with
+`start_new_session=True` (or `setsid`) and terminate with `killpg`. A pid-only stop leaves the
+child's children running whenever those children do not choose otherwise, and their politeness is
+not a property the supervisor controls or can test in advance.
 
 ### 3.6 E6 — the supervisor-kill case (H2)
 
@@ -402,12 +411,12 @@ complete stream-json lines are buffered, without blocking on any child).
 
 | Workers | Sweeps | Liveness per child (median / p95 / max, ms) | Structured per child (median / p95 / max, ms) | Whole-sweep total (ms) |
 |---------|--------|--------------------------------------------|-----------------------------------------------|------------------------|
-| 1 | 45 | 0.0246 / 0.0293 / 0.0434 | 0.0124 / 0.0172 / 0.0453 | 0.024 + 0.014 |
-| 4 | 68 | 0.0052 / 0.0279 / 0.0777 | 0.0021 / 0.0176 / 0.0491 | 0.043 + 0.024 |
-| 8 | 78 | 0.0050 / 0.0257 / 0.0753 | 0.0019 / 0.0143 / 0.1285 | 0.064 + 0.036 |
+| 1 | 39 | 0.0250 / 0.0331 / 0.0372 | 0.0231 / 0.0348 / 0.0484 | 0.025 + 0.024 |
+| 4 | 68 | 0.0060 / 0.0265 / 0.0815 | 0.0029 / 0.0246 / 0.0429 | 0.043 + 0.033 |
+| 8 | 78 | 0.0050 / 0.0272 / 0.0691 | 0.0021 / 0.0222 / 0.0587 | 0.066 + 0.040 |
 
-All children exited 0 in every configuration; spawn of all 8 took 0.0 s of parent time (fork/exec
-only).
+All children exited 0 in every configuration, each delivering the same 6 stream-json lines; spawn of
+all 8 took 0.0 s of parent time (fork/exec only).
 
 **Reading.** Per-child readout cost is **flat** from 1 to 8 workers — it does not degrade with
 concurrency — and a complete sweep of 8 children costs about **0.1 ms**. Obtaining state from N
@@ -416,15 +425,25 @@ non-blocking. Under C1 this question was about a daemon serialising status queri
 answer is that the supervisor is free unless it makes itself unfree.
 
 **How it makes itself unfree, stated as the real risk.** The control that was supposed to
-demonstrate this — a naive per-child `readline()` — returned ~0 ms because by then the children had
-exited and `readline()` hit EOF immediately. **That control did not exercise the hazard and is
-reported as inconclusive.** The magnitude can still be bounded from measured data elsewhere in this
-note: on a live child the first stream line arrives at ~1.0-1.2 s (§3.3) and the first *assistant*
-event at ~19 s (§3.8.1). A supervisor that loops over children with blocking reads therefore
-serialises on the slowest child's next event — seconds per child, not microseconds — and at N=8 that
-is the difference between a 0.1 ms sweep and a multi-second one. The structural claim item 8 needs
-("intake is not behind worker monitoring") is satisfied by the `select`-based readout and is
-falsified by a blocking one; it is a property of Interlock's code, not of the provider.
+demonstrate this — a naive per-child `readline()` — measured nothing: every child was already
+finished when the control ran, so `readline()` hit EOF at once. The harness now records that fact
+alongside each sample (`{"child_was_live": false, "ms": 0.017}`, and so on for all eight), so the
+control is **explicitly inconclusive** rather than quietly reassuring. The magnitude can still be
+bounded from measured data elsewhere in this note: on a live child the first stream line arrives at
+~1.0-1.2 s (§3.3) and the first *assistant* event at ~19 s (§3.8.2). A supervisor that loops over
+children with blocking reads therefore serialises on the slowest child's next event — seconds per
+child, not microseconds — and at N=8 that is the difference between a 0.1 ms sweep and a
+multi-second one. The structural claim item 8 needs ("intake is not behind worker monitoring") is
+satisfied by the non-blocking readout and falsified by a blocking one; it is a property of
+Interlock's code, not of the provider. #21 should re-measure the control against a live child.
+
+**A methodology note that belongs with the numbers.** The first version of this readout used
+`select()` on the child's buffered text stream and then `readline()`. That is unsound: one
+`readline()` can pull several lines into user-space buffer, after which the fd is no longer readable
+while complete lines still sit unread — and it showed, as children reporting 4 or 5 of their 6
+lines. The harness now reads the raw fd non-blockingly and frames lines itself; every child now
+accounts for all 6. The corrected sweep costs above are marginally *higher* than the first run's,
+which is the expected direction: the earlier reader was doing less work than it claimed.
 
 These are one-machine, one-load figures under WSL2, recorded as such.
 
@@ -456,7 +475,12 @@ machine.
 #### 3.8.2 U34 — what bounds it
 
 An observer process (explicitly **not** the supervisor harness; it reads internal paths on purpose)
-watched one holder and recorded when each landmark occurred:
+watched one holder and recorded when each landmark occurred. **No second claimant was issued during
+the observation** (`--claim-every` disabled): a synchronous claimant would have stopped the scan for
+several seconds inside the very interval being measured, and an admitted one would have created a
+file carrying the same uuid, so the landmark times could no longer have been attributed to the
+holder. The refusal boundary is taken from the independent sweep in §3.8.1 instead. (The harness's
+claim path is now asynchronous for the same reason.)
 
 ```
 uuid = d196dd2e-3f6e-4a7a-bbca-402c3c0f6b4c
@@ -608,44 +632,69 @@ restriction is applied to **the harness process**, and the child is handed its s
 **A — control, harness unrestricted:**
 
 ```json
-{"label":"unrestricted","harness_pid":2091198,"child_wrapper":[],
+{"label":"unrestricted","harness_pid":2172396,"child_wrapper":[],
  "harness_view":{"/home/happy_ryo/.claude":{"kind":"dir","entries":34},
                  "/tmp/claude-http-...sock":{"errno":6,"strerror":"No such device or address"}, ...}}
-{"label":"unrestricted","requested_session_id":"f5788a79-7f92-4337-9e12-2986be2fcb81",
- "init_session_id":"f5788a79-7f92-4337-9e12-2986be2fcb81","n_events_before_signal":3,
- "first_event_s":0.976,"rc":143,"reaped":true,"survivors":[]}
+{"label":"unrestricted","requested_session_id":"42b3f2f6-c8b3-42c5-aa53-546adbb993bd",
+ "spawned_pid":2172397,"signalled_pid":2172397,"signalled_the_wrapper":false,
+ "init_session_id":"42b3f2f6-c8b3-42c5-aa53-546adbb993bd","n_events_before_signal":4,
+ "event_types":["system","system","system","assistant"],"first_event_s":0.952,
+ "rc":143,"reaped":true,
+ "watched_before_signal":[{"pid":2172476,"ppid":2172397,"cmdline":"renga mcp-peer"},
+                          {"pid":2172483,"ppid":2172397,"cmdline":"bun .../claude-peers-mcp/server.ts"}],
+ "survivors_2s_after_reap":[],"tail_len":2082}
 ```
 
 **B — negative, harness denied and child not:**
 
 ```json
-{"label":"restricted","harness_pid":2091342,
+{"label":"restricted","harness_pid":2172540,
  "harness_view":{"/home/happy_ryo/.claude":{"kind":"dir","entries":0},
                  "/tmp/claude-http-...sock":{"kind":"file","first_bytes":0}, ...}}
-{"label":"restricted","requested_session_id":"25c74f93-de79-4231-aea6-ab8dec29c7ba",
- "init_session_id":"25c74f93-de79-4231-aea6-ab8dec29c7ba","n_events_before_signal":4,
- "first_event_s":0.936,"rc":-15,"reaped":true,"survivors":[]}
+{"label":"restricted","requested_session_id":"56d6de52-1a08-424d-a2d0-8d77456b362d",
+ "spawned_pid":2172541,"signalled_pid":2172542,"signalled_the_wrapper":false,
+ "init_session_id":"56d6de52-1a08-424d-a2d0-8d77456b362d","n_events_before_signal":4,
+ "event_types":["system","system","system","assistant"],"first_event_s":1.103,
+ "rc":143,"reaped":true,
+ "watched_before_signal":[{"pid":2172542,"ppid":2172541,"cmdline":"claude -p Count from 1 to 40, ... --session-id 56d6de52-..."},
+                          {"pid":2172624,"ppid":2172542,"cmdline":"renga mcp-peer"},
+                          {"pid":2172632,"ppid":2172542,"cmdline":"bun .../claude-peers-mcp/server.ts"}],
+ "survivors_2s_after_reap":[],"tail_len":2053}
 ```
 
 The harness sees **0 entries** where it saw 34, and each socket is an empty regular file rather than
-a socket. Spawn, structured read (the `init` event carries the requested id), signal-terminate and
-reap all behaved the same.
+a socket. Spawn, structured read (the `init` event carries the requested id in both), the graceful
+SIGTERM tail, **exit 143 in both**, reap, and zero survivors — identical on both sides of the
+restriction.
+
+Two things about *how* this was measured matter enough to state, because the first version of this
+experiment got both wrong and a review caught them:
+
+1. **The signal goes to the CLI, not to the wrapper.** Under B the spawned pid is `bwrap`
+   (`2172541`); the CLI is its child (`2172542`). Signalling the spawned pid would have exercised
+   `bwrap`'s termination behaviour and not the CLI's — and it did, in the first run, which is why
+   that run reported `rc: -15` under restriction against `143` unrestricted. The harness now resolves
+   the CLI's pid (`signalled_the_wrapper: false` in both rows) and the two sides agree exactly.
+2. **Descendants are enumerated before the signal, not after.** Once the parent is reaped its
+   surviving descendants have been reparented and can no longer be found from its pid, so a
+   post-reap scan reports "no survivors" whether or not any survived. `watched_before_signal` is now
+   captured first and each pid re-checked afterwards. Doing so also revealed what the earlier scan
+   had missed entirely: the CLI's inherited MCP children (`renga mcp-peer`, a `bun` server), which
+   is the evidence behind H1's qualification in §3.5.
 
 **C — observer, outside the harness: did the restricted run's child keep normal access?**
 
 ```
-restricted run requested session id: 25c74f93-de79-4231-aea6-ab8dec29c7ba
-<config-dir>/projects/<...>-scratchpad-i01/25c74f93-de79-4231-aea6-ab8dec29c7ba.jsonl  58895 bytes
+restricted run requested session id: 56d6de52-1a08-424d-a2d0-8d77456b362d
+<config-dir>/projects/<...>-scratchpad-i01/56d6de52-1a08-424d-a2d0-8d77456b362d.jsonl  58298 bytes
 ```
 
 Yes: the child wrote a full transcript to the **real** config directory. This is the control the
 fence search's §2 trap demands — the restriction was on the harness, and the child's own state was
 demonstrably intact, so the run is not a silent false negative.
 
-**A run-to-completion control, to remove the one difference.** In A the child exited 143 and in B
-`-15`, which is an artifact of the wrapper: the harness signals the pid it spawned, which under B is
-`bwrap` rather than `claude`, and `bwrap` dies on SIGTERM instead of handling it. To rule this out as
-a behavioural difference, the same trivial spawn was run to *normal completion* both ways:
+**A run-to-completion control.** The same trivial spawn was additionally run to normal completion
+both ways, to compare the success path as well as the termination path:
 
 ```
 {"label":"unrestricted","rc":0,"is_error":false,"has_session_id":true,
