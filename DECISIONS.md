@@ -1124,9 +1124,10 @@ delivery-relevant logic lives in `store.py`, leaving server.py as pane machinery
 exact: server.py overrides `register_delivery_instance` (server.py:817) to release a stale lease
 when a liveness probe says the owner's pane died out of band
 (`_probe_dead_pane_for_stale_lease`, server.py:845-851). How live that override is differs by test
-and the difference is instructive. In `tests/attention/test_broker_journal_contract.py` it never
-executes — every scenario builds the broker with `adapter=None`, so the accident-derived fixture
-that row carries is genuinely transport-neutral. In `tests/broker/test_delivery.py` it is driven
+and the difference is instructive. In `tests/attention/test_broker_journal_contract.py` the override
+itself still runs on every registration before delegating to `StoreMixin`, but its pane-probe branch never
+does — every scenario builds the broker with `adapter=None` — so what that row carries is transport-neutral
+even though the object it drives is not. In `tests/broker/test_delivery.py` it is driven
 deliberately: `test_stale_lease_is_released_when_the_pane_died_out_of_band` (test_delivery.py:1378)
 builds the broker with a live fake adapter, kills the pane, and asserts the lease is released and
 the delivery credential revoked, and several adopt tests do the same. So a lease-release invariant
