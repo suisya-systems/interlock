@@ -53,8 +53,10 @@ Per-issue fields:
 | `gate_items` | `ACCEPTANCE.md` §1 item numbers this issue moves. `rehearses:` marks D-0022's two deferred items. |
 | `scaffold` | S1–S10 components built or carried. |
 | `depends_on` | Hard prerequisites, by `id`. |
+| `completes_after` | I-19 only. Issues whose evidence the gate record gathers, which are **not** prerequisites for starting it — see I-19's Dependencies section for why that distinction matters. |
+| `also_written_when` | I-19 only. The failure branches on which the record is written **instead of**, not after, the success-branch evidence. |
 | `c2` | `survives` / `rewritten` / `moot`. See §4. |
-| `durable` | `contract`, `tests`, or `throwaway` under D-0026. |
+| `durable` | A **list**, because most issues produce more than one kind of artifact. `contract` = a durable non-code artifact (S1; the gate record). `tests` = durable test material, which D-0014's rescue list and D-0026 both want kept. `throwaway` = an implementation. An issue that builds something *and* tests it carries **both** `tests` and `throwaway`, deliberately: D-0026 makes every implementation throwaway **by default**, including S5's schema, and the two halves must be promotable separately so that keeping the tests never drags the implementation along with them. |
 | `body` | The issue body, verbatim, ready to post. |
 
 ---
@@ -92,11 +94,13 @@ graph TD
   I01 --> I16["I-16 · item 8 rehearsal (stub Secretary + load)"]
   I17["I-17 · item 9 Curator approval gate (parallel, day 1)"]
   I07 --> I18["I-18 · item 10 rehearsal (routing + writer audit)"]
-  I15 --> I19["I-19 · gate record ledger"]
-  I16 --> I19
-  I17 --> I19
-  I18 --> I19
-  I04 --> I19
+  I15 -.-> I19["I-19 · gate record ledger"]
+  I16 -.-> I19
+  I17 -.-> I19
+  I18 -.-> I19
+  I04 -.-> I19
+  I03 -. "if terminal: record the failure" .-> I19
+  I13 -. "if item 2 fails: record the failure" .-> I19
 ```
 
 **Three things the graph is saying that are easy to miss.**
@@ -107,7 +111,10 @@ graph TD
 2. **I-04 hangs off the terminal gate but is not wasted by it.** D-0023 part 2 makes fail-closed
    *Interlock's own* obligation under D-0017 "regardless of provider". Only its restart-preservation
    half is Agent-View-shaped.
-3. **The durable-core chain I-05 → I-07 → I-09 → I-11 does not test the provider.** It is drawn under
+3. **The dotted edges into I-19 are not prerequisites.** The gate record is due whether the sequence
+   discharges the gate or terminates at I-03 or I-13, so it must not be blocked behind evidence that a
+   terminal failure guarantees will never arrive.
+4. **The durable-core chain I-05 → I-07 → I-09 → I-11 does not test the provider.** It is drawn under
    I-03 to keep the §3.5 sequence honest, not because a C2 switch would invalidate it.
 
 ---
@@ -181,7 +188,7 @@ issues:
     scaffold: [S4]
     depends_on: []
     c2: rewritten
-    durable: throwaway
+    durable: [throwaway]
     body: |
       ## Background
 
@@ -255,7 +262,7 @@ issues:
     scaffold: [S4]
     depends_on: [I-01]
     c2: rewritten
-    durable: throwaway
+    durable: [throwaway]
     body: |
       ## Background
 
@@ -286,6 +293,16 @@ issues:
 
       ## Acceptance criteria
 
+      - [ ] **The whole of item 1 is driven on one real top-level worker**: start → structured-state
+            read → stop → resume, using documented public commands only. I-01 proves this shape on
+            `--exec` **jobs**, and a job is not a top-level worker — per F4 it has no conversation, so
+            it cannot stand in for the cycle item 1 actually names. Do not treat I-01's pass as
+            covering this.
+      - [ ] The structured state read here is machine-parseable from published output, not scraped
+            from rendered screen text.
+      - [ ] **The internals-free negative is re-run on this half too**: with `~/.claude/jobs`,
+            internal sockets and transcript paths made unreadable, the session-driven cycle behaves
+            identically. I-01's negative covers the jobs path only.
       - [ ] Resume preserves the conversation, demonstrated on a real `--bg` session and recorded.
       - [ ] For every transition × every fixture state: working-tree content is **byte-identical**
             afterwards, **or** the transition is refused while unsaved work exists. Byte-identical
@@ -300,7 +317,8 @@ issues:
 
       ## Gate mapping
 
-      Together with I-01, discharges **item 1**. Discharges **item 7** on its own, subject to the
+      **Discharges item 1** — this half carries the full cycle on a real worker (see the first three
+      criteria); I-01 supplies the supervisor-side evidence around it. Discharges **item 7** on its own, subject to the
       §3.5 exit condition. Note `ACCEPTANCE.md` §1 item 7's own tail: *if the provider can reclaim a
       worktree without an interlock the control plane can observe or veto, that is a gate failure,
       not a workaround*.
@@ -324,7 +342,7 @@ issues:
     scaffold: [S4]
     depends_on: [I-01]
     c2: moot
-    durable: throwaway
+    durable: [throwaway]
     body: |
       ## Background
 
@@ -378,7 +396,7 @@ issues:
 
   - id: I-04
     title: "S10: carry the per-role fencing renderer, add the `PreToolUse` deny hook and the breach-probe battery"
-    labels: [spike/agent-view, phase/2b, tier/T1, gate-item/3, scaffold/S10, size/M, durable/tests, survives/c2]
+    labels: [spike/agent-view, phase/2b, tier/T1, gate-item/3, scaffold/S10, size/M, durable/tests, durable/throwaway, survives/c2]
     size: M
     phase: "2b"
     tier: T1
@@ -386,7 +404,7 @@ issues:
     scaffold: [S10]
     depends_on: [I-03]
     c2: survives
-    durable: tests
+    durable: [tests, throwaway]
     body: |
       ## Background
 
@@ -451,7 +469,7 @@ issues:
     scaffold: [S1]
     depends_on: [I-02, I-03]
     c2: survives
-    durable: contract
+    durable: [contract]
     body: |
       ## Background
 
@@ -529,7 +547,7 @@ issues:
     scaffold: [S3]
     depends_on: [I-05]
     c2: survives
-    durable: throwaway
+    durable: [throwaway]
     body: |
       ## Background
 
@@ -576,7 +594,7 @@ issues:
     scaffold: [S5]
     depends_on: [I-06]
     c2: survives
-    durable: throwaway
+    durable: [throwaway]
     body: |
       ## Background
 
@@ -622,7 +640,7 @@ issues:
 
   - id: I-08
     title: "S6: lease with a fencing token validated atomically as part of each protected write"
-    labels: [spike/agent-view, phase/4, tier/T2, gate-item/5, scaffold/S6, size/M, durable/tests, survives/c2]
+    labels: [spike/agent-view, phase/4, tier/T2, gate-item/5, scaffold/S6, size/M, durable/tests, durable/throwaway, survives/c2]
     size: M
     phase: "4"
     tier: T2
@@ -630,7 +648,7 @@ issues:
     scaffold: [S6]
     depends_on: [I-07]
     c2: survives
-    durable: tests
+    durable: [tests, throwaway]
     body: |
       ## Background
 
@@ -675,7 +693,7 @@ issues:
 
   - id: I-09
     title: "S7: outbox with resend, ack, dedup and one handler that names its exactly-once mechanism"
-    labels: [spike/agent-view, phase/4, tier/T2, gate-item/5, scaffold/S7, size/M, durable/tests, survives/c2]
+    labels: [spike/agent-view, phase/4, tier/T2, gate-item/5, scaffold/S7, size/M, durable/tests, durable/throwaway, survives/c2]
     size: M
     phase: "4"
     tier: T2
@@ -683,7 +701,7 @@ issues:
     scaffold: [S7]
     depends_on: [I-07]
     c2: survives
-    durable: tests
+    durable: [tests, throwaway]
     body: |
       ## Background
 
@@ -737,7 +755,7 @@ issues:
     scaffold: [S9]
     depends_on: [I-08, I-09]
     c2: survives
-    durable: tests
+    durable: [tests]
     body: |
       ## Background
 
@@ -787,7 +805,7 @@ issues:
     scaffold: [S6, S7, S9]
     depends_on: [I-10]
     c2: survives
-    durable: tests
+    durable: [tests]
     body: |
       ## Background
 
@@ -846,7 +864,7 @@ issues:
     scaffold: [S2]
     depends_on: [I-05, I-02]
     c2: rewritten
-    durable: throwaway
+    durable: [throwaway]
     body: |
       ## Background
 
@@ -908,7 +926,7 @@ issues:
     scaffold: [S1, S2, S5, S9]
     depends_on: [I-12, I-11]
     c2: rewritten
-    durable: tests
+    durable: [tests]
     body: |
       ## Background
 
@@ -963,7 +981,7 @@ issues:
 
   - id: I-14
     title: "S8: `MessageBus` as a worker-outbound MCP endpoint, with the static no-edge assertion"
-    labels: [spike/agent-view, phase/7, tier/T2, gate-item/6, scaffold/S8, size/M, durable/tests, survives/c2]
+    labels: [spike/agent-view, phase/7, tier/T2, gate-item/6, scaffold/S8, size/M, durable/tests, durable/throwaway, survives/c2]
     size: M
     phase: "7"
     tier: T2
@@ -971,7 +989,7 @@ issues:
     scaffold: [S8]
     depends_on: [I-09, I-06]
     c2: survives
-    durable: tests
+    durable: [tests, throwaway]
     body: |
       ## Background
 
@@ -1025,7 +1043,7 @@ issues:
     scaffold: [S1, S2, S3]
     depends_on: [I-13, I-14]
     c2: survives
-    durable: tests
+    durable: [tests]
     body: |
       ## Background
 
@@ -1068,7 +1086,7 @@ issues:
 
   - id: I-16
     title: "Item 8 rehearsal: stub Secretary intake with an explicit queue boundary, under load"
-    labels: [spike/agent-view, phase/9, tier/T3, gate-item/8, scaffold/S4, size/M, durable/tests, survives/c2]
+    labels: [spike/agent-view, phase/9, tier/T3, gate-item/8, scaffold/S4, size/M, durable/tests, durable/throwaway, survives/c2]
     size: M
     phase: "9"
     tier: T3
@@ -1076,7 +1094,7 @@ issues:
     scaffold: [S4]
     depends_on: [I-01]
     c2: survives
-    durable: tests
+    durable: [tests, throwaway]
     body: |
       ## Background
 
@@ -1124,7 +1142,7 @@ issues:
 
   - id: I-17
     title: "Item 9: Curator promotion gate with a content-digest approval record"
-    labels: [spike/agent-view, phase/9, tier/T3, gate-item/9, size/M, durable/tests, survives/c2, parallel/day-1]
+    labels: [spike/agent-view, phase/9, tier/T3, gate-item/9, size/M, durable/tests, durable/throwaway, survives/c2, parallel/day-1]
     size: M
     phase: "9"
     tier: T3
@@ -1132,7 +1150,7 @@ issues:
     scaffold: []
     depends_on: []
     c2: survives
-    durable: tests
+    durable: [tests, throwaway]
     body: |
       ## Background
 
@@ -1181,7 +1199,7 @@ issues:
 
   - id: I-18
     title: "Item 10 rehearsal: run-start routing point, run→owner ledger and writer audit"
-    labels: [spike/agent-view, phase/10, tier/T3, gate-item/10, size/M, durable/tests, survives/c2]
+    labels: [spike/agent-view, phase/10, tier/T3, gate-item/10, size/M, durable/tests, durable/throwaway, survives/c2]
     size: M
     phase: "10"
     tier: T3
@@ -1189,7 +1207,7 @@ issues:
     scaffold: [S5]
     depends_on: [I-07]
     c2: survives
-    durable: tests
+    durable: [tests, throwaway]
     body: |
       ## Background
 
@@ -1239,9 +1257,11 @@ issues:
     tier: "-"
     gate_items: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     scaffold: []
-    depends_on: [I-04, I-15, I-16, I-17, I-18]
+    depends_on: []
+    completes_after: [I-04, I-15, I-16, I-17, I-18]
+    also_written_when: [I-03 fails, I-13 fails]
     c2: survives
-    durable: contract
+    durable: [contract]
     body: |
       ## Background
 
@@ -1282,7 +1302,15 @@ issues:
 
       ## Dependencies
 
-      I-04, I-15, I-16, I-17, I-18 — that is, every issue that produces gate evidence.
+      **None — deliberately.** `completes_after` names the issues whose evidence the record gathers
+      on the success branch, but they are not prerequisites for *starting* it, because the record is
+      most needed exactly when they never run. If I-03's terminal probe comes back empty, I-04 never
+      begins; if the fence search comes back empty, I-13 is closed as a gate failure and I-15 is
+      never reached. In both branches this issue is still due, and its content is the failure and the
+      route to `Q-0004` (D-0025).
+
+      Practically: open it at the start of the spike, fill rows as evidence lands, and close it when
+      the sequence ends — by discharge or by termination.
 
       ## Notes
 
