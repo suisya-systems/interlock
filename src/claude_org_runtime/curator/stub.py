@@ -32,13 +32,24 @@ def _confined(component: str, what: str) -> Path:
     return path
 
 
-def _assert_within(store_root: Path, path: Path) -> None:
-    """Belt and braces: symlinks inside the store could still lead outside."""
+def _assert_no_symlink_in_chain(store_root: Path, destination: Path) -> None:
+    """Refuse a destination reached through a symlink, before writing anything.
 
-    root = store_root.resolve()
-    resolved = path.resolve()
-    if resolved != root and root not in resolved.parents:
-        raise ValueError(f"candidate escapes the candidate store: {path}")
+    ``..`` is not the only way out of the store. A symlink already sitting in
+    it -- ``candidates/demo -> project/.claude/skills/demo`` -- turns an
+    innocent-looking relative write into a write into live skill material, and
+    by U8 that is a promotion. The chain is checked with ``lstat`` so the check
+    itself does not follow the link, and it is checked *before* any mutation:
+    noticing afterwards would mean the unapproved bytes are already live.
+    """
+
+    current = store_root
+    for part in destination.relative_to(store_root).parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(
+                f"candidate destination passes through a symlink: {current}"
+            )
 
 
 class CuratorStub:
@@ -58,12 +69,23 @@ class CuratorStub:
         """
 
         root = self.store_root / _confined(candidate_id, "candidate id")
-        for relative, payload in files.items():
-            path = root / _confined(relative, "candidate file")
+        destinations = {
+            root / _confined(relative, "candidate file"): payload
+            for relative, payload in files.items()
+        }
+
+        # Validate every destination first: a store that is half-written when
+        # the tenth file turns out to escape is a store that already leaked.
+        self.store_root.mkdir(parents=True, exist_ok=True)
+        _assert_no_symlink_in_chain(self.store_root, root)
+        for path in destinations:
+            _assert_no_symlink_in_chain(self.store_root, path)
+
+        for path, payload in destinations.items():
             path.parent.mkdir(parents=True, exist_ok=True)
+            _assert_no_symlink_in_chain(self.store_root, path)
             data = payload.encode("utf-8") if isinstance(payload, str) else payload
             path.write_bytes(data)
-        _assert_within(self.store_root, root)
         return Candidate(candidate_id=candidate_id, root=root)
 
 

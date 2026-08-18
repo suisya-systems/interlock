@@ -38,6 +38,13 @@ Four rules, each aimed at a way the gate could be routed around:
     finding until a human adds it here -- which is the point: the addition is
     where somebody has to argue that the new writer is not a promotion path.
 
+``gate-write-outside-publisher``
+    The gate module is the one place allowed to write into skill material, so
+    it is also the one place where an ungated writer would be invisible to
+    every rule above. Writes inside it are confined to the single publishing
+    method named in :data:`GATE_WRITE_SITES`; a new method that writes goes red
+    until somebody either routes it through the checks or names it here.
+
 A stale allowlist is itself a finding (``stale-allowlist``), so renaming the
 gate module cannot quietly turn the audit into a no-op.
 """
@@ -74,6 +81,12 @@ SKILL_PATH_READERS: dict[str, str] = {
 #: import it.
 SKILL_ROOT_MODULE = "curator/skill_root.py"
 GATE_MODULE = "curator/gate.py"
+
+#: The functions inside the gate module that may touch the filesystem. Every
+#: other write in that module is a finding -- the gate is the most privileged
+#: place in the package and therefore the one that needs naming write sites
+#: rather than trusting the module boundary.
+GATE_WRITE_SITES = frozenset({"_write"})
 
 #: Symbols exported by the skill-root module; referring to any of them is
 #: "naming skill material" for the purposes of rule 1.
@@ -146,6 +159,7 @@ def audit_tree(
     reader_allowlist: dict[str, str] | None = None,
     skill_root_module: str = SKILL_ROOT_MODULE,
     gate_module: str = GATE_MODULE,
+    gate_write_sites: frozenset[str] = GATE_WRITE_SITES,
     write_scope: str = "curator",
 ) -> list[Finding]:
     """Audit ``package_root`` (a Python package directory) and return findings.
@@ -190,10 +204,11 @@ def audit_tree(
         if name != skill_root_module and name not in readers:
             findings.extend(_hardcoded_skill_paths(tree, name, docstrings))
 
-        if name != gate_module:
-            findings.extend(_skill_path_writes(tree, name))
+        findings.extend(_skill_path_writes(tree, name))
 
-        if name.startswith(f"{write_scope}/") and name not in allowlist:
+        if name == gate_module:
+            findings.extend(_gate_writes_outside_publisher(tree, name, gate_write_sites))
+        elif name.startswith(f"{write_scope}/") and name not in allowlist:
             findings.extend(_write_calls(tree, name))
 
     return sorted(findings, key=lambda f: (f.module, f.lineno, f.rule))
@@ -332,6 +347,51 @@ def _mentions_skill_path(node: ast.AST, bound: set[str]) -> bool:
                 return True
         elif isinstance(child, ast.Name) and child.id in bound:
             return True
+    return False
+
+
+# -- rule 2c --------------------------------------------------------------
+
+
+def _gate_writes_outside_publisher(
+    tree: ast.AST, module: str, write_sites: frozenset[str]
+) -> list[Finding]:
+    """Writes in the gate module that are not in its one publishing method."""
+
+    found: list[Finding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in write_sites:
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            # A nested function named as a write site is still a write site.
+            if _enclosing_write_site(node, inner, write_sites):
+                continue
+            detail = _write_call_detail(inner)
+            if detail is not None:
+                found.append(
+                    Finding(
+                        "gate-write-outside-publisher",
+                        module,
+                        inner.lineno,
+                        f"{detail} in {node.name}(), outside the publishing method",
+                    )
+                )
+    return found
+
+
+def _enclosing_write_site(
+    outer: ast.AST, call: ast.Call, write_sites: frozenset[str]
+) -> bool:
+    for node in ast.walk(outer):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+            node.name in write_sites
+        ):
+            if any(inner is call for inner in ast.walk(node)):
+                return True
     return False
 
 

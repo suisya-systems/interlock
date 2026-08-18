@@ -313,3 +313,48 @@ def test_control_skill_path_open_with_a_dynamic_mode_is_a_skill_path_write(tmp_p
         reader_allowlist={"reader.py": "read-only consumer"},
     )
     assert "skill-path-write" in rules(findings)
+
+
+def test_control_a_second_writer_inside_the_gate_module_is_a_finding(tmp_path):
+    """The gate is the most privileged module in the package, so it is the one
+    place where an ungated writer would be invisible to every other rule."""
+
+    root = build_package(
+        tmp_path,
+        {
+            "curator/gate.py": """
+                from pathlib import Path
+
+                from .skill_root import SkillRoot
+
+                class PromotionGate:
+                    def _write(self, snapshot, destination):
+                        Path(destination).write_bytes(snapshot)
+
+                    def publish_unchecked(self, destination, body):
+                        Path(destination).write_bytes(body)
+                """
+        },
+    )
+    findings = audit_synthetic(root)
+    assert "gate-write-outside-publisher" in rules(findings)
+    assert any("publish_unchecked" in f.detail for f in findings)
+
+
+def test_control_the_gate_publisher_itself_is_not_a_finding(tmp_path):
+    root = build_package(
+        tmp_path,
+        {
+            "curator/gate.py": """
+                from pathlib import Path
+
+                from .skill_root import SkillRoot
+
+                class PromotionGate:
+                    def _write(self, snapshot, destination):
+                        Path(destination).mkdir(parents=True, exist_ok=True)
+                        Path(destination, 'SKILL.md').write_bytes(snapshot)
+                """
+        },
+    )
+    assert audit_synthetic(root) == []

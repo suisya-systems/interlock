@@ -90,7 +90,7 @@ source tree (`claude_org_runtime.curator.audit`, also runnable as
 `python -m claude_org_runtime.curator.audit`) and it is run from
 `tests/curator/test_path_audit.py`. Adding a bypass turns that test red.
 
-Four rules:
+Five rules:
 
 | rule | what it stops |
 |---|---|
@@ -98,6 +98,11 @@ Four rules:
 | `hardcoded-skill-path` | dodging the above by spelling `.claude/skills` by hand |
 | `skill-path-write` | handing a skill-material path to a write call — **no allowlist exempts this** |
 | `unallowlisted-writer` | a new writer inside the curator package that nobody argued for |
+| `gate-write-outside-publisher` | a write added to the gate module outside its one publishing method |
+
+The last rule exists because the gate is the most privileged module in the package: a bypass added
+*there* would be invisible to the other four, which all stop at the module boundary. Writes inside
+`gate.py` are confined to `_write`.
 
 Two allowlists, each carrying its reason in the source: `WRITER_ALLOWLIST` (modules in the curator
 package allowed to write, and to *what* store) and `SKILL_PATH_READERS` (modules outside it allowed
@@ -125,6 +130,9 @@ a schema commitment — Q-0001 stays open.
 
 - The gate guards **one** skill root per instance. Deployments with several live roots need one gate
   per root; nothing here enforces that the set of gates covers every root a session watches.
+- Promotion and revocation share a lock (`ApprovalLedger.transaction`) so a revocation cannot land
+  between the gate's check and its write. Cross-process exclusion uses `flock`; on a platform
+  without `fcntl` only threads are serialized, which is a limit of this spike.
 - The gate protects against a *bypassing code path*, not against an operator with a shell. Anything
   that can write to the directory out-of-process — another tool, a plugin installer, `cp` — is
   outside its reach; that is a filesystem-permissions question, not a promotion-path question.

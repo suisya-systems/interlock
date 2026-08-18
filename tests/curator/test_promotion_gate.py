@@ -13,6 +13,8 @@ the acceptance criterion an in-memory return value cannot satisfy.
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import replace
 
 import pytest
@@ -381,3 +383,87 @@ def test_nested_candidate_files_are_promoted(harness):
         "demo/SKILL.md": SKILL_BODY_V1,
         "demo/references/notes.md": "detail\n",
     }
+
+
+# -- store confinement and serialization (review round 2) -----------------
+
+
+def test_curator_refuses_a_destination_reached_through_a_symlink(harness):
+    """`..` is not the only way out of the store. A symlink already in it is a
+    direct route into skill material, and it has to be refused *before* the
+    bytes are written -- afterwards they would already be live."""
+
+    harness.skill_root.mkdir(parents=True, exist_ok=True)
+    harness.store_root.mkdir(parents=True, exist_ok=True)
+    (harness.store_root / "demo").symlink_to(harness.skill_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        harness.curator.propose("demo", {"SKILL.md": SKILL_BODY_V2})
+
+    assert harness.skill_material() == {}
+
+
+def test_curator_refuses_a_symlinked_subdirectory_in_the_candidate(harness):
+    harness.skill_root.mkdir(parents=True, exist_ok=True)
+    (harness.store_root / "demo").mkdir(parents=True)
+    (harness.store_root / "demo" / "nested").symlink_to(
+        harness.skill_root, target_is_directory=True
+    )
+
+    with pytest.raises(ValueError, match="symlink"):
+        harness.curator.propose("demo", {"nested/SKILL.md": SKILL_BODY_V2})
+
+    assert harness.skill_material() == {}
+
+
+def test_reusing_an_approval_id_is_refused(harness):
+    """One id, one approval. A second record under the same id could never be
+    spent -- the ledger answers with the first -- and a revocation would be
+    ambiguous between the two."""
+
+    candidate = harness.propose()
+    harness.authority.approve(candidate, "demo", approval_id="fixed-id")
+
+    with pytest.raises(ValueError, match="already recorded"):
+        harness.authority.approve(candidate, "demo", approval_id="fixed-id")
+
+
+def test_a_revocation_cannot_interleave_with_a_promotion(harness):
+    """The checks and the publish share one boundary with revocation.
+
+    A revoke racing the write is made to land *after* the promotion completes,
+    rather than between the gate's revocation check and its write -- which,
+    unserialized, would produce a ledger in which the revocation precedes the
+    promotion it was supposed to stop.
+    """
+
+    candidate = harness.propose()
+    approval = harness.authority.approve(candidate, "demo")
+
+    inside_write = threading.Event()
+    revoke_returned = threading.Event()
+
+    class SlowGate(type(harness.gate)):
+        def _write(self, snapshot, destination):
+            inside_write.set()
+            # Long enough that an unserialized revoke would win the race.
+            time.sleep(0.2)
+            assert not revoke_returned.is_set()
+            return super()._write(snapshot, destination)
+
+    gate = SlowGate(harness.gate._skill_root, harness.ledger)
+
+    def revoke_soon():
+        inside_write.wait(timeout=5)
+        harness.authority.revoke(approval, reason="racing the write")
+        revoke_returned.set()
+
+    racer = threading.Thread(target=revoke_soon)
+    racer.start()
+    decision = gate.promote(candidate, "demo", approval)
+    racer.join(timeout=10)
+
+    assert decision.allowed
+    events = [event.event for event in harness.ledger.events()]
+    assert events.index("promotion-applied") < events.index("approval-revoked")
+    assert not harness.gate.promote(candidate, "demo", approval).allowed

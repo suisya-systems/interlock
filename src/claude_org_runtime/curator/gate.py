@@ -86,6 +86,20 @@ class PromotionGate:
         caller might swallow.
         """
 
+        # The checks and the publish share one boundary with revocation. A
+        # revocation landing between "not revoked" and the write would
+        # otherwise be ignored by the very promotion it was meant to stop --
+        # and since the write is the promotion (U8), there is no later step at
+        # which it could be caught.
+        with self._ledger.transaction():
+            return self._promote_locked(candidate, target, approval)
+
+    def _promote_locked(
+        self,
+        candidate: Candidate,
+        target: str,
+        approval: ApprovalRecord | None,
+    ) -> Decision:
         # 1. approval record absent.
         if approval is None:
             return self._refuse(

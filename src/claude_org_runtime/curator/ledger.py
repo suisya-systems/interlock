@@ -14,12 +14,19 @@ Two properties of this file carry the gate's weight:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
+
+try:  # POSIX
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 from .records import ApprovalRecord
 
@@ -45,6 +52,37 @@ class ApprovalLedger:
     def __init__(self, path: Path, *, clock=time.time) -> None:
         self.path = Path(path)
         self._clock = clock
+        self._thread_lock = threading.RLock()
+
+    # -- serialization ---------------------------------------------------
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """Serialize a read-check-write sequence against other revocations.
+
+        The gate reads the ledger, decides, and then publishes into a directory
+        a session is watching. Without a common boundary a revocation landing
+        between the check and the publish would be ignored, and the promotion it
+        was meant to stop would go live and be recorded as applied.
+
+        Cross-process exclusion uses an ``flock`` on a sibling lock file. On a
+        platform without ``fcntl`` the thread lock still holds, and concurrent
+        *processes* are not serialized -- a documented limit of this spike, not
+        a property the gate's tests depend on.
+        """
+
+        with self._thread_lock:
+            if fcntl is None:  # pragma: no cover - Windows
+                yield
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = self.path.with_name(self.path.name + ".lock")
+            with open(lock_path, "a+") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     # -- writing ---------------------------------------------------------
 
@@ -61,20 +99,34 @@ class ApprovalLedger:
         return entry
 
     def grant(self, record: ApprovalRecord) -> ApprovalRecord:
-        self.append(
-            EVENT_APPROVED,
-            record=record.to_json(),
-            record_digest=record.record_digest(),
-        )
+        """Record an approval. Approval ids are unique.
+
+        A reused id would make ``recorded_approval`` answer with the *first*
+        record, so the second approval could never be spent and a revocation
+        would be ambiguous between the two. Refusing the reuse keeps one id
+        meaning one approval.
+        """
+
+        with self.transaction():
+            if self.recorded_approval(record.approval_id) is not None:
+                raise ValueError(
+                    f"approval id already recorded: {record.approval_id}"
+                )
+            self.append(
+                EVENT_APPROVED,
+                record=record.to_json(),
+                record_digest=record.record_digest(),
+            )
         return record
 
     def revoke(self, approval_id: str, *, reason: str, revoked_by: str) -> None:
-        self.append(
-            EVENT_REVOKED,
-            approval_id=approval_id,
-            reason=reason,
-            revoked_by=revoked_by,
-        )
+        with self.transaction():
+            self.append(
+                EVENT_REVOKED,
+                approval_id=approval_id,
+                reason=reason,
+                revoked_by=revoked_by,
+            )
 
     # -- reading ---------------------------------------------------------
 
