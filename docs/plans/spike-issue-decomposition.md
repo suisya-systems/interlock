@@ -22,7 +22,7 @@ exit condition. This file turns phases **1a–10** into 19 issues, each sized to
 | Left out | Reason |
 |---|---|
 | **Phase 0** — the U1 `--session-id` / `--bg` experiment | Already done and recorded in `investigation/u1-session-id-bg-experiment.md`. Verdict: **negative**. |
-| **The pre-spawn fence search** (Decision 6a's tail, F6) | Running in parallel as `interlock-fence-search-20260818`. Its verdict is an *input* to I-12/I-13 below, not an issue to be filed alongside them. |
+| **The pre-spawn fence search** (Decision 6a's tail, F6) | Running in parallel as `interlock-fence-search-20260818` — so it is not filed as an issue here. But it is **not merely an input to I-12/I-13**: phase 0's exit condition says that on a failed U1, F6 is triggered *before anything else is built*, so until it reports it **blocks dispatch of every issue below except I-17**. That block is recorded as `sequence_precondition` in §6. |
 | **Real proof of gate items 8 and 10** | D-0022 defers them by name to their own discharge points — item 8 *before the canary starts*, item 10 *at the canary*. The spike only **rehearses** them (I-16, I-18). The real proofs are later work and are not spike issues. |
 | **The canary itself** (`ACCEPTANCE.md` §3) | Same clause. It needs v1 as a live counterparty and the implementation running. |
 
@@ -36,7 +36,9 @@ require the provisional/spike marking to be *in the file itself*.
 
 ## 2. How to read the machine-readable block
 
-§6 is a single fenced `yaml` block containing the whole issue set. A tool that wants the definitions
+§6 is a single fenced `yaml` block containing the whole issue set, under two top-level keys:
+`sequence_precondition` (the phase-0 gate that currently blocks dispatch of everything except I-17)
+and `issues`. A tool that wants the definitions
 should extract that one fence and parse it; the prose sections around it are commentary and are not
 required to reconstruct any issue.
 
@@ -54,7 +56,7 @@ Per-issue fields:
 | `scaffold` | S1–S10 components built or carried. |
 | `depends_on` | Hard prerequisites, by `id`. |
 | `completes_after` | I-19 only. Issues whose evidence the gate record gathers, which are **not** prerequisites for starting it — see I-19's Dependencies section for why that distinction matters. |
-| `also_written_when` | I-19 only. The failure branches on which the record is written **instead of**, not after, the success-branch evidence. |
+| `also_written_when` | I-19 only. A `{fails: [...], rule: ...}` mapping enumerating every issue whose failure terminates the sequence, on which branches the record is written **instead of**, not after, the success-branch evidence. |
 | `c2` | `survives` / `partial` / `rewritten` / `moot`. `partial` means the deliverable stands but its provider-facing half is re-pointed at the new backend. See §4. |
 | `durable` | A **list**, because most issues produce more than one kind of artifact. `contract` = a durable non-code artifact (S1; the gate record). `tests` = durable test material, which D-0014's rescue list and D-0026 both want kept. `throwaway` = an implementation. An issue that builds something *and* tests it carries **both** `tests` and `throwaway`, deliberately: D-0026 makes every implementation throwaway **by default**, including S5's schema, and the two halves must be promotable separately so that keeping the tests never drags the implementation along with them. |
 | `body` | The issue body, verbatim, ready to post. |
@@ -63,7 +65,8 @@ Per-issue fields:
 
 ## 3. Dependency order
 
-Phase 0 is done. **I-03 is a terminal gate**: per D-0023 part 3 and §3.5 phase 2a, if no handle
+**Phase 0 is answered but not closed**: U1 is negative and F6's fence search is outstanding, which is
+why the graph is drawn under a `P0` node. **I-03 is a second terminal gate**: per D-0023 part 3 and §3.5 phase 2a, if no handle
 mediates supervisor-initiated restarts, item 3 fails on Agent View and the sequence routes to
 `Q-0004` rather than continuing. Everything downstream of it is conditional in the sense that the
 *Agent View* verdict may end the sequence — but see §4, because most of the downstream work is not
@@ -71,12 +74,13 @@ conditional on the *provider* at all.
 
 ```mermaid
 graph TD
+  P0["phase 0 · fence search (OUTSTANDING)<br/>blocks dispatch of all but I-17"] --> I01
   I01["I-01 · S4-jobs probe"] --> I02["I-02 · S4-sessions probe"]
   I01 --> I03["I-03 · restart-fence probe (TERMINAL)"]
   I02 --> I03
   I03 --> I04["I-04 · S10 fence renderer + breach battery"]
   I02 --> I05["I-05 · S1 SessionProvider interface"]
-  I03 --> I05
+  I04 --> I05
   I05 --> I06["I-06 · S3 stub provider"]
   I06 --> I07["I-07 · S5 spike schema"]
   I07 --> I08["I-08 · S6 lease + fencing token"]
@@ -92,33 +96,31 @@ graph TD
   I11 --> I13
   I09 --> I14["I-14 · S8 MessageBus + no-edge assertion"]
   I06 --> I14
+  I13 --> I14
   I13 --> I15["I-15 · item 11 — re-run unchanged against S3"]
   I14 --> I15
   I01 --> I16["I-16 · item 8 rehearsal (stub Secretary + load)"]
+  I15 --> I16
   I17["I-17 · item 9 Curator approval gate (parallel, day 1)"]
   I07 --> I18["I-18 · item 10 rehearsal (routing + writer audit)"]
-  I15 -.-> I19["I-19 · gate record ledger"]
-  I16 -.-> I19
-  I17 -.-> I19
+  I16 --> I18
+  I17 -.-> I19["I-19 · gate record ledger"]
   I18 -.-> I19
-  I04 -.-> I19
-  I01 -. "any early exit: record the failure" .-> I19
-  I02 -. .-> I19
-  I03 -. .-> I19
-  I13 -. .-> I19
+  I19x["any gate predicate failing<br/>terminates the sequence"] -. "record the failure" .-> I19
 ```
 
 **Four things the graph is saying that are easy to miss.**
 
-1. **I-17 has no edges in.** Item 9 has zero session-backend dependency (§3.1, and `ACCEPTANCE.md`
+1. **I-17 has no edges in, and is the only issue exempt from the phase-0 block.** Item 9 has zero session-backend dependency (§3.1, and `ACCEPTANCE.md`
    §4 deliberately omits it from the re-run list). It can start on day 1 in parallel with I-01 and is
    unaffected by any Agent View verdict.
 2. **I-04 hangs off the terminal gate but is not wasted by it.** D-0023 part 2 makes fail-closed
    *Interlock's own* obligation under D-0017 "regardless of provider". Only its restart-preservation
    half is Agent-View-shaped.
 3. **The dotted edges into I-19 are not prerequisites.** The gate record is due whether the sequence
-   discharges the gate or terminates at I-03 or I-13, so it must not be blocked behind evidence that a
-   terminal failure guarantees will never arrive.
+   discharges the gate or terminates at **any** issue carrying a gate predicate, so it must not be
+   blocked behind evidence that a failure guarantees will never arrive. `also_written_when` in the
+   YAML enumerates those branches.
 4. **The durable-core chain I-05 → I-07 → I-09 → I-11 does not test the provider.** It is drawn under
    I-03 to keep the §3.5 sequence honest, not because a C2 switch would invalidate it.
 
@@ -149,8 +151,9 @@ Two cautions on reading this table:
   provider.** "Survives" above means *the issue's deliverable* survives, not that the gate evidence
   it produced carries over. I-16 and I-18's rehearsals would be re-run; their harnesses would not be
   rewritten.
-- I-12 and I-13 should be created but held, not started, until the fence search reports. Starting
-  I-12 first would spend a worker on a provider that item 2 may already have failed.
+- I-12 and I-13 are the issues the search most directly decides, but per §6's `sequence_precondition`
+  the search currently holds the **whole** set bar I-17. Starting I-12 early would spend a worker on a
+  provider that item 2 may already have failed.
 
 ---
 
@@ -181,6 +184,27 @@ the set before filing, or strip the `labels` field and file untagged.
 # Agent View spike (D-0020 Strategy B+) — issue definitions.
 # `id` is a handle local to this file; GitHub numbers are assigned at creation.
 # Phase 0 is complete (investigation/u1-session-id-bg-experiment.md) and is not an issue.
+# The phase-0 exit condition is not yet satisfied, and it gates the whole set.
+sequence_precondition:
+  id: P0-fence-search
+  source: "docs/proposals/agent-view-gate-scaffold.md §3.5 phase 0; DECISIONS.md D-0024"
+  state: outstanding
+  running_as: interlock-fence-search-20260818
+  rule: |
+    U1 is answered negative. Phase 0's exit condition then reads: "if it fails, F6 is triggered
+    BEFORE ANYTHING ELSE IS BUILT". The fence search is that trigger, and it is still running.
+    Taken literally — and D-0020 fixes the discharge order — no issue below may be dispatched
+    until it reports, because an empty result fails gate item 2 and routes the whole sequence to
+    Q-0004 (D-0024, D-0025).
+  exempt: [I-17]
+  exempt_reason: |
+    Item 9 has zero session-backend dependency (§3.1) and is absent from ACCEPTANCE.md §4's re-run
+    list, so no Agent View verdict can invalidate it. It starts on day 1 regardless.
+  operator_note: |
+    Dispatching I-01 in parallel with the search is defensible — its findings are needed under
+    either verdict and it is throwaway either way — but that is a deviation from the adopted order
+    and needs a new D- entry to be recorded as anything other than one. This file does not grant it.
+
 issues:
 
   - id: I-01
@@ -475,7 +499,7 @@ issues:
     tier: T2
     gate_items: [11]
     scaffold: [S1]
-    depends_on: [I-02, I-03]
+    depends_on: [I-02, I-04]
     c2: survives
     durable: [contract]
     body: |
@@ -534,11 +558,14 @@ issues:
 
       ## Dependencies
 
-      I-02 (the provider evidence that teaches the contract) and I-03 (the terminal gate).
+      I-02 (the provider evidence that teaches the contract) and I-04 — that is, all of phase 2b,
+      which carries I-03's terminal gate with it. §3.5 places phase 3 after phase 2b and D-0020
+      adopts that order as fixed.
 
       **Operator note:** S1 is provider-neutral by construction and `survives/c2`. If schedule
-      pressure argues for starting it before I-03 reports, that is defensible — but it means writing
-      the contract with one provider's evidence and no verdict, which is the risk D-0020 named.
+      pressure argues for starting it before phase 2b completes, that is defensible — but it means
+      writing the contract with one provider's evidence and no item-3 verdict, which is the risk
+      D-0020 named, and it is a deviation from the adopted order rather than a reading of it.
 
       ## Notes
 
@@ -1000,7 +1027,7 @@ issues:
     tier: T2
     gate_items: [6]
     scaffold: [S8]
-    depends_on: [I-09, I-06]
+    depends_on: [I-09, I-06, I-13]
     c2: survives
     durable: [tests, throwaway]
     body: |
@@ -1039,7 +1066,9 @@ issues:
       ## Dependencies
 
       I-09 (outbox), I-06 (a dispatched worker — the **stub** provider is the right one to use here,
-      which is itself a demonstration of the no-edge property).
+      which is itself a demonstration of the no-edge property), and I-13, because §3.5 places phase 7
+      after phase 6. The last of those is a **sequence** dependency, not a technical one: item 6 is
+      deliberately buildable against the stub alone, which is the point of its no-edge property.
 
       ## Notes
 
@@ -1105,7 +1134,7 @@ issues:
     tier: T3
     gate_items: ["rehearses:8"]
     scaffold: [S4]
-    depends_on: [I-01]
+    depends_on: [I-01, I-15]
     c2: partial
     durable: [tests, throwaway]
     body: |
@@ -1146,7 +1175,7 @@ issues:
 
       ## Dependencies
 
-      I-01 (the `--exec` load generator).
+      I-01 (the `--exec` load generator) and I-15, because §3.5 places phase 9 after phase 8.
 
       ## Notes
 
@@ -1184,6 +1213,14 @@ issues:
       A Curator stub, an approval record naming an **immutable candidate version by content digest**,
       and a path audit from Curator output to skill material.
 
+      **Plus U8, which is part of item 9's scaffold and not optional.** Appendix A/U8 asks whether
+      skills, plugins and settings are re-read by an already-running session when their files change
+      on disk, or bound once at session start, and assigns the answer to *this* item: **if a running
+      session hot-reloads skill directories, then writing a file already *is* promotion, and the
+      approval gate must sit at the filesystem write rather than at a promotion function.** The five
+      negatives below can all pass against a gate placed in the wrong layer. Answer U8 by
+      documentation search and then by a direct runtime test, and place the gate accordingly.
+
       ## Acceptance criteria
 
       Promotion is **refused and the refusal recorded** in all five negative cases:
@@ -1197,6 +1234,11 @@ issues:
 
       Plus:
 
+      - [ ] **U8 is answered** — by documentation search and by a direct runtime probe — and it is
+            recorded which directories are live skill material for an already-running session.
+      - [ ] The approval gate sits at the layer U8's answer requires. If sessions hot-reload, the
+            gate guards the **filesystem write** into those directories, and the five negatives above
+            are exercised against *that* boundary.
       - [ ] A **path audit** shows no code path from Curator output to skill material that bypasses
             the approval gate.
       - [ ] A negative test **fails the build** if such a path is added later. Item 9 asks for the
@@ -1222,7 +1264,7 @@ issues:
     tier: T3
     gate_items: ["rehearses:10"]
     scaffold: [S5]
-    depends_on: [I-07]
+    depends_on: [I-07, I-16]
     c2: survives
     durable: [tests, throwaway]
     body: |
@@ -1259,7 +1301,9 @@ issues:
 
       ## Dependencies
 
-      I-07 (the ledger needs the schema).
+      I-07 (the ledger needs the schema) and I-16, because §3.5 places phase 10 after phase 9. Note
+      that phase 9's other half, I-17, is **not** a prerequisite: item 9 runs independently by
+      §3.1.
 
       ## Notes
 
@@ -1276,7 +1320,16 @@ issues:
     scaffold: []
     depends_on: []
     completes_after: [I-04, I-15, I-16, I-17, I-18]
-    also_written_when: [I-01 fails, I-02 fails, I-03 fails, I-13 fails]
+    # Every issue below carries a pass/fail gate predicate, so every one of them can terminate the
+    # sequence and leave the `completes_after` evidence permanently unreachable. In each case this
+    # issue is finalised with that failure instead of with a discharge.
+    also_written_when:
+      fails: [I-01, I-02, I-03, I-04, I-11, I-13, I-14, I-15, I-17]
+      rule: |
+        Finalise the record on the first terminating failure. Do not hold it open waiting for
+        `completes_after` evidence that a failure has made unreachable. I-16 and I-18 are absent from
+        this list because they are rehearsals (D-0022): a poor rehearsal result is reported, but it
+        does not terminate the sequence, since neither item is discharged here in the first place.
     c2: survives
     durable: [contract]
     body: |
@@ -1329,7 +1382,10 @@ issues:
       Its content is then the failure and the route to `Q-0004` (D-0025).
 
       Practically: open it at the start of the spike, fill rows as evidence lands, and close it when
-      the sequence ends — by discharge or by termination.
+      the sequence ends — by discharge or by termination. `also_written_when` enumerates every issue
+      whose failure terminates the sequence, which is every issue carrying a gate predicate rather
+      than just the early ones: I-04 can fail item 3, I-11 items 4 and 5, I-14 item 6, I-15 item 11,
+      I-17 item 9.
 
       ## Notes
 
