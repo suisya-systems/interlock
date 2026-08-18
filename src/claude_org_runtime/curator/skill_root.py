@@ -57,7 +57,13 @@ class SkillRoot:
         """Resolve ``target`` inside this root, refusing any escape from it.
 
         Raises :class:`ValueError` for absolute targets, ``..`` traversal, and
-        targets whose parent chain leaves the root through a symlink.
+        any target whose chain passes through a symlink.
+
+        Symlinks are **rejected, not canonicalized**. Resolving them would keep
+        the result inside the root while pointing at a different skill:
+        ``skills/demo -> skills/code-review`` would let an approval that names
+        ``demo`` overwrite ``code-review``, which is precisely the binding the
+        replay check exists to hold.
         """
 
         if not target or target != target.strip():
@@ -65,13 +71,21 @@ class SkillRoot:
         candidate = Path(target)
         if candidate.is_absolute() or candidate.drive or candidate.root:
             raise ValueError(f"target must be relative to the skill root: {target!r}")
-        if any(part == ".." for part in candidate.parts):
+        if any(part in ("..", "") for part in candidate.parts):
             raise ValueError(f"target must not traverse upwards: {target!r}")
 
-        resolved = (self.path / candidate).resolve()
-        if resolved != self.path and self.path not in resolved.parents:
+        current = self.path
+        for part in candidate.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(
+                    f"target passes through a symlink: {current} (target {target!r})"
+                )
+
+        literal = self.path / candidate
+        if literal != self.path and self.path not in literal.parents:
             raise ValueError(f"target escapes the skill root: {target!r}")
-        return resolved
+        return literal
 
 
 def skill_root_for_project(project_dir: Path) -> SkillRoot:

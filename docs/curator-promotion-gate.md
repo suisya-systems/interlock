@@ -145,6 +145,12 @@ a schema commitment — Q-0001 stays open.
   stub *does* enforce is confinement: a candidate id or file name that would escape the store is
   refused, because such a write could land in skill material directly and never pass the gate.
 - Publication is a staged tree plus a single directory rename, so a session never sees a
-  half-promoted mixture and a file the new candidate dropped does not stay live. The rename is
-  atomic; the retire-then-swap pair around it is not, so a crash in that window can leave the target
-  missing (recoverable by re-running the promotion) — it cannot leave an unapproved tree in place.
+  half-promoted mixture and a file the new candidate dropped does not stay live. Staging happens
+  **outside** the watched root (beside it by default, overridable with `staging_root` for a root
+  that is a mount point) — staging inside it would put a readable copy of the candidate into live
+  skill material under a name the approval does not cover. The rename is atomic; the retire-then-swap
+  pair around it is not, so a crash in that window can leave the target missing (recoverable by
+  re-running the promotion) — it cannot leave an unapproved tree in place.
+- Symlinks in a target's chain are **refused, not resolved**. `skills/demo -> skills/code-review`
+  stays inside the root, so a containment check alone would accept it and an approval naming `demo`
+  would overwrite `code-review`.

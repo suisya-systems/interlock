@@ -69,9 +69,24 @@ class PromotionGate:
     true.
     """
 
-    def __init__(self, skill_root: SkillRoot, ledger: ApprovalLedger) -> None:
+    def __init__(
+        self,
+        skill_root: SkillRoot,
+        ledger: ApprovalLedger,
+        *,
+        staging_root: Path | None = None,
+    ) -> None:
         self._skill_root = skill_root
         self._ledger = ledger
+        # Staging happens *outside* the watched root. Staging inside it would
+        # put a complete, readable copy of the candidate into live skill
+        # material under a name nobody approved -- and U8 found that a
+        # directory appearing mid-session is loadable straight away. The
+        # default sits beside the root, which keeps the rename on one
+        # filesystem; deployments whose root is a mount point pass their own.
+        self._staging_root = Path(
+            staging_root if staging_root is not None else skill_root.path.parent
+        )
 
     def promote(
         self,
@@ -220,17 +235,21 @@ class PromotionGate:
         """Publish the approved bytes. The only filesystem write in the package
         that targets skill material.
 
-        The whole tree is staged beside the destination and swapped in with a
-        single rename, for two reasons that both come from U8's answer. A
+        The whole tree is staged outside the watched root and swapped in with a
+        single rename, for three reasons that all come from U8's answer. A
         running session reads these files at any moment, so a target that is
-        half old tree and half new tree is a state no human approved -- and a
-        file the approved candidate *dropped* would otherwise stay live, making
-        the promoted tree something other than the approved digest.
+        half old tree and half new tree is a state no human approved; a file the
+        approved candidate *dropped* would otherwise stay live, making the
+        promoted tree something other than the approved digest; and a staging
+        directory inside the root would itself be a readable copy of the
+        candidate at a name the approval does not cover.
         """
 
-        parent = destination.parent
-        parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(dir=str(parent), prefix=".promote-"))
+        self._staging_root.mkdir(parents=True, exist_ok=True)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(
+            tempfile.mkdtemp(dir=str(self._staging_root), prefix=".promote-")
+        )
         retired: Path | None = None
         try:
             for relative in sorted(snapshot):
@@ -242,7 +261,9 @@ class PromotionGate:
                     os.fsync(stream.fileno())
 
             if destination.exists() or destination.is_symlink():
-                retired = Path(tempfile.mkdtemp(dir=str(parent), prefix=".retired-"))
+                retired = Path(
+                    tempfile.mkdtemp(dir=str(self._staging_root), prefix=".retired-")
+                )
                 os.replace(destination, retired / "previous")
             try:
                 os.replace(staging, destination)

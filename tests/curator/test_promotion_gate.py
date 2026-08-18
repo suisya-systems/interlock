@@ -467,3 +467,76 @@ def test_a_revocation_cannot_interleave_with_a_promotion(harness):
     events = [event.event for event in harness.ledger.events()]
     assert events.index("promotion-applied") < events.index("approval-revoked")
     assert not harness.gate.promote(candidate, "demo", approval).allowed
+
+
+# -- staging and symlink aliasing (review round 3) ------------------------
+
+
+def test_staging_never_happens_inside_the_watched_skill_root(harness, monkeypatch):
+    """A staging directory inside the root would be a complete, readable copy
+    of the candidate at a name nobody approved -- and U8 found a directory
+    appearing mid-session is loadable straight away."""
+
+    from claude_org_runtime.curator import gate as gate_module
+
+    used_dirs: list[str] = []
+    real_mkdtemp = gate_module.tempfile.mkdtemp
+
+    def recording_mkdtemp(*args, **kwargs):
+        used_dirs.append(str(kwargs.get("dir", args[0] if args else "")))
+        return real_mkdtemp(*args, **kwargs)
+
+    monkeypatch.setattr(gate_module.tempfile, "mkdtemp", recording_mkdtemp)
+
+    candidate = harness.propose()
+    approval = harness.authority.approve(candidate, "demo")
+    assert harness.gate.promote(candidate, "demo", approval).allowed
+    # Promote a second time so the retirement path is exercised too.
+    second = harness.authority.approve(candidate, "demo")
+    assert harness.gate.promote(candidate, "demo", second).allowed
+
+    assert used_dirs
+    root = str(harness.skill_root)
+    for used in used_dirs:
+        assert not used.startswith(root), used
+    assert harness.skill_material() == {"demo/SKILL.md": SKILL_BODY_V1}
+
+
+def test_a_symlinked_target_inside_the_root_is_refused_not_followed(harness):
+    """`skills/demo -> skills/code-review` would let an approval naming `demo`
+    overwrite `code-review`. Resolving the link keeps it inside the root and
+    still breaks the binding the replay check holds, so the link is refused."""
+
+    other = harness.curator.propose("other", {"SKILL.md": "ORIGINAL\n"})
+    other_approval = harness.authority.approve(other, "code-review")
+    assert harness.gate.promote(other, "code-review", other_approval).allowed
+
+    (harness.skill_root / "demo").symlink_to(
+        harness.skill_root / "code-review", target_is_directory=True
+    )
+
+    candidate = harness.propose()
+    approval = harness.authority.approve(candidate, "demo")
+    decision = harness.gate.promote(candidate, "demo", approval)
+
+    assert not decision.allowed
+    assert decision.reason == RefusalReason.TARGET_INVALID
+    assert harness.skill_material()["code-review/SKILL.md"] == "ORIGINAL\n"
+    assert harness.refusals()[0]["reason"] == RefusalReason.TARGET_INVALID
+
+
+def test_a_store_root_that_is_itself_a_symlink_is_refused(harness, tmp_path):
+    """The per-component walk starts *below* the store root, so the root has to
+    be checked on its own -- otherwise a store_root pointing at skill material
+    makes every candidate write a promotion."""
+
+    from claude_org_runtime.curator.stub import CuratorStub
+
+    harness.skill_root.mkdir(parents=True, exist_ok=True)
+    aliased = tmp_path / "aliased-store"
+    aliased.symlink_to(harness.skill_root, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="store root is a symlink"):
+        CuratorStub(aliased).propose("demo", {"SKILL.md": SKILL_BODY_V2})
+
+    assert harness.skill_material() == {}

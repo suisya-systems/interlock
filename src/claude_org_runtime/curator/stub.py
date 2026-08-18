@@ -76,6 +76,13 @@ class CuratorStub:
 
         # Validate every destination first: a store that is half-written when
         # the tenth file turns out to escape is a store that already leaked.
+        # The store root itself first: a store_root that *is* a symlink to
+        # skill material would make every write below it a promotion, and the
+        # per-component walk starts below it and would never look.
+        if self.store_root.is_symlink():
+            raise ValueError(
+                f"candidate store root is a symlink: {self.store_root}"
+            )
         self.store_root.mkdir(parents=True, exist_ok=True)
         _assert_no_symlink_in_chain(self.store_root, root)
         for path in destinations:

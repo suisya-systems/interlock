@@ -358,3 +358,29 @@ def test_control_the_gate_publisher_itself_is_not_a_finding(tmp_path):
         },
     )
     assert audit_synthetic(root) == []
+
+
+def test_control_module_level_write_in_the_gate_module_is_a_finding(tmp_path):
+    """A write at import time is still a write, and it is not inside any
+    function for the publisher rule to skip past."""
+
+    root = build_package(
+        tmp_path,
+        {
+            "curator/gate.py": """
+                from pathlib import Path
+
+                from .skill_root import SkillRoot
+
+                DESTINATION = Path('/somewhere/from/config')
+                DESTINATION.write_text('installed at import time')
+
+                class PromotionGate:
+                    def _write(self, snapshot, destination):
+                        Path(destination).write_bytes(snapshot)
+                """
+        },
+    )
+    findings = audit_synthetic(root)
+    assert "gate-write-outside-publisher" in rules(findings)
+    assert any("module level" in f.detail for f in findings)

@@ -356,43 +356,58 @@ def _mentions_skill_path(node: ast.AST, bound: set[str]) -> bool:
 def _gate_writes_outside_publisher(
     tree: ast.AST, module: str, write_sites: frozenset[str]
 ) -> list[Finding]:
-    """Writes in the gate module that are not in its one publishing method."""
+    """Writes in the gate module that are not in its one publishing method.
 
-    found: list[Finding] = []
+    Every call in the module is considered, not only calls nested in a function
+    definition: a module-level write would otherwise be the one shape of
+    privileged bypass this rule exists to catch and does not.
+    """
+
+    permitted: set[int] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if node.name in write_sites:
-            continue
-        for inner in ast.walk(node):
-            if not isinstance(inner, ast.Call):
-                continue
-            # A nested function named as a write site is still a write site.
-            if _enclosing_write_site(node, inner, write_sites):
-                continue
-            detail = _write_call_detail(inner)
-            if detail is not None:
-                found.append(
-                    Finding(
-                        "gate-write-outside-publisher",
-                        module,
-                        inner.lineno,
-                        f"{detail} in {node.name}(), outside the publishing method",
-                    )
-                )
-    return found
-
-
-def _enclosing_write_site(
-    outer: ast.AST, call: ast.Call, write_sites: frozenset[str]
-) -> bool:
-    for node in ast.walk(outer):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
             node.name in write_sites
         ):
-            if any(inner is call for inner in ast.walk(node)):
-                return True
-    return False
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Call):
+                    permitted.add(id(inner))
+
+    enclosing = _enclosing_functions(tree)
+    found: list[Finding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or id(node) in permitted:
+            continue
+        detail = _write_call_detail(node)
+        if detail is None:
+            continue
+        where = enclosing.get(id(node), "module level")
+        found.append(
+            Finding(
+                "gate-write-outside-publisher",
+                module,
+                node.lineno,
+                f"{detail} in {where}, outside the publishing method",
+            )
+        )
+    return found
+
+
+def _enclosing_functions(tree: ast.AST) -> dict[int, str]:
+    """``id(call) -> "name()"`` for the innermost function enclosing each call."""
+
+    mapping: dict[int, str] = {}
+
+    def visit(node: ast.AST, current: str | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            name = current
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = f"{child.name}()"
+            if isinstance(child, ast.Call) and current is not None:
+                mapping[id(child)] = current
+            visit(child, name)
+
+    visit(tree, None)
+    return mapping
 
 
 # -- rule 3 ---------------------------------------------------------------
