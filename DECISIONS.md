@@ -780,8 +780,13 @@ set**; conversion from provider lifecycle to fact state belongs to the detector 
 fixture-testable and versioned.
 
 **Consequences.**
-- Item 11 becomes assessable, and the three unassigned capabilities above must be assigned explicitly
-  in S1 rather than settled by inertia.
+- Item 11 becomes assessable, and each of the three unassigned capabilities above must be given a
+  named owner explicitly rather than settled by inertia. **Assigning them is not the same as putting
+  them in S1**: message delivery to a worker stays with `MessageBus` per D-0009 and is built as S8, so
+  what S1 records for it is the *absence* of a delivery verb — the property gate items 6 and 11 exist
+  to check. Only capabilities that are genuinely the provider's, such as observing a workspace
+  lifecycle transition, may land in S1, and where a capability belongs to neither contract that must be
+  written down as such.
 - The provisional label is what stops S1 answering Q-0012 (fact-state predicates) or Q-0001-adjacent
   questions by implementation rather than by decision.
 - Leaving the contract implicit and letting S2 define it de facto (option 2c) was rejected: that is
