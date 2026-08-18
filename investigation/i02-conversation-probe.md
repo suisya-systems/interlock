@@ -28,7 +28,7 @@ The positive half, all of it measured on CLI 2.1.234:
 | **The whole cycle on one real worker** | start → structured state read from published output → **stop** (SIGTERM mid-turn, rc 143) → resume, documented flags only, on a worker holding a genuine four-turn conversation (§3.1). |
 | **Continuity across three successive resumes** | Three fresh processes, one `session_id` throughout, **one transcript growing in place** (11 → 18 → 26 → 34 lines, same path, one `sessionId` inside). **No fork-like behaviour** of the U33 class was observed on `-p` (§3.2). |
 | **Continuity across the stopped turn** | The fourth process recalled both the codeword *and* that the previous turn had been interrupted at item 20 of 40. A SIGTERM'd turn is persisted, partial output and a `[Request interrupted by user]` marker included (§3.2). |
-| **Supervisor kill and restart, both child cases** | Child that died with its parent (shared process group, `SIGKILL` to the group) and child that outlived it (reparented to pid 837, still counting). In both, the restarted supervisor read **persisted state only**, resolved the child first, and then resumed. The live orphan was terminated and its exit confirmed at **2.6 s**, its MCP descendants with it (§3.3). |
+| **Supervisor kill and restart, both child cases** | Child that died with its parent (shared process group, `SIGKILL` to the group) and child that outlived it (reparented to pid 837, still counting). In both, the restarted supervisor read **persisted state only**, resolved the child first, and then resumed. The live orphan was terminated and its exit confirmed at **0.60 s**, its MCP descendants with it (§3.3). |
 | **Internals-free negative, on this half and the right way round** | The restriction is on **the harness**, never the child. With the config directory an empty tmpfs and every socket an empty file *for the harness*, create-and-resume behaved identically and the child recalled its codeword; the child's transcript landed in the **real** config directory (§3.4). |
 | **Working-tree ownership** | Across every transition on a fixture carrying uncommitted, untracked **and** unpushed work, the tree stayed **byte-identical by recorded hash** — baseline `0b13bdcc…` at the start, `0b13bdcc…` at the end, `git status` unchanged. The child never moved its `cwd` and created no worktree, **including when given an edit-forcing task** (§3.5). |
 
@@ -42,9 +42,9 @@ The negative half is one hazard and one economics fact:
 |---|------|----------|
 | **Spawn cost is dominated by prompt-cache state, not by configuration** | The *same* arm, run twice, cost **USD 0.379 cold and 0.038 warm** — a 10× swing with identical argv. `--strict-mcp-config` cut the child's tool list from 107 to 26 and its cold cache-creation tokens from 17 949 to 15 186 (−15 %), which is real but an order of magnitude smaller than the cache effect (§3.7). i01 §5.4's "spawn cost is governed by inherited configuration" needs this correction: it is governed by *cache locality first*, configuration second. |
 
-**Worker count and quota.** 12 distinct sessions, **22 model-backed `-p` invocations** (19 foreground
-plus 3 detached supervisor children). 17 captured a `total_cost_usd`, summing to **USD 3.61**; the
-detached children, the refused claim and the aborted turn did not, so 3.61 is a floor. Every process
+**Worker count and quota.** 13 distinct sessions, **24 model-backed `-p` invocations** (20 foreground
+plus 4 detached supervisor children). 18 captured a `total_cost_usd`, summing to **USD 3.67**; the
+detached children, the refused claim and the aborted turn did not, so 3.67 is a floor. Every process
 started was terminated and reaped; the roster shows **zero rows** from this experiment (§4).
 
 ---
@@ -126,6 +126,20 @@ this time (contrast i01 §3.8.4, where it did).
 Records are written verbatim, one JSON object per step, by `i02_conversation_probe.py` to
 `$I02_OUT/records.jsonl`. Excerpts below are quoted from those records; long arrays are elided at
 `…` and nothing else is edited.
+
+**Provenance, since the harness was corrected after a review pass.** A `codex exec review` pass found
+four process-management defects, all fixed before this note was finalised: a detached child inherited
+pipes nobody was left reading (so a talkative orphan could block, or take `EPIPE` the moment the
+supervisor was killed) and now writes to files; the timeout path killed only the spawned pid, missing
+the CLI under a wrapper and every MCP descendant, and now signals the resolved CLI and its
+descendants; stderr was read only after `wait()`, which a chatty run could deadlock on, and is now
+drained alongside stdout; and `supervise`/`restart` accepted state carrying no session id, in which
+case the pid-reuse guard degraded to "any live process whose argv mentions claude" — both now refuse.
+Only one recorded measurement was in the blast radius, **§3.3's case B**, because it is the only one
+where a child ran unread while its supervisor died. It was **re-run against the corrected harness**
+and the figures quoted for it below are the re-run ones; the pre-correction runs are disclosed there
+too, and they agree. No other section spawns a detached child, none hit a timeout, and every
+foreground run recorded an empty stderr, so the remaining three defects could not have touched them.
 
 **Harness self-test before any quota was spent.** Every instrument — the SIGTERM path, the CLI-pid
 resolution under a wrapper, the child-`cwd` sampler, the tree-hash differ, both supervisor-restart
@@ -243,10 +257,12 @@ A new process then read `stateA.json` — pid, argv, cwd, session id — and not
 then resumed: `rc 0`, same `session_id`, result `CINNABAR-33`.
 
 **Case B — a child that outlived its parent.** Same shape, child isolated normally, and only the
-supervisor SIGKILLed:
+supervisor SIGKILLed. This is the run re-executed against the corrected harness, so the child's
+output goes to a file and nothing about its liveness is an artefact of a closed pipe:
 
 ```
-supervisor(only) killed: sup alive=no  child=2618539 alive=yes  reparented_ppid=837
+supervisor(only) killed: sup alive=no  child=2722271 alive=yes  reparented_ppid=837
+                         child stdout file: 10457 bytes at the supervisor's death
 ```
 
 H2 reconfirmed. The restarted supervisor identified the orphan from persisted state — and **not by
@@ -254,25 +270,32 @@ pid alone**: it requires the live command line to still carry the session id it 
 pid reuse would otherwise let it signal a stranger —
 
 ```json
-{"persisted_pid": 2618539, "alive_at_restart": true,
- "cmdline_at_restart": "claude -p Remember this codeword: OBSIDIAN-58. … --session-id c1f9f880-47e2-4…",
- "identified_as_our_child": true, "action": "terminated", "gone_after_s": 2.606,
- "descendants_before_signal": [{"pid": 2618623, "cmdline": "… renga mcp-peer"},
-                               {"pid": 2618628, "cmdline": "bun …/claude-peers-mcp/server.ts"}],
+{"persisted_pid": 2722271, "alive_at_restart": true,
+ "cmdline_at_restart": "claude -p Remember this codeword: PORPHYRY-77. … --session-id 22254e25-0056-4…",
+ "identified_as_our_child": true, "action": "terminated", "gone_after_s": 0.603,
+ "descendants_before_signal": [{"pid": 2722356, "cmdline": "… renga mcp-peer"},
+                               {"pid": 2722363, "cmdline": "bun …/claude-peers-mcp/server.ts"}],
  "descendant_survivors": [], "alive_after_resolution": false}
 ```
 
-— terminated it with SIGTERM, confirmed its exit at **2.606 s**, confirmed its MCP descendants gone
-with it, and only then resumed: `rc 0`, same `session_id`, result `OBSIDIAN-58`.
+— terminated it with SIGTERM, confirmed its exit at **0.603 s**, confirmed its MCP descendants gone
+with it, and only then resumed: `rc 0`, same `session_id`, result `PORPHYRY-77`. The orphan's own
+output file shows it wrote its final `result` event on the way out (13 213 bytes, ending
+`… assistant, user, result`), so the termination was observed from both sides.
+
+The same case was run once before the harness correction, on session `OBSIDIAN-58`: orphan alive at
+restart, identified the same way, terminated, `gone_after_s` **2.606**, resumed `rc 0` with the
+codeword recalled. It agrees with the re-run in every respect except how long the orphan took to die,
+which is a per-run timing and not a property.
 
 The harness refuses the unsafe order structurally: if the child is still alive after resolution it
-records `restart_aborted` and does not resume. That branch did not fire in either case.
+records `restart_aborted` and does not resume. That branch did not fire in any of these runs.
 
-**A third run is disclosed because it is evidence about timing, not a failure.** The first attempt at
-case B killed the supervisor and then took about a minute to reach the restart, by which time the
+**One further run is disclosed because it is evidence about timing, not a failure.** The first attempt
+at case B killed the supervisor and then took about a minute to reach the restart, by which time the
 orphan had **finished its turn and exited on its own**. The restart correctly found it gone and
 resumed (`BASALT-19`, `rc 0`). That is a real and probably common shape — an orphan that completes
-unsupervised — and it is why the two deliberate cases were then produced in single, tightly timed
+unsupervised — and it is why the deliberate cases above were then produced in single, tightly timed
 runs. It also underlines H2 from the other side: an orphan does not merely survive, it *finishes the
 work and writes it into the transcript* the supervisor will later resume.
 
@@ -347,8 +370,8 @@ in this environment is inherited by children.
 ### 3.5 E5 — working-tree ownership (item 7)
 
 **Every transition, against a recorded hash.** The fixture's manifest is a sha256 per file (symlinks
-by target string), rolled into one tree hash, plus the git triple. Baseline and final, after twelve
-foreground transitions and three detached-child spawn-and-kill cycles:
+by target string), rolled into one tree hash, plus the git triple. Baseline and final, after thirteen
+foreground transitions and four detached-child spawn-and-kill cycles:
 
 ```
 BASELINE tree_hash: 0b13bdcc99fbc796aa194058620866159ac829a0b5ac3796225cf8e17fca130a
@@ -377,11 +400,12 @@ p1:resume3                   byte_identical=True  git_identical=True
 p2A:resume-after-restart     byte_identical=True  git_identical=True
 p2B:resume-after-restart     byte_identical=True  git_identical=True
 p2B2:resume-after-restart    byte_identical=True  git_identical=True
+p2B3:resume-after-restart    byte_identical=True  git_identical=True   <- corrected-harness re-run
 negative:unrestricted:create/resume   byte_identical=True  git_identical=True
 negative:restricted:create/resume     byte_identical=True  git_identical=True
 ```
 
-The three **detached** children (spawn, then the supervisor is killed, then the child is either killed
+The four **detached** children (spawn, then the supervisor is killed, then the child is either killed
 with it or terminated at restart) are not covered by a per-turn pair, because at spawn time the
 supervisor is about to die. They are covered by the **cumulative** baseline-to-final comparison above,
 which brackets every one of them. No transition was refused, and none needed to be: none of them
@@ -505,12 +529,12 @@ subject of this note (no transcript means nothing to resume).
 - **On disk, per worker, the residue is the transcript and nothing else.** After the whole run:
 
   ```
-  …/projects/<slug for real/fixture>/     11 files   637 046 bytes
+  …/projects/<slug for real/fixture>/     12 files   702 042 bytes
   …/projects/<slug for real2/fixture>/     1 file     60 077 bytes
   …/projects/<slug>/memory/                0 files    (an empty directory, created per slug)
   ```
 
-  Twelve transcripts totalling ~697 KB for 22 invocations — resumes append to the existing file rather
+  Thirteen transcripts totalling ~762 KB for 24 invocations — resumes append to the existing file rather
   than adding one, so files track *sessions*, not runs. Roughly 45–70 KB per session for conversations
   of a handful of trivial turns; the floor is set by the system prompt the CLI records, not by the
   conversation.
@@ -522,6 +546,9 @@ subject of this note (no transcript means nothing to resume).
   retired. There is no roster row to clear, no process to reap that the supervisor did not itself
   spawn, and no provider-side handle to release. Per §3.6 this same deletion also releases the session
   id, so the cleanup step and the identity model are not independent.
+- **In the experiment's own scratch directory** (outside the config directory, and Interlock's problem
+  only if it adopts the same pattern) each detached child also leaves the `.stdout`/`.stderr` files the
+  corrected harness routes it to, next to the supervisor's persisted state file.
 - **Working tree:** byte-identical at the end of the run (§3.5). The second fixture holds the one file
   §3.5's edit-forcing probe deliberately created. Both fixtures, the quarantine directory and all
   records live under the session scratchpad, outside the repository. Nothing was written inside the

@@ -131,21 +131,38 @@ def child_argv(args):
     return CHILD_WRAPPER + [CLAUDE] + args
 
 
-def spawn(args, cwd, env_extra=None, new_session=True):
+def spawn(args, cwd, env_extra=None, new_session=True, out_path=None):
+    """Spawn the child.
+
+    out_path routes stdout/stderr to files instead of pipes. A detached child
+    MUST use it: nobody is left reading its pipes, so a talkative run would
+    either block on a full pipe or take EPIPE the moment the supervisor is
+    killed -- which would silently change the very lifecycle being observed.
+    """
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
-    return subprocess.Popen(
-        child_argv(args),
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=False,
-        bufsize=0,
-        start_new_session=new_session,
-    )
+    if out_path:
+        out = open(out_path + ".stdout", "wb")
+        err = open(out_path + ".stderr", "wb")
+    else:
+        out = err = subprocess.PIPE
+    try:
+        return subprocess.Popen(
+            child_argv(args),
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            text=False,
+            bufsize=0,
+            start_new_session=new_session,
+        )
+    finally:
+        if out_path:
+            out.close()
+            err.close()
 
 
 class LineReader:
@@ -415,7 +432,7 @@ def summarise_result(ev):
 
 def do_turn(cwd, prompt, session_id=None, resume=None, kill_after=None,
             extra=None, timeout=300, label="", watch_dir=None, detach=False,
-            state_file=None, same_group=False):
+            state_file=None, same_group=False, out_path=None):
     """Spawn one `claude -p` turn and record everything a supervisor can see.
 
     kill_after: seconds after the system/init event at which SIGTERM is sent to
@@ -436,7 +453,8 @@ def do_turn(cwd, prompt, session_id=None, resume=None, kill_after=None,
 
     before = snapshot(watch_dir) if watch_dir else None
     t0 = time.time()
-    p = spawn(args, cwd, new_session=not same_group)
+    p = spawn(args, cwd, new_session=not same_group,
+              out_path=out_path if detach else None)
     target = p.pid
     if CHILD_WRAPPER:
         for _ in range(200):              # resolve the CLI pid under the wrapper
@@ -447,7 +465,7 @@ def do_turn(cwd, prompt, session_id=None, resume=None, kill_after=None,
 
     if detach:
         state = {"label": label, "argv": child_argv(args), "cwd": cwd,
-                 "same_group": same_group,
+                 "same_group": same_group, "child_output_prefix": out_path,
                  "spawned_pid": p.pid, "cli_pid": target, "spawn_ts": t0,
                  "requested_session_id": session_id, "resumed": resume,
                  "child_cwd_at_spawn": proc_cwd(target)}
@@ -458,6 +476,8 @@ def do_turn(cwd, prompt, session_id=None, resume=None, kill_after=None,
         return state
 
     reader = LineReader(p.stdout)
+    err_reader = LineReader(p.stderr)
+    err_chunks = []
     events, cwd_samples = [], []
     init_ev = result_ev = None
     first_event_t = init_t = None
@@ -467,7 +487,7 @@ def do_turn(cwd, prompt, session_id=None, resume=None, kill_after=None,
     watched = []
     while True:
         now = time.time()
-        if p.poll() is not None and reader.eof:
+        if p.poll() is not None and reader.eof and err_reader.eof:
             break
         if now > deadline:
             break
@@ -489,6 +509,7 @@ def do_turn(cwd, prompt, session_id=None, resume=None, kill_after=None,
                     kill_at = now + kill_after
             if j.get("type") == "result":
                 result_ev = j
+        err_chunks.extend(err_reader.drain())
         c = proc_cwd(target)
         if c and (not cwd_samples or cwd_samples[-1]["cwd"] != c):
             cwd_samples.append({"t": round(now - t0, 3), "cwd": c})
@@ -506,11 +527,23 @@ def do_turn(cwd, prompt, session_id=None, resume=None, kill_after=None,
         p.wait(timeout=30)
         timed_out = False
     except subprocess.TimeoutExpired:
+        # Kill the CLI itself and everything under it, then the spawned process.
+        # p.kill() alone signals the spawned pid, which is bwrap when a wrapper
+        # is in use, and never reaches the inherited MCP children in either case.
+        timeout_kills = descendants(p.pid) + ([target] if target != p.pid else [])
+        watched = watched or [{"pid": d, "ppid": ppid_of(d),
+                               "cmdline": (cmdline(d) or "")[:160], "cwd": proc_cwd(d)}
+                              for d in timeout_kills]
+        for pid in timeout_kills:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
         p.kill()
         p.wait()
         timed_out = True
     tail = reader.rest()
-    err = p.stderr.read().decode("utf-8", "replace")
+    err = "\n".join(err_chunks) + err_reader.rest()
     time.sleep(1.0)
     survivors = [d for d in watched if alive(d["pid"])]
     for d in survivors:
@@ -678,10 +711,15 @@ def cmd_leftovers(a):
 def cmd_supervise(a):
     """A minimal supervisor: spawn a child, persist what a restart would need,
     then hold. It is meant to be SIGKILLed from outside."""
+    if not (a.session_id or a.resume):
+        raise SystemExit("supervise requires --session-id or --resume: a child "
+                         "whose id the supervisor never chose cannot be resumed "
+                         "from persisted state, which is the whole experiment.")
     state = do_turn(cwd=os.path.abspath(a.cwd), prompt=a.prompt,
                     session_id=a.session_id, resume=a.resume, extra=a.extra,
                     label=a.label, detach=True, state_file=a.state_file,
-                    same_group=a.same_group)
+                    same_group=a.same_group,
+                    out_path=a.state_file + ".child")
     rec("supervisor_holding", {"label": a.label, "supervisor_pid": os.getpid(),
                                "state_file": a.state_file, "child": state})
     time.sleep(a.hold)
@@ -700,10 +738,15 @@ def cmd_restart(a):
     pid = state.get("cli_pid") or state.get("spawned_pid")
     cmd_at_restart = cmdline(pid) or ""
     sid = state.get("requested_session_id") or state.get("resumed") or ""
+    if not sid:
+        rec("restart_aborted", {"label": a.label,
+                                "reason": "persisted state carries no session id; "
+                                          "refusing to identify a pid or to resume"})
+        return
     # pid reuse is the trap here: only treat it as our child if the command line
-    # still carries the session id we spawned it with.
-    is_ours = alive(pid) and "claude" in cmd_at_restart and (
-        sid in cmd_at_restart if sid else True)
+    # still carries the session id we spawned it with. Without that predicate the
+    # check would accept any live process whose argv mentions claude.
+    is_ours = alive(pid) and "claude" in cmd_at_restart and sid in cmd_at_restart
     resolution = {"persisted_pid": pid, "alive_at_restart": alive(pid),
                   "cmdline_at_restart": cmd_at_restart[:200],
                   "identified_as_our_child": bool(is_ours)}
