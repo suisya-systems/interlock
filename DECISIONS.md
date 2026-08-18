@@ -61,10 +61,17 @@ figures are **measured baseline**.
 | D-0017 | Workers are few, capped, and fenced per role | accepted |
 | D-0018 | Curator is on-demand; skill reflection requires human approval | accepted |
 | D-0019 | The Agent View gate is a precondition; failing it replaces only the `SessionProvider` | accepted |
+| D-0020 | The Agent View gate is discharged by a minimum vertical slice, built contract-first (Strategy B+) | accepted |
+| D-0021 | The `SessionProvider` interface is a provisional spike artifact, promoted only by decision | accepted |
+| D-0022 | Scoped exception to D-0019: gate items 8 and 10 are rehearsed on the spike and proven later | accepted |
+| D-0023 | Gate item 3 is observed by a breach-probe battery, and fail-closed is Interlock's own obligation | accepted |
+| D-0024 | Session identity is settled by experiment first; a negative result fails gate item 2 | accepted |
+| D-0025 | If the gate fails: local execution is mandatory, C2 is the designated second spike, and D-0014 does not reach the `SessionProvider` role | accepted |
+| D-0026 | The spike's durable output is the interface and the tests; implementations are throwaway by default | accepted |
 | Q-0001 | SQLite schema/DDL and migration policy for the SoT tables | proposed |
 | Q-0002 | Incident dedup key composition and re-notification rate in absolute time | proposed |
 | Q-0003 | Reconcile interval and the tolerable detection latency that justifies it | proposed |
-| Q-0004 | Which concrete alternative `SessionProvider` if the Agent View gate fails | proposed |
+| Q-0004 | Which concrete alternative `SessionProvider` if the Agent View gate fails | resolved by D-0025 |
 | Q-0005 | Canary duration, sample size, and numeric exit criteria | proposed |
 | Q-0006 | Retention and scrubbing policy for evidence references and incident history | proposed |
 | Q-0007 | Dispatcher AI auth identity and permission tier in Interlock | proposed |
@@ -81,7 +88,7 @@ figures are **measured baseline**.
 | Q-0018 | Whether repository-root, packaging, and CI files need a classification pass | proposed |
 | Q-0019 | Who owns each of the retired loop's non-detection duties | proposed |
 | Q-0020 | What an incompatible CLI capability probe implies for already-running sessions | proposed |
-| Q-0021 | What scaffold makes each Agent View gate item checkable before implementation | proposed |
+| Q-0021 | What scaffold makes each Agent View gate item checkable before implementation | resolved by D-0020 |
 | Q-0022 | Whether a carried artifact may keep enumerating v1 pane vocabulary as a normative list | proposed |
 | Q-0023 | Whether a carried test may drive a `discard`-classed module to reach the contract it pins | proposed |
 
@@ -693,6 +700,317 @@ the `SessionProvider` is replaced.
 
 ---
 
+## D-0020 — The Agent View gate is discharged by a minimum vertical slice, built contract-first (Strategy B+)
+
+**Context.** Q-0021 recorded that the eleven gate items are not uniform in what they presuppose, and
+that read literally the gate cannot be discharged before the things it tests exist. The proposal
+`docs/proposals/agent-view-gate-scaffold.md` answers that by classifying the items into three tiers —
+T1 (provider probe: items 1, 3, 7), T2 (minimal durable core: items 2, 4, 5, 6, 11) and T3
+(organisational context: items 8, 9, 10) — naming a scaffold inventory S1–S10, giving a minimum
+scaffold and a pass/fail predicate per item (§3.3), and comparing three whole-slice strategies:
+A (probe only), B (minimum vertical slice) and C (contract-first dual provider throughout).
+
+**Decision.** The gate is discharged by **Strategy B+**: Strategy B's minimum vertical slice
+(S1–S9, with S10 carried from `settings/generator.py`) built with one rule taken from Strategy C —
+**S1 is written first, and S3 (the stub provider) is implemented before S2 (the Agent View
+provider)**. The per-item minimum scaffold of §3.3 and the phase order of §3.5 are adopted as the
+gate's discharge plan. Estimated cost is 12–16 engineer-days.
+
+**Consequences.**
+- The discharge order is fixed and its early-exit points are real: phases 0, 1a, 1b and 2a can each
+  end the sequence by producing a Q-0004 situation. A phase that fails its exit condition is a report
+  to a human, not a reason to proceed to the next phase.
+- Writing S3 before S2 means no Agent-View-shaped assumption enters the control-plane suite, so gate
+  item 11 measures a structural property rather than a retrofit. This costs roughly 1–2 days over
+  plain B; item 11 mandates S3 regardless.
+- Item 2 moves from T1 to T2: its crash-window proof needs a durable binding row and a supervisor to
+  kill, so it is not dischargeable by a thin CLI harness.
+- Item 9 has zero session-backend dependency and may run in parallel from day 1, independently of the
+  Agent View verdict.
+- **This discharges nine of the eleven items, not all of them.** Items 8 and 10 are rehearsed only;
+  B+ is therefore adopted together with the scoped D-0019 exception in D-0022 and must not be
+  described as satisfying the precondition without it.
+- Strategy B+ carries the highest over-build risk of the three — a spike schema becoming the schema by
+  inertia, answering Q-0001 by accident. That risk is managed, not avoided, by D-0026.
+- Strategy A was rejected because it leaves seven items open at implementation start, which reads
+  D-0019 as advisory; Strategy C was rejected because S1 designed before any provider exists is a
+  contract designed from imagination.
+
+**Traceability.** The operator's 2026-08-18 ruling covered all ten decisions requested in §6 of the
+proposal. They are recorded as follows:
+
+| §6 Decision | Ruling | Recorded in |
+|---|---|---|
+| 1 — Which Q-0021 strategy? | B+ | D-0020 |
+| 2 — Is the `SessionProvider` interface scaffold or decision? | 2a | D-0021 |
+| 3 — Which items must the spike discharge? | 3a | D-0022 |
+| 4 — How is gate item 3's observable defined? | 4a′ | D-0023 |
+| 5 — Where does fail-closed live? | 5a′ | D-0023 |
+| 6 — Pre-assigned session identity or post-hoc adoption? | 6a | D-0024 |
+| 7 — Which pre-filters apply to Q-0004 candidates? | 7a | D-0025 |
+| 8 — Which candidate is the designated second spike? | 8a | D-0025 |
+| 9 — Does D-0014's discard extend to the `SessionProvider` role? | 9a | D-0025 |
+| 10 — What is the durable output of the spike? | 10a | D-0026 |
+
+**Status.** accepted
+
+**Source.** `docs/proposals/agent-view-gate-scaffold.md` §3 and §6 Decision 1; operator ruling,
+2026-08-18 (recommendation adopted as written). Resolves Q-0021 together with D-0021, D-0022, D-0023,
+D-0024 and D-0026.
+
+---
+
+## D-0021 — The `SessionProvider` interface is a provisional spike artifact, promoted only by decision
+
+**Context.** Gate item 11 says only the `SessionProvider` need be swapped and proposes to demonstrate
+it against "the same contract" — but that contract does not exist in writing. D-0009 names five verbs
+(start, list, obtain structured state of, stop, resume) with no signatures, no state model and no
+error contract. Three capabilities the gate leans on belong to neither contract as written: delivering
+a message to a worker (item 6), reading back a session's *effective* permission / sandbox / hook
+configuration (item 3), and observing or vetoing a workspace lifecycle transition (item 7). Until the
+interface is written down, item 11 has nothing to substitute against.
+
+**Decision.** S1 — the `SessionProvider` interface — is **spike scaffold, not a settled contract**. It
+is written during the Agent View spike (first, per D-0020), marked provisional in the file itself, and
+promoted to a settled contract only by a later `D-` entry. S1 carries five verbs, a provider-neutral
+lifecycle/availability readout including an explicit "could not observe" case, a typed
+error/unavailable result that is never an empty one, and a capability/version probe with a fail-closed
+spawn precondition (D-0010). **S1 must not map provider lifecycle states onto D-0005's fact-state
+set**; conversion from provider lifecycle to fact state belongs to the detector layer, where it is
+fixture-testable and versioned.
+
+**Consequences.**
+- Item 11 becomes assessable, and each of the three unassigned capabilities above must be given a
+  named owner explicitly rather than settled by inertia. **Assigning them is not the same as putting
+  them in S1**: message delivery to a worker stays with `MessageBus` per D-0009 and is built as S8, so
+  what S1 records for it is the *absence* of a delivery verb — the property gate items 6 and 11 exist
+  to check. Only capabilities that are genuinely the provider's, such as observing a workspace
+  lifecycle transition, may land in S1, and where a capability belongs to neither contract that must be
+  written down as such.
+- The provisional label is what stops S1 answering Q-0012 (fact-state predicates) or Q-0001-adjacent
+  questions by implementation rather than by decision.
+- Leaving the contract implicit and letting S2 define it de facto (option 2c) was rejected: that is
+  exactly how session-backend detail leaks into the control plane, which is the failure item 11 exists
+  to catch. Settling the contract as a `D-` entry before the spike (2b) was rejected because it
+  designs the contract before any provider has taught anyone what it must express.
+
+**Status.** accepted
+
+**Source.** `docs/proposals/agent-view-gate-scaffold.md` §2, §3.2 (S1) and §6 Decision 2; operator
+ruling, 2026-08-18 (2a).
+
+---
+
+## D-0022 — Scoped exception to D-0019: gate items 8 and 10 are rehearsed on the spike and proven later
+
+**Context.** D-0019 makes all eleven Agent View gate items pass/fail entry criteria for *starting*
+implementation. Two of them cannot meet that reading. Item 8 (Secretary never blocks) needs a real
+Secretary intake under genuine worker load. Item 10 (canary routing and rollback) needs v1 as a live
+counterparty, which by construction needs the implementation to be running. Item 9, by contrast, has
+zero session-backend dependency and is absent from `ACCEPTANCE.md` §4's re-run list. D-0020 adopts a
+strategy that discharges nine items; this entry records what happens to the other two, because
+describing them as "in force" would be a euphemism.
+
+**Decision.** The Agent View spike discharges tiers T1 and T2 — **items 1–7 and 11** — in full. **Item
+9** is discharged in full, but in parallel and independently of the spike, since it tests nothing about
+the session backend. **Items 8 and 10 are rehearsed on substitutes during the spike and are explicitly
+not discharged before implementation starts. This is a scoped exception to D-0019, limited to those two
+items.** Every gate record entry is labelled either "proven on the spike slice" or "re-proven on the
+real implementation".
+
+The exception is bounded per item:
+
+| Item | Rehearsal during the spike | Real proof | Discharged at |
+|---|---|---|---|
+| **8** — Secretary never blocks | Stub Secretary intake with an explicit queue boundary, driven by a load generator of S4 `--exec` jobs at the worker cap; assert structurally that intake and queue boundary are asynchronous, and record baseline-vs-load latency | The same absence of blocking shown against the real Secretary under genuine worker load, against a threshold settled by Q-0011 | **Before the canary starts** (D-0013) — a Secretary that blocks under load would invalidate the canary's own measurements |
+| **10** — canary routing and rollback | A run-start routing point, a run→owning-system ledger and a writer audit over both stores, against a synthetic counterparty; a rehearsed rollback changes only the routing decision | The same audit with v1 as the live counterparty, under the numeric criteria settled by Q-0005 | **At the canary itself** — the item passes when canary runs complete with exactly one owner per run, no record written by both systems, and a real rollback that changes only routing |
+
+**Consequences.**
+- D-0019 keeps its ID and its `accepted` status; it is not superseded. What changes is that two of its
+  eleven items now have a named, dated discharge point instead of being satisfied up front.
+- Implementation may begin with items 8 and 10 outstanding — and only those two. Any further item
+  slipping past the gate is a new decision, not an extension of this one.
+- If either discharge point is reached without its predicate being met, that is a **gate failure**
+  recorded as such. This exception defers the two items; it does not waive them.
+- Two provider-side unknowns feed item 8's rehearsal and are probed as part of S4: whether the daemon's
+  control interface serialises status queries behind busy workers, and readout latency under N jobs.
+- Option 3b (spike discharges all eleven, deferring implementation until item 10 has a real
+  counterparty) was rejected because it blocks implementation on a canary that needs the
+  implementation, inverting the ordering the Issue gives. Option 3c (formally reclassify 8, 9 and 10
+  out of the gate) was rejected because Q-0021 explicitly warns that reclassification is how a
+  deliberately-placed gate gets weakened.
+
+**Status.** accepted
+
+**Source.** `docs/proposals/agent-view-gate-scaffold.md` §3.1, §3.3 and §6 Decision 3; operator ruling,
+2026-08-18 (3a, adopted with the scoped exception stated explicitly as the proposal requires).
+
+---
+
+## D-0023 — Gate item 3 is observed by a breach-probe battery, and fail-closed is Interlock's own obligation
+
+**Context.** `ACCEPTANCE.md` proposes proving item 3 by diffing a session's effective configuration
+before and after restart. No public surface returns that configuration, so the method is not runnable
+as written. Separately, nothing documented promises fail-closed behaviour on missing or corrupt
+configuration, and there is evidence of fail-*open*. A third hole sits under both: the provider's own
+supervisor can restart a worker with no Interlock spawn call at all, and in the missing/corrupt cases
+the `PreToolUse` backstop may itself be part of what is missing.
+
+**Decision.** Three parts, taken together.
+
+1. **Observable.** First probe for a public effective-configuration readback. If one exists, run item
+   3's equality check as written. If none exists, substitute a **behavioural breach-probe battery** —
+   one forbidden operation per *rule* in the role's fence, not one per role — plus a diff of
+   Interlock's own rendered inputs. **This substitution is recorded as a deliberate weakening of item
+   3, accepted by a human, not as an equivalent method.**
+2. **Fail-closed is Interlock's.** Interlock validates the rendered per-role configuration and refuses
+   to spawn on a broken one, and installs a `PreToolUse` deny hook in session. The obligation is
+   Interlock's under D-0017 regardless of provider, so this work is not wasted under any Q-0004
+   outcome.
+3. **Supervisor-initiated restarts are in scope.** Item 3 additionally requires a fence that mediates
+   restarts initiated by the provider's supervisor rather than by Interlock. Phase 2a's restart-fence
+   probe is a **terminal** exit condition: if no such handle exists, **item 3 fails on Agent View and
+   the sequence routes to Q-0004** rather than continuing to phase 2b.
+
+**Consequences.**
+- The residual is stated rather than hidden: diffing Interlock's rendered inputs proves what we wrote,
+  not what the provider loaded, and that gap is exactly what item 3 exists to close. Probing every
+  rule narrows it; it does not close it.
+- Reading internal state to obtain the effective configuration (option 4b) was rejected outright as a
+  violation of D-0010. Treating item 3 as unprovable and failing the gate on it (4c) remains the
+  honest fallback had the operator declined the weakening; the operator did not decline it.
+- Treating supervisor restarts as covered by the harness's documented persistence (option 5a) was
+  rejected: that guarantee covers the happy path — configuration present and valid — and says nothing
+  about the degraded one the item names.
+- Failing the backend before probing for a handle (5b) and recording D-0017's fail-closed clause as
+  simply unmet (5c) were both rejected; 5c contradicts D-0017 and `CHARTER.md` §3.4.
+- This is the hole that most strongly favours the C2 fallback, since under C2 no other party can
+  restart a worker (see D-0025).
+
+**Status.** accepted
+
+**Source.** `docs/proposals/agent-view-gate-scaffold.md` §3.3 (item 3), §3.5 (phases 2a, 2b) and §6
+Decisions 4 and 5; operator ruling, 2026-08-18 (4a′ and 5a′).
+
+---
+
+## D-0024 — Session identity is settled by experiment first; a negative result fails gate item 2
+
+**Context.** Whether a background session's identity can be chosen *before* spawn is the single
+riskiest unknown in the gate. It decides obligation O6 — a stable session identity re-matchable to a
+run across the crash window, admitting exactly one active writer — for the incumbent provider, and it
+is a one-command experiment.
+
+**Decision.** Run the experiment first, as phase 0, against a **real background session** rather than
+an `--exec` job, and include the case where the requested UUID is already in use. If it succeeds, bind
+session identity to the run **before** spawn. If it fails, search for any other **pre-spawn**
+idempotent identity or fence; if none exists, **gate item 2 fails and the Q-0004 path opens**.
+Post-hoc adoption is explicitly **not** an acceptable substitute for a pre-spawn fence.
+
+**Consequences.**
+- The experiment costs two short model-backed sessions and decides a design, so nothing downstream is
+  built on an untested assumption (option 6b) and nothing pays for the harder path unconditionally
+  (6c).
+- Attribute matching on `cwd` + `startedAt` + `name` is named as *not* a fence and does not rescue
+  item 2: `startedAt` is only knowable after the spawn, `name` is a display name rather than an
+  identity, and a crash-then-retry can leave two matching workers alive before any reconciliation runs.
+- The tail of this decision is the part that matters: a negative result must be allowed to fail the
+  gate. An adoption rule that picks a winner without proving the loser never wrote is a
+  reclassification of item 2 wearing the clothes of a mitigation.
+- Being able to name the identity closes the *binding* half of O6 only. The single-writer half still
+  comes from Interlock's own fencing token, validated atomically as part of each protected write
+  (`ACCEPTANCE.md` §2), and must be tested rather than assumed — under any provider, including the
+  D-0025 fallback.
+
+**Status.** accepted
+
+**Source.** `docs/proposals/agent-view-gate-scaffold.md` §3.3 (item 2), §3.5 (phase 0) and §6 Decision
+6; operator ruling, 2026-08-18 (6a).
+
+---
+
+## D-0025 — If the gate fails: local execution is mandatory, C2 is the designated second spike, and D-0014 does not reach the `SessionProvider` role
+
+**Context.** D-0019 promises that a gate failure replaces only the `SessionProvider`, but Q-0004
+recorded that no candidate backend had been named, and that D-0014's discard of tmux/pane/send-keys
+made "fall back to v1's transport" unavailable as an automatic answer. The proposal derives twelve
+obligations (O1–O12) from D-0009's verbs plus the gate items, and scores eight candidates against them.
+
+**Decision.** Three parts.
+
+1. **Pre-filter.** **Local execution is mandatory** — worker sessions run on the operator's own machine
+   against real local repositories. This removes C4 (cloud sessions / self-hosted environments) and C5
+   (Managed Agents) before scoring. No separate "no server-side retention" pre-filter is added; it is a
+   policy judgement only the operator can make, and the local-execution filter already renders it moot.
+2. **Designated second spike.** If the Agent View gate fails, the designated replacement to spike is
+   **C2 — Interlock-supervised `claude -p` subprocesses**, where Interlock spawns the worker as a child
+   process it owns outright and Interlock's own process supervision *is* the session lifecycle. **C3
+   (the Claude Agent SDK) is recorded as a genuine second choice**, not a weak one.
+3. **Scope of D-0014.** D-0014's discard of tmux/pane/send-keys is a discard of a *message transport*
+   contract and **does not extend automatically** to the `SessionProvider` role. C8 (panes as session
+   lifecycle) stays ranked last on its own merits, and adopting it would require a new `D-` entry.
+
+**Consequences.**
+- Q-0004's "only the `SessionProvider` is replaced" promise now has a concrete referent, which is what
+  the question was opened to fix. Naming none and re-evaluating on the failure's specifics (option 8d)
+  was rejected for that reason; the §5.5 selection criteria still apply if the failure's specifics are
+  unlike the ones anticipated.
+- C2 was chosen on the obligations that cannot be compensated for from the control-plane side: O8
+  (nobody else owns the working tree) and O11 (a real capability probe of the kind D-0010 asks for). It
+  is also the most D-0010-consistent candidate, since every fact about it comes from documented flags.
+- C2 removes the supervisor-restart hole in D-0023 part 3 entirely, because under C2 no other party can
+  restart a worker, so the fail-closed spawn precondition covers every start.
+- C2's O6 advantage is the *binding* window, not proven single-writer: no source states that a second
+  process using the same identity is refused. The exclusion still has to come from Interlock's own
+  fencing token and still has to be tested (see D-0024).
+- C2's cost is that Interlock writes the process supervision the incumbent supplies for free; C3's cost
+  is a dependency whose own reference calls the transport seam internal and subject to change — the
+  same class of risk that produced this gate.
+- Excluding C8 by silent extension of D-0014 would have decided by omission exactly the kind of
+  question Q-0022 was opened to avoid deciding by omission; `CHARTER.md` §4 already draws the same
+  signal-versus-backend-contract distinction for watcher signals, and separating these two roles is
+  D-0009's whole purpose.
+- The gaps listed in §5.4 of the proposal remain open — in particular, no candidate's *interface*
+  stability has a measured churn figure, and no candidate's documentation was found to state whether
+  state-changing endpoints honour a client-supplied idempotency key. This designation is made in
+  knowledge of those gaps.
+
+**Status.** accepted
+
+**Source.** `docs/proposals/agent-view-gate-scaffold.md` §4, §5 and §6 Decisions 7, 8 and 9; operator
+ruling, 2026-08-18 (7a, 8a, 9a). Resolves Q-0004.
+
+---
+
+## D-0026 — The spike's durable output is the interface and the tests; implementations are throwaway by default
+
+**Context.** Strategy B+ (D-0020) builds a slice that is indistinguishable in kind from the real
+implementation, only smaller. That is its one serious weakness: a spike schema becomes *the* schema by
+inertia, and Q-0001 gets answered by accident instead of by decision.
+
+**Decision.** The `SessionProvider` interface (S1) and the tests are the **durable** output of the
+Agent View spike. Every implementation produced by the spike, **including S5's schema**, is
+**throwaway by default** and may be promoted into the real implementation only by a new `D-` entry
+that says so. S5 carries, in the file itself, an explicit note that it is a spike schema and that no
+migration path is promised from it.
+
+**Consequences.**
+- Q-0001 (SQLite schema/DDL and migration policy) stays open until it is decided on its own terms;
+  nothing in the spike closes it by inertia.
+- The tests that matter are named by D-0014's rescue list — accident-derived fixtures, fault injection
+  and recovery tests — which is why treating the whole slice as seed code (option 10b) and treating
+  everything as throwaway (10c) were both rejected: 10b is how a spike schema silently answers Q-0001,
+  and 10c discards the very tests the Carry bucket wants.
+- Promotion becomes an explicit, auditable act rather than a default, which is the mitigation that
+  makes B+'s over-build risk manageable.
+
+**Status.** accepted
+
+**Source.** `docs/proposals/agent-view-gate-scaffold.md` §3.4 (Strategy B mitigation) and §6 Decision
+10; operator ruling, 2026-08-18 (10a).
+
+---
+
 ## Open questions
 
 These are gaps where implementation needs an answer and Issue #740 provides no basis. They are
@@ -753,7 +1071,7 @@ re-notification windows depend on it.
 
 ### Q-0004 — If the Agent View gate fails, which concrete alternative `SessionProvider` is used?
 
-**Status.** proposed
+**Status.** resolved by D-0025
 
 **Question.** D-0019 says the control-plane design survives a gate failure and that "another
 `SessionProvider` is considered", but names no candidate.
@@ -1056,7 +1374,7 @@ required by the Agent View gate (`ACCEPTANCE.md`).
 
 ### Q-0021 — What exactly must exist for each Agent View gate item to be checkable "before implementation"?
 
-**Status.** proposed
+**Status.** resolved by D-0020 (with D-0021, D-0022, D-0023, D-0024, D-0026)
 
 **Question.** The Issue heads the eleven-item list 「実装開始前の Agent View gate」 — before
 implementation starts — and D-0019 records that as decided. But the items are not uniform in what
