@@ -55,7 +55,7 @@ Per-issue fields:
 | `depends_on` | Hard prerequisites, by `id`. |
 | `completes_after` | I-19 only. Issues whose evidence the gate record gathers, which are **not** prerequisites for starting it — see I-19's Dependencies section for why that distinction matters. |
 | `also_written_when` | I-19 only. The failure branches on which the record is written **instead of**, not after, the success-branch evidence. |
-| `c2` | `survives` / `rewritten` / `moot`. See §4. |
+| `c2` | `survives` / `partial` / `rewritten` / `moot`. `partial` means the deliverable stands but its provider-facing half is re-pointed at the new backend. See §4. |
 | `durable` | A **list**, because most issues produce more than one kind of artifact. `contract` = a durable non-code artifact (S1; the gate record). `tests` = durable test material, which D-0014's rescue list and D-0026 both want kept. `throwaway` = an implementation. An issue that builds something *and* tests it carries **both** `tests` and `throwaway`, deliberately: D-0026 makes every implementation throwaway **by default**, including S5's schema, and the two halves must be promotable separately so that keeping the tests never drags the implementation along with them. |
 | `body` | The issue body, verbatim, ready to post. |
 
@@ -73,6 +73,7 @@ conditional on the *provider* at all.
 graph TD
   I01["I-01 · S4-jobs probe"] --> I02["I-02 · S4-sessions probe"]
   I01 --> I03["I-03 · restart-fence probe (TERMINAL)"]
+  I02 --> I03
   I03 --> I04["I-04 · S10 fence renderer + breach battery"]
   I02 --> I05["I-05 · S1 SessionProvider interface"]
   I03 --> I05
@@ -85,6 +86,8 @@ graph TD
   I10 --> I11["I-11 · run the ACCEPTANCE §2 matrix"]
   I05 --> I12["I-12 · S2 Agent View provider"]
   I02 --> I12
+  I06 --> I12
+  I11 --> I12
   I12 --> I13["I-13 · item 2 crash-window proof on S2"]
   I11 --> I13
   I09 --> I14["I-14 · S8 MessageBus + no-edge assertion"]
@@ -99,8 +102,10 @@ graph TD
   I17 -.-> I19
   I18 -.-> I19
   I04 -.-> I19
-  I03 -. "if terminal: record the failure" .-> I19
-  I13 -. "if item 2 fails: record the failure" .-> I19
+  I01 -. "any early exit: record the failure" .-> I19
+  I02 -. .-> I19
+  I03 -. .-> I19
+  I13 -. .-> I19
 ```
 
 **Four things the graph is saying that are easy to miss.**
@@ -128,13 +133,13 @@ search reports, because it decides how much of the issue set is at risk.
 
 | Verdict | Issues |
 |---|---|
-| **Survives unchanged** — no Agent View dependency at all | I-05 (S1), I-06 (S3), I-07 (S5), I-08 (S6), I-09 (S7), I-10 (S9), I-11 (§2 matrix), I-14 (S8), I-15 (item 11), I-16 (item 8 rehearsal), I-17 (item 9), I-18 (item 10 rehearsal), I-19 (ledger) |
-| **Survives with its provider half re-pointed** | I-04 (S10) — the renderer, the `PreToolUse` deny hook and the spawn precondition are Interlock's under D-0017; only "restart preserves the fence" is re-observed against C2 |
-| **Rewritten against C2** — same question, new surface | I-01 (S4-jobs), I-02 (S4-sessions), I-12 (S2 → a C2 provider), I-13 (item 2 proof) |
-| **Moot under C2** | I-03 — under C2 no other party can restart a worker (D-0025), so the supervisor-restart hole D-0023 part 3 opens does not exist and the terminal probe has nothing to probe |
+| **`survives`** — no Agent View dependency at all | I-05 (S1), I-06 (S3), I-07 (S5), I-08 (S6), I-09 (S7), I-10 (S9), I-11 (§2 matrix), I-14 (S8), I-15 (item 11), I-17 (item 9), I-18 (item 10 rehearsal), I-19 (ledger) |
+| **`partial`** — stands, with its provider-facing half re-pointed | I-04 (S10) — the renderer, the `PreToolUse` deny hook and the spawn precondition are Interlock's under D-0017; only "restart preserves the fence" is re-observed against C2. I-16 (item 8 rehearsal) — the Secretary intake and the latency comparison stand, but the load driver is I-01's Agent View `--exec` generator and is replaced along with it |
+| **`rewritten`** — same question, new surface | I-01 (S4-jobs), I-02 (S4-sessions), I-12 (S2 → a C2 provider), I-13 (item 2 proof) |
+| **`moot`** | I-03 — under C2 no other party can restart a worker (D-0025), so the supervisor-restart hole D-0023 part 3 opens does not exist and the terminal probe has nothing to probe |
 
-**13 of 19 issues are untouched by the verdict, and a fourteenth (I-04) keeps everything but its
-provider-facing assertion.** That is the concrete content of D-0019's promise
+**12 of 19 issues are untouched by the verdict, and two more (I-04, I-16) keep everything but their
+provider-facing half.** That is the concrete content of D-0019's promise
 that a gate failure replaces only the `SessionProvider`, and it is why the durable core is worth
 starting even while the fence search is outstanding.
 
@@ -163,7 +168,7 @@ the set before filing, or strip the `labels` field and file untagged.
 | `scaffold/S1` … `scaffold/S10` | §3.2 component. |
 | `size/S`, `size/M` | One worker dispatch; `M` is the long kind. |
 | `durable/contract`, `durable/tests`, `durable/throwaway` | D-0026 lifetime. |
-| `survives/c2`, `agent-view-specific` | §4 split. |
+| `survives/c2`, `partial/c2`, `agent-view-specific` | §4 split. `partial/c2` is the issue that stands with its provider-facing half re-pointed (I-04, I-16). |
 | `terminal-gate` | Failing this issue ends the sequence and routes to `Q-0004`. Only I-03. |
 | `blocked/fence-search` | Held pending `interlock-fence-search-20260818`. Only I-12, I-13. |
 | `parallel/day-1` | No prerequisites; start immediately. Only I-17. |
@@ -340,7 +345,7 @@ issues:
     tier: T1
     gate_items: [3]
     scaffold: [S4]
-    depends_on: [I-01]
+    depends_on: [I-01, I-02]
     c2: moot
     durable: [throwaway]
     body: |
@@ -386,7 +391,10 @@ issues:
       ## Dependencies
 
       I-01 (which already probes for the handle as part of its sweep; this issue is the deliberate,
-      adversarial version of that probe).
+      adversarial version of that probe) **and I-02**. Phase 2a does not start before phase 1b
+      reports: §3.5 makes 1a and 1b early-exit points in their own right, and running the terminal
+      probe while an earlier phase may already have failed spends a dispatch on a sequence that has
+      ended.
 
       ## Notes
 
@@ -396,14 +404,14 @@ issues:
 
   - id: I-04
     title: "S10: carry the per-role fencing renderer, add the `PreToolUse` deny hook and the breach-probe battery"
-    labels: [spike/agent-view, phase/2b, tier/T1, gate-item/3, scaffold/S10, size/M, durable/tests, durable/throwaway, survives/c2]
+    labels: [spike/agent-view, phase/2b, tier/T1, gate-item/3, scaffold/S10, size/M, durable/tests, durable/throwaway, partial/c2]
     size: M
     phase: "2b"
     tier: T1
     gate_items: [3]
     scaffold: [S10]
     depends_on: [I-03]
-    c2: survives
+    c2: partial
     durable: [tests, throwaway]
     body: |
       ## Background
@@ -455,7 +463,7 @@ issues:
 
       ## Notes
 
-      **Survives C2.** D-0023 part 2 states the fail-closed obligation is Interlock's under D-0017
+      **Partially survives C2.** D-0023 part 2 states the fail-closed obligation is Interlock's under D-0017
       "regardless of provider, so this work is not wasted under any `Q-0004` outcome". Only the
       restart-preservation assertion is re-observed against the new provider.
 
@@ -862,7 +870,7 @@ issues:
     tier: T2
     gate_items: [2]
     scaffold: [S2]
-    depends_on: [I-05, I-02]
+    depends_on: [I-05, I-06, I-11, I-02]
     c2: rewritten
     durable: [throwaway]
     body: |
@@ -906,7 +914,12 @@ issues:
 
       ## Dependencies
 
-      I-05, I-02. **Blocked on** `interlock-fence-search-20260818`.
+      I-05, **I-06**, **I-11**, I-02. **Blocked on** `interlock-fence-search-20260818`.
+
+      I-06 and I-11 are hard prerequisites, not scheduling preferences. **S3 before S2** is the one
+      rule B+ takes from Strategy C (D-0020), and §3.5 places phase 6 after phase 5 — building S2
+      while the suite is still being written is exactly how an Agent-View-shaped assumption gets into
+      the tests, which is the failure item 11 exists to catch.
 
       ## Notes
 
@@ -1086,14 +1099,14 @@ issues:
 
   - id: I-16
     title: "Item 8 rehearsal: stub Secretary intake with an explicit queue boundary, under load"
-    labels: [spike/agent-view, phase/9, tier/T3, gate-item/8, scaffold/S4, size/M, durable/tests, durable/throwaway, survives/c2]
+    labels: [spike/agent-view, phase/9, tier/T3, gate-item/8, scaffold/S4, size/M, durable/tests, durable/throwaway, partial/c2]
     size: M
     phase: "9"
     tier: T3
     gate_items: ["rehearses:8"]
     scaffold: [S4]
     depends_on: [I-01]
-    c2: survives
+    c2: partial
     durable: [tests, throwaway]
     body: |
       ## Background
@@ -1137,8 +1150,12 @@ issues:
 
       ## Notes
 
-      Survives C2 as an artifact; per `ACCEPTANCE.md` §4 the item's *evidence* would be re-run
-      against a new provider.
+      **Partially survives C2.** The Secretary intake, the queue boundary and the latency comparison
+      have no provider dependency — but the load driver does: it is I-01's Agent View `--exec`
+      generator, and the U6 serialisation finding it folds in is an Agent View fact. Under C2 the
+      driver is replaced by one that runs `claude -p` workers at the cap, and U6 is re-asked of the
+      new backend. Per `ACCEPTANCE.md` §4 the item's *evidence* is re-run against a new provider
+      regardless.
 
   - id: I-17
     title: "Item 9: Curator promotion gate with a content-digest approval record"
@@ -1259,7 +1276,7 @@ issues:
     scaffold: []
     depends_on: []
     completes_after: [I-04, I-15, I-16, I-17, I-18]
-    also_written_when: [I-03 fails, I-13 fails]
+    also_written_when: [I-01 fails, I-02 fails, I-03 fails, I-13 fails]
     c2: survives
     durable: [contract]
     body: |
@@ -1304,10 +1321,12 @@ issues:
 
       **None — deliberately.** `completes_after` names the issues whose evidence the record gathers
       on the success branch, but they are not prerequisites for *starting* it, because the record is
-      most needed exactly when they never run. If I-03's terminal probe comes back empty, I-04 never
-      begins; if the fence search comes back empty, I-13 is closed as a gate failure and I-15 is
-      never reached. In both branches this issue is still due, and its content is the failure and the
-      route to `Q-0004` (D-0025).
+      most needed exactly when they never run. §3.5 makes **phases 1a, 1b and 2a** early-exit points
+      and D-0024's tail adds item 2: if I-01's supervisor verbs do not work through documented
+      commands, if I-02 fails item 1 or item 7, if I-03's terminal probe comes back empty, or if the
+      fence search comes back empty and I-13 is closed as the gate failure it is — in every one of
+      those branches the downstream evidence never arrives, and in every one this issue is still due.
+      Its content is then the failure and the route to `Q-0004` (D-0025).
 
       Practically: open it at the start of the spike, fill rows as evidence lands, and close it when
       the sequence ends — by discharge or by termination.
