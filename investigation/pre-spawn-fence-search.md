@@ -20,7 +20,7 @@ Two independent results, one per part of the task.
 ### Part A — the pre-spawn fence search on Agent View
 
 **The search came up empty.** On CLI 2.1.234 no public `--bg` surface lets a caller commit a session
-identity, or acquire an exclusive claim, *before* the spawn. Ten candidate handles were examined
+identity, or acquire an exclusive claim, *before* the spawn. Eleven candidate handles were examined
 (§3.2); every one is either discarded at spawn, documented as explicitly *not* deduplicated, a
 post-spawn artifact, or out of scope under `D-0025`'s local-execution pre-filter.
 
@@ -94,7 +94,7 @@ command was therefore run with the sandbox lifted**, and control C1 (§4.2) conf
 mechanism was live in the environment where the U27 races ran. The `--bg` spawns needed the sandbox
 lifted anyway, for the same reason U1's E2 did.
 
-Sessions started: five `--bg` sessions (A1, A2a, A2b, A3, A4), all stopped and removed (§6), plus a
+Sessions started: six `--bg` sessions (A1, A2a, A2b, A3, A4, A5), all stopped and removed (§6), plus a
 number of short `-p` runs, which hold no roster row and no process.
 
 ---
@@ -112,12 +112,13 @@ exists. Anything outside this list is *unsearched*, not *absent*.
   claim.
 - `claude agents --help` — the whole Agent View management surface.
 - `claude project --help`.
-- The four undocumented background commands, whose usage lines were read verbatim: `claude stop`,
-  `claude rm`, `claude attach`, `claude logs`.
+- The background commands that are absent from the top-level `Commands:` block (V5), whose usage lines
+  were read verbatim: `claude stop` (alias `claude kill`), `claude rm`, `claude attach`, `claude logs`,
+  `claude respawn`, `claude daemon`.
 - Probes for a hypothetical create-with-identity subcommand:
   `claude spawn|start|new|run|exec|dispatch|session|sessions --help`. **None exists** — every one falls
-  through to root help, so the background lifecycle surface is exactly `--bg` + `agents` +
-  `stop`/`rm`/`attach`/`logs`.
+  through to root help. So the background lifecycle surface is `--bg` + `agents` + those six commands,
+  and no verb on it creates a session at a caller-supplied identity.
 
 **Official documentation (`code.claude.com/docs/en/`), read for this question:**
 `agent-view`, `cli-reference`, `worktrees`, `sessions`, `env-vars`.
@@ -149,9 +150,10 @@ Every candidate is a public handle that could conceivably be committed to SQLite
 | 8 | `claude agents` dispatch flags | `claude agents --help` | **No.** The subcommand sets *defaults* for dispatched sessions (`--agent`, `--model`, `--settings`, ...). It has no create verb and no identity argument. |
 | 9 | `--exec` job identity | agent-view; F4 | **Out of scope by construction** — a job has no conversation (F4/U30). |
 | 10 | `--cloud` / `--environment` / `--teleport` / `--remote-control [name]` | `claude --help`; cli-reference | **Out of scope** under `D-0025` part 1 (local execution mandatory). |
+| 11 | `claude respawn <id>` | `claude respawn --help` (2.1.234); V5/V6 | **No — but for an instructive reason.** It takes an id the **CLI already assigned**, so there is nothing to commit before the first spawn. A5 below shows it *does* preserve identity exactly across a restart, which is a real durability property for C1 and is reported as such; it is simply not a pre-spawn one. |
 
-Rows 1-3 and 5 were refuted by experiment; rows 4, 6 and 8 by documentation plus the help text; rows
-7, 9 and 10 by observation or by prior decision.
+Rows 1-3, 5 and 11 were refuted by experiment; rows 4, 6 and 8 by documentation plus the help text;
+rows 7, 9 and 10 by observation or by prior decision.
 
 ### 3.3 A1 — `--bg --resume <uuid>`, the most promising candidate
 
@@ -287,6 +289,43 @@ carve-out exactly. This is the documented behaviour of the *only* caller-control
 on the surface, and it is an anti-fence: names collide silently. It also re-confirms V20 / `D-0024`'s
 "`name` is a display name rather than an identity" from the other direction — the U1 note showed the
 CLI *generates* names, and this shows the CLI *does not deduplicate* the ones you set.
+
+### 3.4.1 A5 — `claude respawn`, and what it does and does not give
+
+`respawn` is the one lifecycle verb that takes a session id as an argument, so it deserves an explicit
+verdict rather than an omission. Its help on 2.1.234:
+
+```
+$ claude respawn --help
+Usage: claude respawn <id>|--all
+
+  Restart a background session (or all of them) so it picks up the current Claude binary.
+```
+
+A background session was created, then respawned:
+
+```
+BEFORE: {"id": "146e3885", "sessionId": "146e3885-c07c-406d-8b5c-7389c2dbd375", "state": "done", "pid": 1412464}
+$ claude respawn 146e3885
+respawned 146e3885
+--- EXIT CODE: 0 ---
+AFTER:  {"id": "146e3885", "sessionId": "146e3885-c07c-406d-8b5c-7389c2dbd375", "state": "done", "pid": 1412465}
+```
+
+**Identity is preserved exactly across the restart** — same short id, same `sessionId`, new pid. That
+is a genuine durability property of the incumbent, and it is the C1 analogue of what U28 found on the
+`-p` surface. It is reported here in C1's favour.
+
+It is still **not a pre-spawn fence**, for the reason that decides every candidate in §3.2: `146e3885`
+is an identity the **CLI chose**, learned only after the spawn. `respawn` can restart a session whose
+identity Interlock already knows; it cannot let Interlock commit that identity before the session
+exists, which is what F3's crash window requires.
+
+Two concurrent respawns of the same session were also run, since a restart race is adjacent to
+`D-0023` part 3's supervisor-restart hole. Both returned exit 0 (`respawned 146e3885`), and afterwards
+the roster held **exactly one row with one pid**. Whether one process was started and replaced, or two
+were started and one reaped, was not observed, so this is recorded as an observation and not as an
+exclusion guarantee.
 
 ### 3.5 A3 — undocumented environment variable probe
 
@@ -508,10 +547,12 @@ atomically as part of each protected write (`ACCEPTANCE.md` §2).**
   within a ~2-3 s window at creation (U27) and any number of concurrent writers via `--resume` (U32).
 
 The dangerous shape is worth spelling out, because it is exactly item 2's predicate: a supervisor
-crashes, is restarted promptly, and retries the spawn. A retry issued *within a couple of seconds* —
-which is what a healthy supervisor does — lands **inside** U27's window. The provider will admit both.
-Nothing outside Interlock will stop the second writer, and per `D-0023` part 3 fail-closed is
-Interlock's own obligation regardless.
+crashes, is restarted promptly, and retries the spawn. In the environment measured here, a retry
+issued within a couple of seconds — which is what a healthy supervisor does — landed **inside** the
+admission window, and both claimants were admitted. The window's width is a one-machine, one-load
+measurement (§4.3, U34), so the timing must not be read as a constant of the provider; what *is*
+general is that a window exists and that nothing outside Interlock closes it. Per `D-0023` part 3,
+fail-closed is Interlock's own obligation regardless.
 
 The practical reading: Interlock's fencing token is not a belt-and-braces addition to a provider
 guarantee. On the evidence available today it is **the only exclusion in the system**, and its tests
@@ -538,7 +579,7 @@ about as a design of Interlock's, with its own `D-` entry. It was not tested her
 
 ## 6. Cleanup
 
-All five background sessions started by this experiment were stopped and removed:
+All six background sessions started by this experiment were stopped and removed:
 
 ```
 $ claude stop 92f1437a → stopped;  claude rm 92f1437a → removed
@@ -546,6 +587,7 @@ $ claude stop 214f1076 → stopped;  claude rm 214f1076 → removed
 $ claude stop 3811ccb3 → stopped;  claude rm 3811ccb3 → removed
 $ claude stop 4f459d6f → stopped;  claude rm 4f459d6f → removed
 $ claude stop ef3e58d6 → stopped;  claude rm ef3e58d6 → removed
+$ claude stop 146e3885 → stopped;  claude rm 146e3885 → removed
 ```
 
 Roster verification afterwards:
