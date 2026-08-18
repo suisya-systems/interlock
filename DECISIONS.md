@@ -68,6 +68,7 @@ figures are **measured baseline**.
 | D-0024 | Session identity is settled by experiment first; a negative result fails gate item 2 | accepted |
 | D-0025 | If the gate fails: local execution is mandatory, C2 is the designated second spike, and D-0014 does not reach the `SessionProvider` role | accepted |
 | D-0026 | The spike's durable output is the interface and the tests; implementations are throwaway by default | accepted |
+| D-0027 | Gate item 2 fails on Agent View; C2 becomes the spike's `SessionProvider` | accepted |
 | Q-0001 | SQLite schema/DDL and migration policy for the SoT tables | proposed |
 | Q-0002 | Incident dedup key composition and re-notification rate in absolute time | proposed |
 | Q-0003 | Reconcile interval and the tolerable detection latency that justifies it | proposed |
@@ -1008,6 +1009,125 @@ migration path is promised from it.
 
 **Source.** `docs/proposals/agent-view-gate-scaffold.md` §3.4 (Strategy B mitigation) and §6 Decision
 10; operator ruling, 2026-08-18 (10a).
+
+---
+
+## D-0027 — Gate item 2 fails on Agent View; C2 becomes the spike's `SessionProvider`
+
+**Context.** D-0024 made session identity an experiment-first question and gave its negative result a
+tail: if the pre-spawn experiment fails, search for any other **pre-spawn** idempotent identity or
+fence, and "if none exists, gate item 2 fails and the Q-0004 path opens". The experiment failed (U1),
+the search ran as `interlock-fence-search-20260818`, and it came up empty. That tail is now due, and
+Q-0004's answer is already on the record: D-0025 designated **C2 — Interlock-supervised `claude -p`
+subprocesses** as the second spike.
+
+**Decision.** Four parts.
+
+1. **Item 2 fails on Agent View (C1).** The pre-spawn fence search D-0024 triggered came up empty on
+   the documented CLI surface of 2.1.234. Gate item 2 therefore **fails on Agent View**, and the
+   Q-0004 path opens.
+2. **C2 is adopted as the spike's `SessionProvider`,** per D-0025's designation. C3 (the Claude Agent
+   SDK) remains the recorded second choice and is not re-opened by this entry.
+3. **The exclusion is Interlock's own, under either provider.** No provider surface examined supplies
+   an exclusion primitive item 2 could rest on; the single-writer half of O6 comes from Interlock's own
+   fencing token, validated atomically as part of each protected write (`ACCEPTANCE.md` §2).
+4. **Nothing else in the gate moves.** D-0019's and D-0022's gate structure and D-0025's candidate
+   evaluation stand unchanged; only what S2 implements changes.
+
+**Basis for the fail, and what would overturn it.** Twelve candidate handles were examined; every one
+is discarded at spawn, documented as explicitly *not* deduplicated, a post-spawn artifact, or out of
+scope under D-0025's local-execution pre-filter (`investigation/pre-spawn-fence-search.md` §3.1 for
+the surfaces searched, §3.2 for the candidate table). Rows 1–3, 5, 11 and 12 were refuted by
+experiment rather than by reading. Exhaustiveness is not claimed: §3.1 enumerates what was read, and
+anything outside it is *unsearched*, not *absent*.
+
+The falsification conditions are carried over verbatim in substance from §5.1, so this decision can be
+overturned on evidence rather than on argument. Any one of the following overturns it:
+
+- a documented handle on a surface not in §3.1's list;
+- a future CLI release that honours `--session-id` under `--bg`;
+- a future release that adopts the id named by `--resume` as the background session's own identity
+  rather than forking;
+- a future release that refuses a duplicate `--name` for background sessions;
+- a `WorktreeCreate` hook arrangement that turns worktree creation into a genuine pre-spawn exclusive
+  claim (§5.4).
+
+None is available today, and D-0024 asks for the verdict on what exists, not on what might. This is a
+failure of the *provider*, not of the gate's design: item 2's predicate is unchanged, and softening it
+would be a reclassification rather than a mitigation.
+
+**What U27, U28 and U32 settle.**
+
+| Result | Finding | Consequence |
+|---|---|---|
+| **U27 — negative** | The `-p` `--session-id` refusal is **not atomic**: an admission window of roughly 2–3 s on one machine, in which 5 of 5 simultaneous trials admitted **both** processes, both exiting 0, both reporting the same `session_id`, and **both writing to the same transcript** | The create path C2 would use has no usable exclusion at its front edge. The width is a one-machine, one-load measurement (U34) and must not be designed on as a constant |
+| **U28 — positive, both halves** | After a SIGKILL of the holder the claim held through every probe taken (out to ~25 minutes), and `--resume` returned the same `session_id` with exit 0 | Identity is **durable across a crash**. This is the binding half of O6 and was part of why C2 was designated |
+| **U32 — registered** | `--resume` carries **no exclusion at all**: two concurrent `claude -p --resume <same uuid>` processes were both admitted, simultaneously and at a 5 s stagger | The path C2 actually uses after a crash excludes nothing. U28's positive is about *durable identity* only, and carries no single-writer content |
+
+Taken together these say the same thing from both directions, and it is the same thing part 3 states:
+**exclusion is not obtainable from the provider, and this is as true under C2 as it was under C1.** On
+C1 there is no identity input at all, so there is nothing to fence with; on C2 there is a durable
+identity that admits two writers inside the creation window and two concurrent writers via `--resume`.
+The exposure item 2 names is the narrow one: the original claimant crashing while still inside the
+admission window, followed by a retry that also lands inside it — F3's crash window exactly.
+
+The `--bg --resume` result carries its own lesson and is recorded as such: the flag is honoured for
+*content* and ignored for *identity*, exit 0 and no warning of any kind, with a copy of the transcript
+written under a new CLI-assigned id. A caller that committed the requested UUID before the spawn would
+hold a binding to **no live session** while the work ran under an id it never saw. The general rule
+this fixes: **do not treat exit 0, or a binding committed before the spawn, as evidence that the
+identity was accepted.** Readback of what the provider actually assigned is required, and that
+requirement is not specific to Agent View.
+
+**Scope of the C2 adoption.**
+
+- **Unchanged.** D-0019 (gate is a precondition; a failure replaces only the `SessionProvider`),
+  D-0022 (scoped exception for items 8 and 10), D-0023 (item 3's breach-probe battery and Interlock's
+  own fail-closed obligation), D-0024 (the experiment-first rule, whose tail this entry discharges),
+  D-0025 (the candidate evaluation and its designation of C2, **including C2's O6 grade, which stays
+  `~`**) and D-0026 (durable output) all keep their IDs and their `accepted` status. None is
+  superseded and none is amended by this entry.
+- **Changed.** The implementation target of **S2** is replaced: the spike builds a **C2**
+  `SessionProvider` — Interlock spawning the worker as a child process it owns outright, with
+  Interlock's own process supervision *as* the session lifecycle — instead of an Agent View provider.
+- **O6's grade does not move.** It stays `~` on a materially worse footing than U1 left it: durable
+  identity plus crash survival are established, with no usable exclusion primitive. A move to `Y`
+  would be wrong on this evidence; so would a move to `N`.
+- D-0023 part 3's supervisor-restart hole does not exist under C2, since no other party can restart a
+  worker. The fail-closed spawn precondition therefore covers every start — which is a property of the
+  adoption, not a licence to skip it.
+
+**Consequences for the 19-issue plan.** `docs/plans/spike-issue-decomposition.md` §4's survival matrix
+is the named reference for what this verdict does to the issue set: 12 issues survive untouched, I-04
+and I-16 stand with their provider-facing half re-pointed, I-01/I-02/I-12/I-13 are rewritten onto the
+new surface, and I-03 is moot. Two cautions from §4 apply as written: "survives" means the issue's
+*deliverable* survives, not the gate evidence it produced — `ACCEPTANCE.md` §4 still requires items 1,
+2, 3, 7, 8 and 10 to be re-run in full against a new provider — and the `sequence_precondition` that
+held the set is now discharged. **Rewriting the issue texts onto C2 is explicit follow-up work and is
+not performed by this entry.**
+
+**Consequences.**
+- D-0024's tail is discharged rather than left hanging: the negative result was allowed to fail the
+  gate, which is the part of D-0024 that mattered. No adoption rule was invented to rescue item 2.
+- Q-0004's path is opened and immediately answered by the referent D-0025 already put there, so the
+  gate failure costs a provider and not a design. This is D-0019's promise being paid out in the
+  concrete.
+- The fencing token and its tests move from "belt and braces" to the **only exclusion in the system**
+  on the evidence available today. D-0014's rescue list — accident-derived fixtures, fault injection,
+  recovery tests — is where the item-2 risk is now carried, and those tests must exist before C2 is
+  trusted with a protected write.
+- C2's cost stands as D-0025 stated it: Interlock writes the process supervision the incumbent
+  supplied for free.
+- U34, U36 and U37 remain open. In particular the admission window's width is unexplained, so a
+  supervisor retry delay must not be designed against the measured 2–3 s figure.
+- Nothing here promotes any spike artifact: D-0026 still governs, and the C2 provider is throwaway by
+  default like every other implementation the spike produces.
+
+**Status.** accepted
+
+**Source.** `investigation/pre-spawn-fence-search.md` (2026-08-18) §3.1, §3.2, §5.1, §5.2, §5.3 and
+§7; `docs/plans/spike-issue-decomposition.md` §4; operator ruling, 2026-08-18 (adopting §5.1's
+proposed reading). Enacts D-0024's negative-result tail and applies D-0025's designation.
 
 ---
 
