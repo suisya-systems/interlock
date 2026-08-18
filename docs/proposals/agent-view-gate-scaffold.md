@@ -139,8 +139,19 @@ disclaimer gate, which is a consent gate, not a config-integrity gate. **Implica
 cannot be inherited from the harness. Interlock must own it, as a *spawn precondition* — validate the
 rendered per-role configuration and refuse to spawn — plus a `PreToolUse` hook as the in-session
 backstop, since a hook deny is documented to run first and to apply even under `bypassPermissions`
-(W3). This is an Interlock obligation whichever provider wins, so building it is not
-provider-specific work.
+(W3). This is an Interlock obligation whichever provider wins, so building it is not provider-specific
+work.
+
+**But on this provider the precondition has a hole, and it is a serious one.** V8 states that the
+supervisor "restarts a session whose process exits unexpectedly". That restart happens **without an
+Interlock spawn call**, so a spawn precondition never runs for it — precisely in the situation gate
+item 3's missing/corrupt cases describe, where a configuration went absent between the original spawn
+and the restart. The `PreToolUse` backstop does not close it either: in exactly those cases the hook
+is itself part of the configuration that may be missing or unresolvable, and a hook that is not there
+denies nothing. Discharging item 3 on Agent View therefore needs a fence that mediates **every**
+restart, not only Interlock-initiated ones — and no such handle is evidenced. This is a second
+provider-specific failure candidate alongside F3/F6, and it is one that C2 does not have, because
+under C2 there is no other party that can restart a worker. It is put to a human as Decision 5.
 
 **F3 — Session identity is reported after the fact, and pre-assigning it is unverified (V2, V21;
 Appendix A/U1).** `--bg` prints the short ID after the spawn; `--session-id <uuid>` exists as a
@@ -263,7 +274,7 @@ proposed; nothing else is required by any item.
 
 | ID | Artifact | Rough size |
 |---|---|---|
-| **S1** | `SessionProvider` interface: five verbs, a session state model mapped onto `D-0005`'s closed fact-state set, a typed error/unavailable result (never an empty one — R4), and a capability/version probe with a fail-closed spawn precondition (`D-0010`). | interface + docstrings; ~150 LOC |
+| **S1** | `SessionProvider` interface: five verbs, a **provider-neutral lifecycle/availability readout** (the backend's own states plus an explicit "could not observe" case), a typed error/unavailable result — never an empty one (R4) — and a capability/version probe with a fail-closed spawn precondition (`D-0010`). **S1 must not map its states onto `D-0005`'s fact-state set.** Those six values are *watcher facts* whose predicates and precedence `Q-0012` leaves open; folding a provider's `blocked` / `done` / `failed` into them inside a provisional interface would either lose information or answer `Q-0012` by implementation. Conversion from provider lifecycle to fact state belongs to the detector layer, where it is fixture-testable and versioned (`D-0005`, `Q-0009`). | interface + docstrings; ~150 LOC |
 | **S2** | Agent View provider implementing S1 over `--bg` / `agents --json` / `stop` / `respawn`, with a tolerant parser (V26 — no schema guarantee). | ~300 LOC |
 | **S3** | Stub provider implementing S1 over local child processes, with no Claude in the loop. Deliberately trivial (gate item 11 names it). | ~150 LOC |
 | **S4** | CLI probe harness, in two halves (F4): **S4-jobs** drives supervisor-facing behaviour with `--exec` jobs at zero model cost, and **S4-sessions** drives conversation resume and the worktree lifecycle with a small number of model-backed `--bg` sessions, which no job can stand in for. Both assert the internals-free negative (paths made unreadable) and record CLI version and probe output. Throwaway by construction. | ~250 LOC + fixtures |
@@ -284,7 +295,7 @@ and flags where the evidence available makes the proposed method unrunnable as w
 |---|---|---|---|---|
 | 1 | T1 | S4 | Every one of start / structured-state read / stop / resume completes using only documented public commands, and the harness behaves identically with `~/.claude/jobs`, internal sockets and transcript paths made unreadable. | Verbs are all present and documented (V1, V3, V5, V6, V7). Two caveats: "resume" for a background session is `claude respawn` (V6), not `--resume`, which reopens local history; and `claude attach` needs a terminal, so it is not a control-plane verb. Record the CLI version and probe output (V22 `capabilities`, else `--version`) per `D-0010`. |
 | 2 | T2 | S1 + S2 + S5 + S9 | After a kill at each injection point, re-identification yields **exactly one** session per run, and a second writer is refused and the refusal recorded. | Design must not assume pre-assigned IDs until U1 is settled (F3). **If U1 fails, this item fails** unless some other *pre-spawn* idempotent identity or fence is found — see F6. Attribute-matching on `cwd` + `startedAt` + `name` is not such a fence and does not rescue it: `startedAt` is only knowable after the spawn, `name` is documented as a display name and not an identity (V20), and a crash-then-retry can leave two matching workers alive before any reconciliation runs. `ACCEPTANCE.md` states that "A single-writer violation at any injection point is a gate failure"; recording a weaker guarantee instead would be reclassifying the item, not passing it. |
-| 3 | T1 | S4 + S10 | Restart preserves the fence, **and** a deliberately broken configuration causes a **refused** spawn, never a downgraded one, with the refusal recorded. A role-forbidden operation is denied after restart. | `ACCEPTANCE.md` proposes diffing the effective configuration before and after restart. **There is no public readback of effective configuration** (Appendix A/U3), so that method is not runnable as written. Proposed substitute: a *behavioural* breach probe — attempt one forbidden operation per role and assert denial — as the observable, with the config diff done on Interlock's own rendered inputs. And per F2 the fail-closed half must be Interlock's own spawn precondition; asserting it against the harness would be asserting something no source promises. |
+| 3 | T1 | S4 + S10 | Restart preserves the fence, **and** a deliberately broken configuration causes a **refused** spawn, never a downgraded one, with the refusal recorded — **including when the restart is initiated by the provider's supervisor rather than by Interlock (V8)**. A role-forbidden operation is denied after restart. | `ACCEPTANCE.md` proposes diffing the effective configuration before and after restart. **There is no public readback of effective configuration** (Appendix A/U3), so that method is not runnable as written. Proposed substitute: a *behavioural* breach probe — attempt one forbidden operation per role and assert denial — as the observable, with the config diff done on Interlock's own rendered inputs. And per F2 the fail-closed half must be Interlock's own spawn precondition; asserting it against the harness would be asserting something no source promises. **The supervisor-restart path (V8) is the open hole:** it runs with no Interlock spawn call, and in the missing/corrupt cases the `PreToolUse` backstop may itself be the missing configuration. Probing for a handle that mediates it is part of S4-jobs; if none exists, this item fails on this provider. |
 | 4 | T2 | S5 + S6 + S7 + S9 | State is reconstructed by query from SQLite alone; work resumes from unresolved incidents; every side effect is applied exactly once, evidenced by an idempotency/dedup record. | The "supervisor" in this row is Interlock's, not Claude Code's. What the *provider's* supervisor does under an ungraceful kill is separately unknown (Appendix A/U4) and should be probed as part of S4 rather than assumed. |
 | 5 | T2 | S6 + S7 + S9 | Every case in `ACCEPTANCE.md` §2 is automated and reproducible, and each external-effect case is additionally proven against the destination's own idempotency record. | The one handler in S7 must *name* its mechanism. If no candidate destination offers an idempotency key, `ACCEPTANCE.md` §2's second option — transactional commit of effect and record together — is the only route, and where neither is achievable the action needs a human gate (`D-0004`). R1/R2 supply the invariants; R3 rules out the "corrupt state recovers as empty" behaviour outright. |
 | 6 | T2 | S8 + S7 + one dispatched worker | With no agent-view UI attached, a task is sent, the first delivery is dropped, and the outbox resends with exactly one ack. Repeat with the UI attached but stale; outcomes unchanged. Static assertion: no dependency edge from `MessageBus` to `SessionProvider`. | Per F1 the transport is necessarily worker-outbound; the "UI not attached" condition is trivially satisfiable because the UI is not on the delivery path at all. This makes the item *easier* than it reads, and that should be stated in the gate record rather than claimed as a strong result. |
@@ -540,7 +551,7 @@ only — an unknown is never scored as a pass.
 | **O3** structured state | Y (V3, V4) but no schema guarantee (V26) | Y (V22 `stream-json` + `capabilities`) | Y (W2) | ~ (W5 json only for queueing) | **Y** — designed status enum (W8) | ? | N — screen text only |
 | **O4** stop one session | Y (V5) | Y — signal, semantics documented (V23) | Y — SDK owns the child process (W1a) | ~ (W5, UI delete) | Y (W8, interrupt-then-act) | ? | Y |
 | **O5** resume | Y (V6 `respawn`) | Y (V21 `--resume`) | Y (W2) — but docs advise not relying on it | ~ (W5 `--teleport` preconditions) | Y (W8 idle→running) | ? | ~ |
-| **O6** identity across crash window | **?** — the decisive unknown (F3/U1) | **Y** — caller-supplied UUID before spawn (V21) | Y (W2 session_id) | ~ | Y (server-assigned, durable) | ? | N — pane IDs are not durable identity |
+| **O6** identity across crash window | **?** — the decisive unknown (F3/U1) | **~** — the ID can be chosen before spawn (V21), which closes the *binding* half; but no source states a second process using the same UUID is **refused**, so the single-writer half is unverified (U13) | ~ — same gap as C2 (W2 gives an ID, not an exclusion) | ~ | Y (server-assigned, durable) | ? | N — pane IDs are not durable identity |
 | **O7** per-role fence, fail closed | ~ persists (V13); fail-closed **not** promised, evidence of fail-open (V15, V16) | ~ same harness; but Interlock owns the spawn precondition end to end | ~ best surface (W3) yet per-role override void under three modes (W4) | ? | ~ mid-session policy replacement (W8), idle-only | ? | ~ same as C1/C2 |
 | **O8** workspace lifecycle | ~ documented, partly contradictory (V11, F5); `WorktreeRemove` is the veto handle (V12) | **Y** — Interlock owns the working tree; no provider reclaims it | Y — same | N — VM reclaimed (W5); untracked files excluded from bundling | ~ delete destroys sandbox files (W8) | ? | Y |
 | **O9** readout not serialised | ? (U6) | Y — reading Interlock's own rows | Y — worker is a child process (W1a) | ? | ~ read endpoints rate-limited, not blocked (W8) | ? | ~ |
@@ -550,11 +561,18 @@ only — an unknown is never scored as a pass.
 
 **Reading the matrix.** Two things stand out and neither is a recommendation.
 
-- **C2 scores best on the obligations that are hardest to work around** — O6 (identity chosen before
-  spawn), O8 (nobody else owns the working tree), O11 (a real capability probe). Those are exactly
-  the three where C1's position is weakest or unknown. C2 is also the most `D-0010`-consistent
-  candidate, since every fact above comes from documented flags rather than from `--help` archaeology.
-  Its cost is that Interlock must write the process supervision C1 supplies for free.
+- **C2 scores best on the obligations that are hardest to work around** — O8 (nobody else owns the
+  working tree), O11 (a real capability probe), and the *binding* half of O6 (the ID is chosen before
+  the spawn). Those are the places where C1's position is weakest or unknown. C2 is also the most
+  `D-0010`-consistent candidate, since every fact above comes from documented flags rather than from
+  `--help` archaeology. **But O6 is only half-answered for C2 as well:** being able to name the UUID
+  says nothing about whether a second process bearing it is refused, and the failure mode is real —
+  Interlock dies, its child survives, recovery retries the spawn, two writers now share one ID
+  (U13). C2's advantage over C1 on O6 is therefore that the *binding* window closes, not that
+  single-writer is proven; the exclusion still has to come from Interlock's own fencing token
+  (`ACCEPTANCE.md` §2) and must be tested, not assumed. C2's remaining cost is that Interlock must
+  write the process supervision C1 supplies for free — which, per Decision 5, is also its main
+  advantage.
 - **C1's unknowns cluster on O6, O9 and O11** — not on the verbs. The five verbs are all present and
   documented. If the gate fails, the most likely reason on current evidence is identity across the
   crash window or the absence of a capability probe, not an inability to start and stop workers.
@@ -653,10 +671,18 @@ Item 10 needs v1 as a live counterparty and is realistically proven *at* the can
 | 3b | Spike discharges all eleven, deferring implementation until item 10 has a real counterparty |
 | 3c | Formally reclassify 8, 9, 10 out of the pre-implementation gate |
 
-**Recommendation: 3a.** 3b blocks implementation on the canary, which inverts the ordering the Issue
-gives. 3c weakens a gate placed deliberately, which `Q-0021` itself warns against. 3a keeps all eleven
-in force while being honest that two are rehearsed rather than concluded — and it is the shape
-`Q-0021` says a resolving decision would take.
+**Recommendation: 3a — with its cost stated plainly, because it is the one recommendation in this
+document that does not fully satisfy an accepted decision.** `D-0019` makes all eleven items pass/fail
+entry criteria for starting implementation. Under 3a, items 8 and 10 are *rehearsed* on substitutes
+and their real predicates — Secretary latency under genuine worker load, and a canary against v1 as a
+live counterparty — are not met until implementation is under way. Calling them "in force" would be a
+euphemism: **3a is a scoped exception to `D-0019` and should be adopted, if at all, by a new `D-`
+entry that says so for those two items and names when they are discharged.** It is still recommended,
+because the alternatives are worse: 3b blocks implementation on a canary that by construction needs
+the implementation, inverting the ordering the Issue gives; and 3c reclassifies items out of the gate
+entirely, which `Q-0021` explicitly warns is how a deliberately-placed gate gets weakened. 3a is the
+smallest departure that is actually executable — but it *is* a departure, and this document does not
+have the authority to make it.
 
 ---
 
@@ -685,13 +711,20 @@ of fail-open (F2).
 
 | Option | Summary |
 |---|---|
-| **5a** | Interlock owns it: validate the rendered per-role configuration and refuse to spawn, plus a `PreToolUse` deny hook as in-session backstop |
-| 5b | Treat the absence of a fail-closed guarantee as a gate item 3 failure and go to `Q-0004` |
+| **5a′** | Interlock owns it — validate the rendered per-role configuration and refuse to spawn, plus a `PreToolUse` deny hook in session — **and** item 3 additionally requires a fence that mediates *supervisor-initiated* restarts (V8), which no source evidences on this provider; if the probe finds none, item 3 fails on Agent View and routes to `Q-0004` |
+| 5a | Spawn precondition + `PreToolUse` hook only, treating supervisor restarts as covered by V13's persistence |
+| 5b | Treat the absence of a fail-closed guarantee as an immediate gate item 3 failure |
 | 5c | Accept the harness's behaviour and record `D-0017`'s fail-closed clause as unmet |
 
-**Recommendation: 5a.** The obligation is Interlock's under `D-0017` regardless of provider, so
-building it is not provider-specific work and is not wasted under any `Q-0004` outcome. 5b would fail
-the backend for something no candidate promises. 5c contradicts `D-0017` and `CHARTER.md` §3.4.
+**Recommendation: 5a′.** The obligation is Interlock's under `D-0017` regardless of provider, so the
+spawn precondition and the hook are worth building under any `Q-0004` outcome and are not wasted. But
+plain 5a does not actually discharge item 3 on this provider: V8's supervisor-initiated restart runs
+with no Interlock spawn call, and in the missing/corrupt cases the item names, the `PreToolUse` hook is
+part of what may be missing, so the backstop is absent exactly when it is needed (F2). V13's
+persistence guarantee covers the *happy* path — configuration that is present and valid — and says
+nothing about the degraded one. 5a′ keeps the work but is honest that the item's verdict depends on a
+handle we have not found; 5b fails the backend before probing for one; 5c contradicts `D-0017` and
+`CHARTER.md` §3.4.
 
 ---
 
@@ -739,10 +772,15 @@ adopted.
 | 8c | C8 — panes as session lifecycle only |
 | 8d | Name none; re-evaluate on the failure's specifics |
 
-**Recommendation: 8a.** C2 scores best on precisely the obligations that cannot be compensated for
-from the control-plane side (O6, O8, O11), it is the most `D-0010`-consistent candidate — every fact
-about it comes from documented flags rather than from undocumented subcommands — and it is the only
-candidate whose capability probe (V22) matches what `D-0010` asks for. 8b is a genuine second choice
+**Recommendation: 8a.** C2 scores best on the obligations that cannot be compensated for from the
+control-plane side — O8 (nobody else owns the working tree) and O11 (a real capability probe, V22, of
+the kind `D-0010` asks for) — and it is the most `D-0010`-consistent candidate, since every fact about
+it comes from documented flags rather than from undocumented subcommands. Two further points, both
+from the round of review that produced F2 and U13, matter more than the matrix rows: C2 removes the
+supervisor-restart hole entirely, because under C2 no other party can restart a worker, so the
+fail-closed precondition actually covers every start; and C2's O6 advantage is the *binding* window,
+not proven single-writer, which still has to come from Interlock's own fencing token and still has to
+be tested (U13). 8b is a genuine second choice
 rather than a weak one — the earlier objection that it runs the worker inside the control plane's own
 process does not survive W1a and has been withdrawn — but it trades code Interlock would write once
 for a dependency whose own reference calls the transport seam internal and subject to change, which is
@@ -830,4 +868,5 @@ Nothing here is used as the basis of a recommendation. Each entry names what wou
 | **U9** | Do any candidate backend's state-changing endpoints honour a client-supplied idempotency key? | **Unverified.** None found for any candidate. | If none, `ACCEPTANCE.md` §2's transactional-commit option is the only route for external effects, and actions where neither is achievable need a human gate (`D-0004`). |
 | **U10** | Is any stability tier, deprecation policy, or compatibility guarantee published for the local background-agent CLI surface? | **Unverified — and the absence is itself evidence.** V25 says agent view is research preview; V26 records that `--json` carries no guarantee; V5 records that five of the session subcommands are absent from top-level `--help`. | Nothing further to run; treat the surface as version-specific and gate on `claude --version`. |
 | **U11** | Does the Claude Code GitHub Action produce a resumable session? | **Unverified.** The page states where output goes; it does not state that the session is non-resumable, and `claude_args` accepts any CLI argument. Absence of documentation is not documented absence. | Not pursued — the candidate is out of scope under Decision 7a. |
+| **U13** | Is a second process using an already-active session UUID **refused**? For C1: does `--bg --session-id <uuid>` reject a UUID already in use? For C2: does a second `claude -p --session-id <uuid>` against a live session fail, or do two writers proceed? | **Unverified for every candidate.** V21 establishes only that the caller may *supply* a UUID. No source states an exclusion. This is the difference between closing the binding window and proving single-writer, and gate item 2 requires the second. | Part of phase 0: after establishing a session on a chosen UUID, attempt a second process on the same UUID and observe. If neither candidate refuses, single-writer must come entirely from Interlock's own fencing token and that must be stated as the mechanism rather than assumed from the ID. |
 | **U12** | Exact SIGTERM drain semantics for self-hosted-environment runners. | **Unverified.** The page defers to a shutdown-timing section not fetched; the verified sequence covers `--retire-at`, not SIGTERM. | Fetch `self-hosted-environments-deploy#shutdown-timing` if C4 survives the pre-filter. |
