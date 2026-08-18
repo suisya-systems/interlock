@@ -128,19 +128,31 @@ of `SessionProvider` from `MessageBus` is not merely prudent decoupling — for 
 no dependency edge to the `SessionProvider`" becomes cheap to satisfy because no such edge is
 available to build.
 
-**F2 — Nothing promises fail-closed on missing or corrupt configuration, and there is affirmative
-evidence of fail-open (V13, V15, V16).** The documented guarantee is *persistence* across supervisor
-restart, which is the first half of gate item 3 and is well evidenced. The second half — "fail closed
-rather than falling back to default permissions when configuration is missing" (`D-0017`) — has no
-supporting documentation, and two facts point the other way: settings files that fail validation are
-silently ignored in non-interactive mode, and project hooks and MCP servers load even in an untrusted
-folder. The only documented refusal-to-start in this area is the one-time `bypassPermissions`
-disclaimer gate, which is a consent gate, not a config-integrity gate. **Implication:** fail-closed
+**F2 — Nothing promises fail-closed on missing or corrupt configuration, and the nearest adjacent
+evidence points the other way (V13, V15, V16).** The documented guarantee is *persistence* across
+supervisor restart (V13), which is the first half of gate item 3 and is well evidenced — but note that
+it is persistence of configuration that is present and valid. The second half — "fail closed rather
+than falling back to default permissions when configuration is missing" (`D-0017`) — has no supporting
+documentation anywhere.
+
+**Be precise about how far the fail-open evidence reaches.** V15 (settings files that fail validation
+are silently ignored) and V16 (project hooks and MCP servers load in a never-trusted folder) both
+describe the `-p` surface, and V18 states that `-p` cannot be combined with `--bg`. They are therefore
+*adjacent* evidence about how this codebase treats bad configuration, not established behaviour of a
+background session. **How a background session handles missing or corrupt per-role configuration is
+unverified (U14)** and must be probed, not inferred. What can be said without inference is narrower and
+still decisive: nothing documents fail-closed for either surface, and the only documented
+refusal-to-start in this area is the one-time `bypassPermissions` disclaimer gate, which is a consent
+gate rather than a config-integrity gate. **Implication:** fail-closed
 cannot be inherited from the harness. Interlock must own it, as a *spawn precondition* — validate the
 rendered per-role configuration and refuse to spawn — plus a `PreToolUse` hook as the in-session
-backstop, since a hook deny is documented to run first and to apply even under `bypassPermissions`
-(W3). This is an Interlock obligation whichever provider wins, so building it is not provider-specific
-work.
+backstop. **The hook's standing is weaker than it looks and should not be overstated:** the ordering
+that makes it attractive — hooks evaluated first, a hook deny effective even under `bypassPermissions`
+— is documented for the **Agent SDK's** permission evaluator (W3), and C1 and C2 both drive CLI
+surfaces directly. No CLI or agent-view source was found stating that the same ordering and bypass
+behaviour hold there (U15). Until that is verified on whichever provider is chosen, the hook is a
+*planned* backstop, not an evidenced one, and item 3 cannot lean on it. This is an Interlock obligation
+whichever provider wins, so building it is not provider-specific work.
 
 **But on this provider the precondition has a hole, and it is a serious one.** V8 states that the
 supervisor "restarts a session whose process exits unexpectedly". That restart happens **without an
@@ -340,9 +352,11 @@ Secretary, item 9 against a Curator stub, item 10 as a *rehearsal* on a syntheti
 the real canary re-proven later.
 
 - *Scope:* S1–S9 + S10. **Estimated 10–15 engineer-days.**
-- *Strengths:* Actually discharges nine of eleven items pre-implementation, with 8 and 10 explicitly
-  marked "proven on the spike slice, re-proven on the real implementation" — the distinction
-  `Q-0021` asks for. Produces the fault-injection suite early, which is where the design learns most.
+- *Strengths:* Discharges nine of eleven items pre-implementation, with 8 and 10 explicitly marked
+  "rehearsed on the spike slice, proven on the real implementation" — the distinction `Q-0021` asks
+  for. **This is nine of eleven, not eleven:** adopting B or B+ therefore requires the scoped `D-0019`
+  exception described in Decision 3, and neither strategy should be described as satisfying the
+  precondition without it. Produces the fault-injection suite early, which is where the design learns most.
   The T2 artifacts are the ones `PORTING_LEDGER.md` already classifies `carry (invariant)`, so the
   invariants are known before a line is written (R1–R6).
 - *Weaknesses:* The slice is indistinguishable in kind from the real implementation, only smaller.
@@ -382,7 +396,7 @@ against both providers from the first test onward, in CI.
 
 | | A — probe-first | B — minimum slice | C — contract-first dual |
 |---|---|---|---|
-| Items discharged pre-implementation | 1, 3, 7 (+ partial 2) | 1–7, 9, 11 (8, 10 as rehearsals) | same as B |
+| Items discharged pre-implementation | 1, 3, 7 (+ partial 2) | 1–7, 9, 11 — **8 and 10 rehearsed, not discharged** | same as B |
 | Estimated effort | 3–5 d | 10–15 d | 15–22 d |
 | Faithful to `D-0019` as written | No | Largely | Largely |
 | Cost if the gate fails | Near zero | Moderate — S2 and its tests rework | Low — swap S2, suite unchanged |
@@ -407,7 +421,8 @@ report to a human, not a reason to proceed to the next.
 | **0** | The F3 experiment: does `--session-id <uuid>` compose with `--bg`? Must be run against a **real** `--bg` Claude session, not an `--exec` job (F4), including the collision case where the UUID is already in use. Two model-backed sessions, minutes. | Nothing directly | U1 answered either way and recorded; if it fails, F6 is triggered before anything else is built |
 | **1a** | S4 (jobs) — `--exec`-based probe of the supervisor: roster, structured state, stop, removal, restart-after-unexpected-exit, ungraceful daemon kill (U4), readout latency under N jobs (U6); capability/version probe; internals-free negative | provider-side inputs for items 1, 3, 8 | Supervisor verbs work through documented commands; U2, U4, U6 answered |
 | **1b** | S4 (sessions) — the same harness driven by a small number of **model-backed** `--bg` sessions, for conversation resume via `respawn` and for the worktree lifecycle: uncommitted, untracked (U5) and unpushed cases across agent-view delete vs `claude rm` (V11, F5), and whether `WorktreeRemove` (V12) can veto | items 1, 7 | Resume preserves the conversation; working tree byte-identical or transition refused on every path |
-| **2** | S10 — carried fencing renderer + `PreToolUse` deny + breach probe + Interlock-side spawn precondition | item 3 | Restart preserves the fence; broken config refuses the spawn; forbidden operation denied |
+| **2a** | **Restart-fence probe (terminal).** Establish a worker, delete or corrupt its per-role configuration, then force the *supervisor* to restart it by killing the worker process out of band (V8) — not by asking Interlock to respawn it. Observe whether anything refuses the restart. Also probe for a public effective-configuration readback (Decision 4a′) and for CLI-surface `PreToolUse` ordering under `bypassPermissions` (U15). | prerequisite for item 3 | **A handle that mediates supervisor-initiated restarts exists, or item 3 fails on this provider and the sequence stops here and routes to `Q-0004`.** This is a terminal exit condition: phase 2b does not begin until it is answered. |
+| **2b** | S10 — carried fencing renderer + `PreToolUse` deny + breach-probe battery + Interlock-side spawn precondition | item 3 | Interlock-initiated restart preserves the fence; broken config refuses the spawn; every rule in the role's fence is probed and denied |
 | **3** | S1 → S3 → S5 — interface, stub provider, spike schema | prerequisite for 2, 4, 5, 6, 11 | Interface written; stub passes an empty suite; schema marked as spike |
 | **4** | S6 + S7 — lease with fencing token; outbox with one handler declaring its exactly-once mechanism | prerequisite for 4, 5 | Handler names its mechanism |
 | **5** | S9 — fault-injection harness; run the full `ACCEPTANCE.md` §2 matrix | items 4, 5 | Every case automated and reproducible; external-effect cases proven at the destination |
@@ -417,7 +432,7 @@ report to a human, not a reason to proceed to the next.
 | **9** | Stub Secretary + load generator; Curator stub + approval digest | items 8, 9 | No blocking dependency; all five promotion negatives refused |
 | **10** | Routing point + writer audit rehearsal | item 10 (rehearsal only) | Rehearsed rollback changes only routing |
 
-Phase 9's item 9 has no dependency on phases 1–8 and can run in parallel from day 1 (§3.1). Phases 0,
+Phase 9's item 9 has no dependency on phases 1a–8 and can run in parallel from day 1 (§3.1). Phases 0,
 1a and 1b are the ones that can *end* the sequence early by producing a `Q-0004` situation, which is why
 they come first.
 
@@ -634,8 +649,9 @@ been acted on.
 | B | Minimum vertical slice in natural order (10–15 d) |
 | C | Contract-first dual-provider throughout (15–22 d) |
 
-**Recommendation: B+.** It is the only option that discharges the gate `D-0019` calls a precondition
-while keeping the second provider's structural benefit. A is cheaper but leaves seven items open at
+**Recommendation: B+ — noting that it discharges nine of the eleven items, not all of them, and so
+depends on Decision 3's scoped `D-0019` exception being granted.** Subject to that, it goes furthest
+towards the precondition `D-0019` sets while keeping the second provider's structural benefit. A is cheaper but leaves seven items open at
 implementation start, which reads `D-0019` as advisory. C front-loads an interface designed before any
 provider has informed it. B+ costs roughly 1–2 days more than B for a property gate item 11 requires
 anyway.
@@ -693,14 +709,21 @@ surface returns it (Appendix A/U3).
 
 | Option | Summary |
 |---|---|
-| **4a** | Behavioural breach probe as the observable — attempt one forbidden operation per role, assert denial — with the declarative diff run against Interlock's own rendered inputs |
+| **4a′** | First probe for a public effective-configuration readback. If one exists, run the item's equality check as written. If none exists, substitute a **breach-probe battery** — one forbidden operation per *rule* in the role's fence, not one per role — plus a diff of Interlock's rendered inputs, **and record the substitution as a deliberate weakening of item 3 that a human accepted** |
+| 4a | One forbidden operation per role, plus the rendered-input diff |
 | 4b | Read internal state to obtain the effective configuration |
 | 4c | Treat item 3 as unprovable on this provider and fail the gate on it |
 
-**Recommendation: 4a.** 4b violates `D-0010` outright. 4c fails the gate on a measurement problem
-rather than a capability problem. 4a is also the stronger test: it asserts the fence *holds*, not that
-a config file was reloaded, and the sandbox breach probe it builds on is already `carry` material
-(R5).
+**Recommendation: 4a′, and it is important that it is stated as a weakening rather than a
+substitute.** The item asks for effective configuration to be "identical" after restart. Plain 4a does
+not deliver that: if an unrelated hook, allow/deny rule or sandbox restriction silently disappears
+across the restart while the one probed denial still fires, 4a passes and the fence has in fact
+degraded. And diffing Interlock's *rendered inputs* proves what we wrote, not what the provider
+loaded — the gap item 3 exists to close. 4a′ narrows that gap in two ways (probe every rule, not every
+role; look for a real readback before giving up on one) but does not close it, so the residual has to
+be a recorded human decision rather than a silent redefinition of the predicate. 4b violates `D-0010`
+outright. 4c fails the gate on a measurement problem rather than a capability problem — defensible,
+and the honest fallback if a human declines to accept the weakening.
 
 ---
 
@@ -868,5 +891,7 @@ Nothing here is used as the basis of a recommendation. Each entry names what wou
 | **U9** | Do any candidate backend's state-changing endpoints honour a client-supplied idempotency key? | **Unverified.** None found for any candidate. | If none, `ACCEPTANCE.md` §2's transactional-commit option is the only route for external effects, and actions where neither is achievable need a human gate (`D-0004`). |
 | **U10** | Is any stability tier, deprecation policy, or compatibility guarantee published for the local background-agent CLI surface? | **Unverified — and the absence is itself evidence.** V25 says agent view is research preview; V26 records that `--json` carries no guarantee; V5 records that five of the session subcommands are absent from top-level `--help`. | Nothing further to run; treat the surface as version-specific and gate on `claude --version`. |
 | **U11** | Does the Claude Code GitHub Action produce a resumable session? | **Unverified.** The page states where output goes; it does not state that the session is non-resumable, and `claude_args` accepts any CLI argument. Absence of documentation is not documented absence. | Not pursued — the candidate is out of scope under Decision 7a. |
+| **U14** | How does a **background** (`--bg`) session handle missing, corrupt, or unresolvable per-role configuration — a deleted settings file, an unresolvable hook path, an absent sandbox profile? Does it refuse to start, or start with the constraint dropped? | **Unverified.** V15 and V16 establish silent-ignore and untrusted-folder loading for the `-p` surface, and V18 says `-p` and `--bg` cannot be combined, so neither transfers. V13 covers persistence of valid configuration only. | Direct probe in phase 2a, per role, for each of the three degradation modes. This is the fact gate item 3 actually turns on. |
+| **U15** | Do the Agent SDK's documented permission-evaluation semantics (W3: hooks evaluated first; a hook deny effective even under `bypassPermissions`) also hold on the **CLI / agent-view** surface? | **Unverified.** W3 is explicitly the SDK's permission evaluator. No CLI or agent-view source stating the same ordering was found. C1 and C2 both drive CLI surfaces, so this is load-bearing for S10. | Probe on the chosen provider before counting the `PreToolUse` hook as an evidenced backstop; until then it is a planned mitigation. |
 | **U13** | Is a second process using an already-active session UUID **refused**? For C1: does `--bg --session-id <uuid>` reject a UUID already in use? For C2: does a second `claude -p --session-id <uuid>` against a live session fail, or do two writers proceed? | **Unverified for every candidate.** V21 establishes only that the caller may *supply* a UUID. No source states an exclusion. This is the difference between closing the binding window and proving single-writer, and gate item 2 requires the second. | Part of phase 0: after establishing a session on a chosen UUID, attempt a second process on the same UUID and observe. If neither candidate refuses, single-writer must come entirely from Interlock's own fencing token and that must be stated as the mechanism rather than assumed from the ID. |
 | **U12** | Exact SIGTERM drain semantics for self-hosted-environment runners. | **Unverified.** The page defers to a shutdown-timing section not fetched; the verified sequence covers `--retire-at`, not SIGTERM. | Fetch `self-hosted-environments-deploy#shutdown-timing` if C4 survives the pre-filter. |
