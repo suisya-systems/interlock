@@ -42,9 +42,11 @@ Three things follow, and every row below is read in their light:
    therefore names its provider. Items 4, 5, 6, 9 and 11 are control-plane properties: they are
    re-run for regression, not redesigned.
 
-**Where the sequence stands.** Item 9 is discharged (independently of any provider). Item 2 carries a
-**failed** verdict on C1 and is **pending** on C2. Every other item is **pending** — the spike is
-under way on C2 and its evidence has not landed yet.
+**Where the sequence stands.** Item 9 is discharged (independently of any provider). **Item 3 is
+discharged on C2**, on the weakened observable D-0023 defines — and its residual is stated in §3 in
+D-0023's own terms rather than folded into the verdict. Item 2 carries a **failed** verdict on C1
+and is **pending** on C2. Every other item is **pending** — the spike is under way on C2 and its
+evidence has not landed yet.
 
 ---
 
@@ -59,7 +61,7 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 |---|---|---|---|---|---|---|
 | 1 | Public CLI alone can start / read state / stop / resume | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#6`, `#7` — not yet landed | The spike (phases 1a/1b) |
 | 2 | Unique session↔run re-match across the crash window; no duplicate writer | `failed` on C1; `pending` on C2 | `n/a — failed` (C1); `pending` (C2) | `C1 (Agent View)` → `C2 (claude -p subprocesses)` | D-0027; `investigation/u1-session-id-bg-experiment.md`; `investigation/pre-spawn-fence-search.md`. C2 re-proof: `#18` (provider `#17`) — not yet landed | The spike (phase 6), on C2 |
-| 3 | Per-role permission / sandbox / hooks survive restart and fail closed | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#9` — not yet landed. `#8` closed as **moot** under C2, not passed | The spike (phase 2b) |
+| 3 | Per-role permission / sandbox / hooks survive restart and fail closed | `discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#9`; `docs/per-role-fencing.md`; `src/claude_org_runtime/fencing/`; `tests/fencing/`; `investigation/i04-pretooluse-fence-probe.md` (U15, U35, U42). `#8` closed as **moot** under C2, not passed | The spike (phase 2b) |
 | 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `pending` | `pending` | `pending` | `#13`, `#14`, `#16` — not yet landed | The spike (phases 4–5) |
 | 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#13`, `#14`, `#15`, `#16` — not yet landed | The spike (phases 4–5) |
 | 6 | `MessageBus` delivers and resends independently of the UI | `pending` | `pending` | `pending` | `#19` — not yet landed | The spike (phase 7) |
@@ -135,12 +137,44 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 ### Item 3 — per-role permission / sandbox / hooks survive restart and fail closed
 
-- **Verdict:** `pending`
-- **D-0022 label:** `pending`
+- **Verdict:** **`discharged`**, 2026-08-18, on the **weakened** observable D-0023 defines. The
+  weakening is not a footnote to this verdict; it is part of it, and it is stated below in D-0023's
+  own words.
+- **D-0022 label:** `proven on the spike slice` — `src/claude_org_runtime/fencing/` is throwaway
+  under D-0026 and `tests/fencing/` is the durable half. Re-proof on the real implementation is
+  still owed.
 - **Provider:** `C2 (claude -p subprocesses)` — required in full against the shipping provider
   (`ACCEPTANCE.md` §4).
-- **Evidence:** `#9` (S10's per-role fencing renderer, the `PreToolUse` deny hook, and the
-  breach-probe battery). Not yet landed.
+- **Evidence:** `#9` (S10) — `docs/per-role-fencing.md`; the renderer, fail-closed spawn
+  precondition, `PreToolUse` deny hook and breach-probe battery in
+  `src/claude_org_runtime/fencing/`; the durable suite in `tests/fencing/`; and the live
+  measurements in `investigation/i04-pretooluse-fence-probe.md` (nine `claude -p` children, CLI
+  `2.1.234`).
+- **The four criteria, and what each rests on.**
+  1. **Restart preserves the fence.** Under C2 the only restart is Interlock respawning a `-p`
+     child from persisted state. The battery denies every rule on both sides and the rendered-input
+     diff is identical (`tests/fencing/test_restart_preserves_fence.py`). Neither alone suffices:
+     a fence that comes back one rule short still *passes* the battery, because the battery can
+     only probe the rules it was given — the diff is what catches the loss.
+  2. **Every rule has a probe, and every probe is denied.** 44 rules across four roles, one
+     forbidden operation each, coverage asserted as a set equality against the rendered fence and
+     re-asserted by adding a rule at runtime and requiring the battery to grow with it. A
+     hand-maintained probe list would pass the first check and fail the second, which is why the
+     second exists.
+  3. **A broken configuration refuses the spawn.** All three classes `#9` names — config deleted,
+     hook path unresolvable, sandbox profile absent — plus a self-check for a fence that does not
+     deny its own probes. The load-bearing assertion is negative: **the spawner is never invoked**,
+     and no fence or settings file is published.
+  4. **The deny hook is proven to deny, not merely to run.** By effect, never by exit code:
+     `investigation/i04-pretooluse-fence-probe.md` measured a JSON `deny` at exit 2 stopping the
+     operation, and a hook exiting **1** being absorbed while the operation went through — the same
+     shape A6/U35 found on `WorktreeCreate`, now reproduced on `PreToolUse`. **All nine cases
+     exited 0.**
+- **U15 — answered.** `PreToolUse` fires and its `deny` is honoured under `bypassPermissions`; the
+  mode does not skip the hook. The answer is reflected in the rendering as a **refusal** of that
+  mode (`RefusalReason.PERMISSION_MODE_BYPASS`): U15 removes the reason to *avoid*
+  `bypassPermissions` and leaves the reason to *refuse* it — under it the hook is the only remaining
+  layer, and that layer has a measured absorption mode which is silent and exits 0.
 - **How C2 changed the item's shape.** D-0023 part 3 made a supervisor-initiated restart fence a
   **terminal** exit condition: if no handle mediating restarts started by the provider's own
   supervisor existed, item 3 failed on Agent View. **That hole was removed by the provider switch,
@@ -156,8 +190,19 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   weakening of item 3, accepted by a human — not an equivalent method.** Diffing our own rendered
   inputs proves **what we wrote, not what the provider loaded**, and that gap is exactly what item 3
   exists to close. Probing every rule narrows it; it does not close it.
+- **Additional residuals recorded rather than absorbed into the verdict:**
+  - **U42 (new).** An *unresolvable* `PreToolUse` hook fails open or closed depending on the
+    launcher's exit code — `python3` exits 2 and blocks, `bash` exits 127 and does not. The
+    "fail-closed" outcome is a coincidence of one interpreter's convention. Handled by validating
+    hook paths before the spawn; it remains a property of the provider, not of Interlock.
+  - **U43 (open).** Every absorption mode measured is exit-code-shaped. A hook that **times out**,
+    or one writing malformed JSON at exit 0, was **not probed**, and the battery does not cover it.
+  - **One machine, one CLI build, one load, one run per case** (U34). No case was repeated, so this
+    is not a flakiness measurement.
 - **Notes:** fail-closed is **Interlock's own obligation** under D-0017 regardless of provider
-  (D-0023 part 2), so that work is not wasted under any `Q-0004` outcome.
+  (D-0023 part 2), so that work is not wasted under any `Q-0004` outcome. A third provider would
+  revert this row to `pending` (`ACCEPTANCE.md` §4) and would restore the D-0023 part 3 hole with
+  it.
 
 ### Item 4 — Supervisor / Dispatcher Core / Secretary resume from SQLite with no double execution
 
@@ -328,16 +373,16 @@ anything.
 | Artifact | Class (D-0026) | Where |
 |---|---|---|
 | S1 — the provisional `SessionProvider` interface | **durable (contract)** | `#10` — marked provisional in the file itself (D-0021); promoted to a settled contract only by a later `D-` entry |
-| Tests — fault injection, recovery, accident-derived fixtures, the control-plane suite | **durable (tests)** | `#15`, `#16`, `#18`, `#19`, `#20`, `tests/curator/` |
+| Tests — fault injection, recovery, accident-derived fixtures, the control-plane suite | **durable (tests)** | `#15`, `#16`, `#18`, `#19`, `#20`, `tests/curator/`, `tests/fencing/` |
 | S2 — the C2 `SessionProvider` | throwaway | `#17` |
 | S3 — the stub provider | throwaway | `#11` |
 | S4 — the probe harnesses | throwaway | `#6`, `#7` |
 | **S5 — the spike SQLite schema** | **throwaway — named explicitly by D-0026** | `#12`; the file carries its own note that it is a spike schema and that **no migration path is promised from it**. `Q-0001` stays open and is not answered by inertia |
 | S6 / S7 — lease and outbox implementations | throwaway (their tests are durable) | `#13`, `#14` |
 | S8 — `MessageBus` MCP endpoint | throwaway (the no-edge assertion is durable) | `#19` |
-| S10 — per-role fencing renderer, `PreToolUse` deny hook, breach-probe battery | throwaway implementation, durable tests | `#9` |
+| S10 — per-role fencing renderer, `PreToolUse` deny hook, breach-probe battery | throwaway implementation, durable tests | `#9`; implementation `src/claude_org_runtime/fencing/`, tests `tests/fencing/`. Landed 2026-08-18; nothing here is promoted by having discharged item 3 |
 | Curator promotion gate implementation | throwaway | PR `#27`, `src/claude_org_runtime/curator/` |
-| Investigation records (U-register, fence search, U1, U8) | evidence, not spike output — kept as the basis of the verdicts above | `investigation/` |
+| Investigation records (U-register, fence search, U1, U8, U15/U35/U42) | evidence, not spike output — kept as the basis of the verdicts above | `investigation/` |
 
 ---
 

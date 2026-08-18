@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-role fencing: the renderer, the fail-closed spawn precondition, the
+  `PreToolUse` deny hook and the breach-probe battery** (gate item 3, I-04/S10,
+  Issue #9). `src/claude_org_runtime/fencing/` carries the per-role
+  permission / sandbox / hooks renderer from `settings/generator.py`, **minus
+  the transport and `sandbox_by_pattern` axes the porting ledger discards** —
+  and refuses to render a role document that still carries either, because
+  dropping a discarded axis silently produces a fence narrower than its author
+  believed.
+
+  **The battery's unit is the rule, not the role.** D-0023 asks for one
+  forbidden operation per *rule*, and the battery is therefore derived from the
+  rendered fence rather than authored: 44 rules across four roles, one probe
+  each, coverage asserted as a set equality and re-asserted by adding a rule at
+  runtime and requiring the battery to grow with it. A hand-maintained probe
+  list passes the first check and fails the second. Per-role probing would have
+  observed 4 of 44.
+
+  **Fail-closed is Interlock's own obligation** (D-0023 part 2 under D-0017).
+  All three broken configurations Issue #9 names refuse the spawn — config
+  deleted, hook path unresolvable, sandbox profile absent — as does a fence
+  that renders cleanly but does not deny its own probes. The load-bearing
+  assertion is negative: **the spawner callable is never invoked**, and nothing
+  is published, so a refused spawn cannot leave a fence behind for the next
+  start to enforce as though approved. Refusals are `fsync`ed to an append-only
+  ledger before the caller is told anything.
+
+  **The deny hook is proven to deny, not merely to run.**
+  `investigation/i04-pretooluse-fence-probe.md` measured nine `claude -p`
+  children by effect, never by exit code: a JSON `deny` at exit 2 stops the
+  operation, and **a hook exiting 1 is absorbed while the operation goes
+  through** — A6/U35's shape, reproduced on `PreToolUse`. All nine cases exited
+  0. **U15 is answered**: `PreToolUse` fires and denies under
+  `bypassPermissions`, and the renderer refuses that mode anyway, because it
+  leaves the hook as the only layer. **U42 is new**: an unresolvable hook fails
+  open or closed purely on the launcher's exit code (`python3` 2 blocks, `bash`
+  127 does not), which is why hook paths are validated before the spawn rather
+  than trusted to fail closed. **U43 is open**: timeouts were not probed.
+
+  **Item 3 is recorded as `discharged` on C2 in `docs/gate-record.md`, on the
+  weakened observable D-0023 defines** — the residual is stated in D-0023's own
+  terms and not folded into the verdict: no public surface returns effective
+  hooks or sandbox configuration (U3, i01 §3.9), so the battery observes
+  behaviour against the fence *Interlock rendered* and the diff proves **what
+  we wrote, not what the provider loaded**. A deliberate weakening accepted by
+  a human, not an equivalent method. Per D-0026 `tests/fencing/` (86 tests) is
+  the durable output and the implementation is throwaway.
+
 - **Gate record for the eleven Agent View gate items** (I-19, Issue #24).
   `docs/gate-record.md` is the single place where each item carries a verdict,
   its evidence, the provider that evidence was obtained against, and the D-0022
