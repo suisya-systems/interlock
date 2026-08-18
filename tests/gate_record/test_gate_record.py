@@ -24,6 +24,9 @@ import pytest
 RECORD = Path(__file__).resolve().parents[2] / "docs" / "gate-record.md"
 
 VERDICTS = {"discharged", "failed", "rehearsed — not discharged", "pending"}
+#: D-0022's exception is scoped to these two items and nothing else may borrow it.
+DEFERRED_ITEMS = (8, 10)
+DEFERRED_VERDICT = "rehearsed — not discharged"
 LABELS = {
     "proven on the spike slice",
     "re-proven on the real implementation",
@@ -72,7 +75,11 @@ def table_rows(text: str) -> dict[int, list[str]]:
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         if len(cells) != 7 or not cells[0].isdigit():
             continue
-        rows[int(cells[0])] = cells
+        item = int(cells[0])
+        # A second row for the same item would shadow the first, and every check
+        # below would then inspect only the survivor.
+        assert item not in rows, f"item {item} appears twice in the summary table"
+        rows[item] = cells
     return rows
 
 
@@ -83,7 +90,9 @@ def sections(text: str) -> dict[int, str]:
     out: dict[int, str] = {}
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        out[int(match.group(1))] = text[match.start() : end]
+        item = int(match.group(1))
+        assert item not in out, f"item {item} has two sections"
+        out[item] = text[match.start() : end]
     return out
 
 
@@ -124,8 +133,11 @@ def test_table_and_section_agree(item, table_rows, sections):
         ("Provider", 4, PROVIDERS),
     )
     for name, column, vocabulary in pairs:
-        assert set(_leading_tokens(_field(section, name), vocabulary)) == set(
-            _leading_tokens(table_rows[item][column], vocabulary)
+        # Ordered, not set-compared: item 2 carries one value per provider, and a
+        # table reading "failed on C1, pending on C2" must not match a section
+        # reading the reverse.
+        assert _leading_tokens(_field(section, name), vocabulary) == _leading_tokens(
+            table_rows[item][column], vocabulary
         ), f"item {item}: {name} disagrees between the table and its section"
 
 
@@ -143,6 +155,14 @@ def test_the_scoped_exception_is_not_widened(item, table_rows, sections):
     assert "not discharged" in table_rows[item][2]
     assert "not discharged" in _field(sections[item], "Verdict")
     assert _field(sections[item], "Discharge point")
+
+
+@pytest.mark.parametrize("item", [n for n in range(1, 12) if n not in DEFERRED_ITEMS])
+def test_no_other_item_borrows_the_deferred_verdict(item, table_rows, sections):
+    """Only items 8 and 10 may be rehearsed rather than discharged."""
+    assert DEFERRED_VERDICT not in _leading_tokens(table_rows[item][2], VERDICTS)
+    assert DEFERRED_VERDICT not in _leading_tokens(_field(sections[item], "Verdict"), VERDICTS)
+    assert "not discharged" not in table_rows[item][2]
 
 
 def test_the_two_discharge_points_are_named(table_rows):
