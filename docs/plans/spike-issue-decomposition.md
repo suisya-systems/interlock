@@ -1270,7 +1270,13 @@ issues:
             codes or `-p` flags in control-plane types. I-15 is the test of this, but the
             implementation should not be relying on that to catch it.
       - [ ] Orphaned children are detectable and reclaimable after a supervisor restart, per I-01's
-            finding, and the reclaim path goes through `--resume` rather than a fresh claim (U28).
+            finding. **Reclaim resolves the surviving process first**: adopt the live child if it can
+            be adopted, otherwise terminate it and **confirm its exit** — only then `--resume`. A
+            resume issued while the orphan is still running creates the second live writer this
+            provider will not refuse (U32), which is the failure I-13 has to rule out. A fresh
+            `--session-id` claim is never the reclaim path: U28 shows the dead session still holds
+            the claim, so the re-claim is refused and a supervisor that treats that refusal as fatal
+            will fail to recover its own worker.
       - [ ] The CLI version S2 was written against is recorded, and the capability probe's raw output
             with it (D-0010).
 
@@ -1359,8 +1365,20 @@ issues:
       Persist the session↔run binding in SQLite **before** the spawn, keyed on the `--session-id`
       UUID Interlock chose. Kill at each injection point — before the binding is committed, between
       commit and spawn, between spawn and the identity read-back, after the read-back — restart, and
-      assert re-identification. Then reproduce, deliberately, the two races the provider is known to
-      admit.
+      assert re-identification.
+
+      The races the provider is known to admit are then driven at **two layers, and the distinction
+      is load-bearing**:
+
+      1. **Unmediated characterisation** — the provider driven directly, Interlock out of the path,
+         in a fixture that never touches a real run's session. This is where two concurrent
+         processes on one session id are allowed to appear, because that is the fact being measured
+         (and it must be re-measured here: U34 says the window's width is not a provider constant).
+      2. **Interlock-mediated proof** — the same shapes as real crash-and-retry sequences, where the
+         losing claimant must never become a process. This is the layer item 2 is graded on.
+
+      Conflating the two is how a spike convinces itself it has a fence: the first layer will always
+      show two admitted processes, and the second must never.
 
       ## Acceptance criteria
 
@@ -1370,15 +1388,31 @@ issues:
             fence and does not satisfy this — a name is a display string and not an identity (V20;
             and the fence search's A2 shows duplicates are accepted without so much as a suffix), and
             a crash-then-retry can leave two matching workers alive before any reconciler runs.
-      - [ ] **The U27 race is reproduced, not assumed.** Two claimants released inside the admission
-            window: assert that **Interlock** admits exactly one *writer* even though the provider
-            admits both *processes*. A test that passes only because the second claimant happened to
-            land outside the window is a false pass — the stagger must be swept, and the window
-            re-measured on the machine the test runs on rather than taken from the report's figure
-            (U34).
-      - [ ] **The U32 case is reproduced**: two concurrent `--resume` runs of the same session. The
-            provider refuses neither; assert the lease admits one writer and the other's protected
-            writes are **refused and recorded**.
+      The next two criteria are **unmediated characterisation** — the provider driven directly, with
+      Interlock deliberately out of the path. They exist to prove the hazard is live on the machine
+      the gate runs on, and they are the *only* place two concurrent processes on one session id may
+      appear. Keep them in a fixture that never touches a real run's session.
+
+      - [ ] **The U27 race is reproduced, not assumed** — outside Interlock: two claimants released
+            inside the admission window, and the stagger swept until the window's edge is located on
+            **this** machine rather than taken from the report's figure (U34). Record whether both
+            were admitted, and whether both wrote.
+      - [ ] **The U32 case is reproduced** the same way: two concurrent `--resume` runs of one
+            session, confirming the provider refuses neither.
+
+      The remaining criteria are the **Interlock-mediated proof**. Every one of them runs the same
+      crash-and-retry shapes *through* the control plane, where the outcome must be different.
+
+      - [ ] **Through Interlock, the losing claimant is never spawned.** Run the U27 shape as a real
+            crash-then-retry — the original claimant dies inside the admission window, the retry
+            lands inside it too — and assert the lease is acquired **before** the spawn, so the loser
+            never becomes a process at all. "The provider admitted both and our token sorted it out
+            afterwards" does not pass: the token orders writes, and only the pre-spawn lease can
+            stop a second model turn.
+      - [ ] **Through Interlock, a second resume is never issued.** Run the U32 shape as a real
+            recovery: assert the supervisor resolves the surviving process first (adopt, or
+            terminate and confirm exit) and holds the lease before `--resume`, so a second live
+            process on one session id is never created.
       - [ ] A second writer is **refused** rather than admitted, and the refusal is recorded. The
             refusal must come from **Interlock's fencing token**, and the test must still pass with
             the provider's own `already in use` refusal assumed absent — it is defence in depth, not
@@ -1392,19 +1426,20 @@ issues:
             and a supervisor that treats that refusal as fatal will fail to recover its own worker.
       - [ ] No orphan session is adopted twice, and orphans left by a killed **supervisor** (I-01's
             finding) are included in the cases.
-      - [ ] **No two provider processes are ever concurrently live against one session id**, at any
-            injection point, in any of the races above. Under C2 Interlock is the **only** party that
-            spawns a worker, so this is preventable on our side and must be prevented: acquire the
-            lease *before* the spawn, and reclaim or terminate a suspected orphan *before* resuming
-            it. Two live processes on one id is not a residual to be weighed — it is the violation
-            item 2 names, and the fence search calls the observed instance exactly that: *"a
-            demonstrated single-writer violation at the provider's own identity level"* (§4.1).
-      - [ ] **Interleaved turns in the shared transcript fail item 2.** Assert on the transcript
-            itself: one user turn per dispatched task, no duplicate assistant turn, no two writers
-            under one `sessionId` (U27 §4.1 showed 2+2 under one id; U32 showed the same on resume).
-            If the implementation cannot keep the loser from taking a model turn, that is a **failed
-            gate item**, not an accepted weakening — D-0024 rules out mitigations that reclassify the
-            item, and no human acceptance is invited here.
+      - [ ] **On every Interlock-mediated run, no two provider processes are ever concurrently live
+            against one session id**, at any injection point. (The characterisation fixture above is
+            the sole exception, and exists precisely to show what happens without us.) Under C2
+            Interlock is the **only** party that spawns a worker, so this is preventable on our side
+            and must be prevented. Two live processes on one id is not a residual to be weighed — it
+            is the violation item 2 names, and the fence search calls the observed instance exactly
+            that: *"a demonstrated single-writer violation at the provider's own identity level"*
+            (§4.1).
+      - [ ] **Interleaved turns in a mediated run's transcript fail item 2.** Assert on the
+            transcript itself: one user turn per dispatched task, no duplicate assistant turn, no two
+            writers under one `sessionId` (U27 §4.1 showed 2+2 under one id; U32 showed the same on
+            resume). If the implementation cannot keep the loser from taking a model turn, that is a
+            **failed gate item**, not an accepted weakening — D-0024 rules out mitigations that
+            reclassify the item, and no human acceptance is invited here.
       - [ ] **The residual that *is* stateable is the absence of a backstop**, and it belongs in the
             gate record in the spirit D-0023 requires for item 3: the provider refuses nothing inside
             the admission window (U27) and nothing at all on `--resume` (U32), so **Interlock's own
