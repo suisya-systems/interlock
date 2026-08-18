@@ -84,9 +84,13 @@ silently interpreted as a **prompt** and runs a model turn, exit 0 — recorded 
 itself a fail-open. The documented probes are `--version` and `doctor`, both recorded verbatim, plus
 the `capabilities` array inside the `system/init` stream event.
 
-**Model quota spent.** 66 model-backed `-p` invocations (63 left a persisted transcript under the two
-scratch project slugs; the remainder were non-persisted, refused pre-model, or killed mid-turn). Of
-these, 43 returned a `total_cost_usd` field, summing to **USD 6.02**. Prompts were trivial throughout
+**Model quota spent.** About 85 model-backed `-p` invocations, of which **82 left a persisted
+transcript** under the two scratch project slugs (the remainder were non-persisted, refused
+pre-model, or killed mid-turn). That count includes the re-runs the review pass forced: the
+internals-free negative, the concurrency sweep at N=1/4/8, and the readback with its
+identical-configuration control. 43 of the runs had their `total_cost_usd` captured in a record,
+summing to **USD 6.02**; the rest ran the same trivial prompts and were not captured, so 6.02 is a
+floor rather than the total. Prompts were trivial throughout
 (`"reply with ok"`, or a 40-item counting prompt where a live holder was needed). The per-run cost of
 a *trivial* prompt ranged from **0.037 to 0.76 USD**, which is itself a C2 finding: the child loads
 the invoking user's entire configuration (18k–38k cache-creation tokens per spawn), so spawn cost is
@@ -772,7 +776,10 @@ by syscall trace not to reach for them by any route.**
 - **Two intermediate interruptions are disclosed.** The first admission-window sweep was killed by a
   2-minute tool timeout, and one `strace` attempt timed out at 6m40s; the process table was checked
   after each and no `claude` child of this experiment survived either.
-- **Transcripts left on disk:** 63 `.jsonl` files under two scratch project slugs
+- **Experiments re-run after the review pass** (§3 provenance): the internals-free negative, the
+  concurrency sweep, and the readback probe. Their children were reaped the same way; the survivor
+  check in the scenario now kills anything still alive after the reap rather than assuming none.
+- **Transcripts left on disk:** 82 `.jsonl` files under two scratch project slugs
   (`...-scratchpad-i01` and `...-scratchpad-i01-other-cwd`), the second created by §3.8.3's
   different-cwd probe. As in the two prior notes, `-p` runs leave transcripts and hold no roster row
   and no process.
