@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Curator promotion gate with a content-digest approval record** (gate item 9,
+  Issue #22). Curator output cannot reach skill material without a human
+  approval that names an immutable candidate version by content digest
+  (D-0018).
+
+  The gate sits at the **filesystem write**, not at a promotion function,
+  because U8 is answered affirmative: an already-running Claude Code session
+  re-reads skill material from disk, so writing the file already *is*
+  promotion. U8 was settled by documentation search and by a direct runtime
+  probe on CLI 2.1.234 -- an edited body, an edited description and a skill
+  directory created mid-session were all live in one running session, and a
+  mid-session directory turned out to be loadable *before* it appeared in the
+  session's own skill listing. Transcript:
+  `investigation/u8-skill-hot-reload-probe.md`.
+
+  `PromotionGate` is the only code that writes into skill material and the only
+  code that may name a skill root. Promotion is refused, and the refusal
+  recorded in the approval ledger, when the approval is absent, forged but
+  unrecorded, edited after being recorded, revoked, when the candidate was
+  mutated after approval, and when a valid approval is replayed against another
+  candidate or another target. `claude_org_runtime.curator.audit` is a path
+  audit over the source tree, run as a test, so adding a bypass path later
+  fails the build; synthetic positive controls prove the audit is not vacuous.
+
+  Per D-0026 the tests are the durable output; the implementation is throwaway
+  by default. Design note: `docs/curator-promotion-gate.md`.
+
 ## [0.1.42] - 2026-08-14
 
 ### Added
