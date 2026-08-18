@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .battery import BatteryReport, run_battery
+from .battery import BatteryReport, ProbeSynthesisError, run_battery
 from .renderer import FenceContext, FenceRefusal, RefusalReason, render_fence
 from .rules import Fence
 from .state import write_fence
@@ -52,6 +52,7 @@ EVENT_REFUSED = "spawn-refused"
 EVENT_BATTERY = "battery-run"
 
 REASON_BATTERY_INCOMPLETE = "battery-incomplete"
+REASON_PROBE_UNSYNTHESIZABLE = "probe-unsynthesizable"
 
 
 def default_hook_script() -> Path:
@@ -171,13 +172,41 @@ class FencedSpawner:
         ctx: FenceContext,
         spawner: Callable[[SpawnPlan], Any],
     ) -> SpawnOutcome:
+        """Admit or refuse, then -- only if admitted -- start the child.
+
+        The child is started **outside** the ledger transaction. A synchronous
+        spawner (``subprocess.run`` on a ``claude -p`` session) would otherwise
+        hold the cross-process lock for the entire session, and every other
+        role would block on it -- including roles trying to record a *refusal*,
+        which is the one thing that must never wait.
+        """
+
+        outcome = self._admit(role, ctx)
+        if not outcome.admitted:
+            return outcome
+        return SpawnOutcome(
+            admitted=True,
+            role=outcome.role,
+            fence=outcome.fence,
+            plan=outcome.plan,
+            result=spawner(outcome.plan),
+            battery=outcome.battery,
+        )
+
+    def _admit(self, role: str, ctx: FenceContext) -> SpawnOutcome:
         with self.ledger.transaction():
             try:
                 fence = render_fence(role, ctx, document=self.document)
             except FenceRefusal as refusal:
                 return self._refuse(role, refusal.reasons)
 
-            battery = run_battery(fence)
+            try:
+                battery = run_battery(fence)
+            except ProbeSynthesisError as exc:
+                # A rule the battery cannot aim a probe at is a rule nothing
+                # observes. Letting this escape would skip the durable record
+                # entirely, so it refuses like any other unprovable fence.
+                return self._refuse(role, [(REASON_PROBE_UNSYNTHESIZABLE, str(exc))])
             self.ledger.append(
                 EVENT_BATTERY,
                 role=role,
@@ -245,12 +274,7 @@ class FencedSpawner:
                 settings_path=str(settings_path),
             )
             return SpawnOutcome(
-                admitted=True,
-                role=role,
-                fence=fence,
-                plan=plan,
-                result=spawner(plan),
-                battery=battery,
+                admitted=True, role=role, fence=fence, plan=plan, battery=battery
             )
 
     def _write_settings(self, fence: Fence, ctx: FenceContext) -> Path:

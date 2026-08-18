@@ -200,6 +200,47 @@ class TestFailOpenIsTestedForExplicitly:
         assert code == EXIT_DENY
 
 
+class TestTheFenceMustBelongToTheRole:
+    """The fence path is publish-and-replace, so identity has to be checked.
+
+    Two roles accidentally sharing a ``fence_path`` would mean a later spawn
+    silently re-points the earlier one at somebody else's rules -- and a worker
+    would lose denials the curator never had, with nothing failing.
+    """
+
+    def test_a_fence_for_another_role_is_denied(self, ctx, document, tmp_path):
+        curator = render_fence("curator", ctx, document=document)
+        path = write_fence(curator, tmp_path / "shared.json")
+        decision, _ = decide_payload(
+            path,
+            {"tool_name": "Bash", "tool_input": {"command": "echo hi"}},
+            role="worker",
+        )
+        assert decision.denied
+        assert "curator" in decision.reason and "worker" in decision.reason
+
+    def test_the_matching_role_is_evaluated_normally(self, ctx, document, tmp_path):
+        worker = render_fence("worker", ctx, document=document)
+        path = write_fence(worker, tmp_path / "worker.json")
+        probe = probes_for(worker)[0]
+        decision, _ = decide_payload(
+            path,
+            {"tool_name": probe.tool_name, "tool_input": dict(probe.tool_input)},
+            role="worker",
+        )
+        assert decision.denied
+        assert decision.rule_id == probe.rule_id
+
+    def test_the_rendered_command_passes_the_role(self, ctx, document):
+        fence = render_fence("worker", ctx, document=document)
+        commands = [
+            hook["command"]
+            for group in fence.settings["hooks"]["PreToolUse"]
+            for hook in group["hooks"]
+        ]
+        assert any("--role worker" in command for command in commands)
+
+
 class TestExitStatusContract:
     """One narrow assertion, and a note about what it is not.
 

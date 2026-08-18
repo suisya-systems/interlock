@@ -142,9 +142,31 @@ outcome". The three broken configurations `#9` names each refuse the spawn:
 | hook path unresolvable | `hook-unresolvable` |
 | sandbox profile absent | `sandbox-profile-absent` |
 
-plus a fourth that is a self-check: a fence that renders cleanly but does not deny its own probes
-refuses too (`battery-incomplete`). Shipping a fence Interlock cannot itself prove is the same class
-of error as shipping no fence.
+plus these, each of which is a way for the fence to look sound and not be:
+
+| also refused | why it is not a nitpick |
+|---|---|
+| `battery-incomplete` | a fence that renders cleanly but does not deny its own probes. Shipping a fence Interlock cannot itself prove is the same class of error as shipping no fence |
+| `probe-unsynthesizable` | a rule the battery cannot aim a probe at is a rule nothing observes |
+| `hook-matcher-too-narrow` | the quietest hole of all. Scope the deny hook to `"Bash"` and the fence still carries every Read / Write / WebFetch rule, and the self-battery still denies every probe — because it calls the decision function directly. The CLI simply never consults the hook for the exempted tools |
+| `hook-not-a-command` | only `type: "command"` entries are executed. An entry of another type carrying a `command` key reads as correct and never runs |
+| `permissions.deny` authored as a string | it iterates character by character and renders one rule per *letter*, each of which the battery cheerfully denies — while the rule that was meant is absent. A green battery over the wrong rules is the worst shape this fence can take |
+
+**The persisted fence is re-validated on read, not coerced.** Valid JSON is not a valid fence: a
+mistyped `layer` is skipped by the decision function and a `null` spec becomes the string `"None"`
+and matches nothing. Either removes a denial while the hook goes on treating the fence as sound, so
+`state.py` closes the layer and kind vocabularies and type-checks every field.
+
+**The hook checks that the fence belongs to its role.** The fence path is publish-and-replace, so
+two roles accidentally sharing one would mean a later spawn silently re-points the earlier one at
+somebody else's rules — a worker losing denials the curator never had, with nothing failing. The
+`--role` the renderer wires into the command line is compared against the fence on disk.
+
+**The child starts outside the ledger lock.** A synchronous spawner for a real `claude -p` session
+would otherwise hold the cross-process lock for the whole session, blocking every other role —
+including one trying to record a *refusal*, which is the one thing that must never wait on a
+long-running success. Validation, publication and the admission record are transactional; the spawn
+is not.
 
 The property that carries the criterion is negative, and the tests assert it directly: **on a
 refusal the spawner callable is not invoked** — not with a narrowed fence, not with a warning

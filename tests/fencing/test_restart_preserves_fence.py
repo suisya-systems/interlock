@@ -164,6 +164,43 @@ class TestPersistenceFailsClosed:
         with pytest.raises(FenceStateError):
             read_fence(path)
 
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("layer", "typo-layer"),
+            ("kind", "typo-kind"),
+            ("spec", None),
+            ("tool", None),
+            ("spec", ""),
+            ("layer", 7),
+        ],
+    )
+    def test_a_corrupted_rule_field_is_rejected_rather_than_coerced(
+        self, ctx, document, ledger, field, value
+    ):
+        """Valid JSON is not a valid fence.
+
+        Coercing these fields with ``str()`` fails in the silent direction: a
+        mistyped ``layer`` is skipped by the decision function and a ``null``
+        spec becomes the string ``"None"`` and matches nothing. Either removes
+        a denial while the hook goes on treating the fence as sound.
+        """
+
+        outcome = spawn(ctx, document, ledger)
+        payload = json.loads(outcome.plan.fence_path.read_text(encoding="utf-8"))
+        payload["rules"][2][field] = value
+        outcome.plan.fence_path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(FenceStateError):
+            read_fence(outcome.plan.fence_path)
+
+    def test_a_rule_that_is_not_an_object_is_rejected(self, ctx, document, ledger):
+        outcome = spawn(ctx, document, ledger)
+        payload = json.loads(outcome.plan.fence_path.read_text(encoding="utf-8"))
+        payload["rules"][0] = "Bash(git push *)"
+        outcome.plan.fence_path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(FenceStateError):
+            read_fence(outcome.plan.fence_path)
+
     def test_an_unknown_format_version_is_rejected(self, ctx, document, ledger):
         outcome = spawn(ctx, document, ledger)
         payload = json.loads(outcome.plan.fence_path.read_text(encoding="utf-8"))

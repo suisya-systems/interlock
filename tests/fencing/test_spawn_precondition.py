@@ -25,7 +25,10 @@ from claude_org_runtime.fencing import (
     FencedSpawner,
 )
 from claude_org_runtime.fencing.renderer import RefusalReason
-from claude_org_runtime.fencing.spawn import REASON_BATTERY_INCOMPLETE
+from claude_org_runtime.fencing.spawn import (
+    REASON_BATTERY_INCOMPLETE,
+    REASON_PROBE_UNSYNTHESIZABLE,
+)
 
 from .conftest import mutate
 
@@ -139,6 +142,46 @@ class TestBrokenConfigurationsRefuse:
         assert not (ctx.fence_path.parent / "settings.local.json").exists()
 
 
+class TestTheChildStartsOutsideTheLedgerLock:
+    def test_the_ledger_is_not_held_while_the_child_runs(self, ctx, document, ledger):
+        """A synchronous spawner must not serialize every other role behind it.
+
+        ``spawner`` for a real ``claude -p`` session is a blocking
+        ``subprocess.run``. Holding the cross-process ledger lock for its whole
+        duration would block every other role -- including one trying to record
+        a **refusal**, which is the one thing that must never wait on a
+        long-running success.
+        """
+
+        observed = {}
+
+        def spawner(plan):
+            # Inside the spawner, another FencedSpawner must be able to take
+            # the lock and record its own refusal.
+            other = FencedSpawner(
+                ledger=ledger, document=mutate(document, "curator", sandbox=None)
+            )
+            observed["outcome"] = other.spawn("curator", ctx, RecordingSpawner())
+            return {"pid": 7}
+
+        outcome = FencedSpawner(ledger=ledger, document=document).spawn(
+            "worker", ctx, spawner
+        )
+        assert outcome.admitted
+        assert observed["outcome"].admitted is False
+        assert ledger.refusals()
+
+    def test_the_admission_is_recorded_before_the_child_starts(self, ctx, document, ledger):
+        seen = {}
+
+        def spawner(plan):
+            seen["events"] = [e["event"] for e in ledger.events()]
+            return None
+
+        FencedSpawner(ledger=ledger, document=document).spawn("worker", ctx, spawner)
+        assert EVENT_ADMITTED in seen["events"]
+
+
 class TestPublicationIsAllOrNothing:
     def test_a_failed_settings_write_leaves_no_fence_behind(
         self, ctx, document, ledger, monkeypatch
@@ -209,6 +252,31 @@ class TestTheRefusalIsRecordedDurably:
 
 
 class TestTheSpawnerSelfChecks:
+    def test_a_rule_whose_probe_cannot_be_synthesized_refuses_and_is_recorded(
+        self, ctx, document, ledger, monkeypatch
+    ):
+        """A rule the battery cannot aim at is a rule nothing observes.
+
+        Letting the synthesis error escape would skip the durable record
+        entirely -- a spawn that neither happened nor was written down.
+        """
+
+        import claude_org_runtime.fencing.spawn as spawn_module
+        from claude_org_runtime.fencing.battery import ProbeSynthesisError
+
+        def boom(*_a, **_k):
+            raise ProbeSynthesisError("no witness for this rule")
+
+        monkeypatch.setattr(spawn_module, "run_battery", boom)
+        spawner = RecordingSpawner()
+        outcome = FencedSpawner(ledger=ledger, document=document).spawn(
+            "worker", ctx, spawner
+        )
+        assert not outcome.admitted
+        assert spawner.calls == []
+        assert REASON_PROBE_UNSYNTHESIZABLE in outcome.codes
+        assert ledger.refusals()
+
     def test_a_fence_that_fails_its_own_battery_refuses_the_spawn(
         self, ctx, document, ledger, monkeypatch
     ):

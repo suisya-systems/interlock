@@ -74,9 +74,16 @@ DENY_SELF_CHECK = "fence-unavailable"
 
 
 def decide_payload(
-    fence_path: Path, event: Mapping[str, Any]
+    fence_path: Path, event: Mapping[str, Any], *, role: str | None = None
 ) -> tuple[Decision, dict[str, Any]]:
-    """Evaluate one ``PreToolUse`` event against the persisted fence."""
+    """Evaluate one ``PreToolUse`` event against the persisted fence.
+
+    ``role`` is the role the *renderer* wired into this command line. It is
+    checked against the fence actually on disk, because the fence path is
+    publish-and-replace: two roles accidentally sharing a path would mean a
+    later spawn silently re-points the earlier one at somebody else's rules,
+    and a worker would quietly lose denials the curator never had.
+    """
 
     try:
         fence = read_fence(fence_path)
@@ -88,6 +95,18 @@ def decide_payload(
             reason=(
                 "Interlock cannot read its own fence, so it cannot tell whether this "
                 f"call is permitted: {exc}"
+            ),
+        )
+        return decision, _hook_output(decision)
+
+    if role is not None and fence.role != role:
+        decision = Decision(
+            denied=True,
+            rule_id=DENY_SELF_CHECK,
+            layer="hook",
+            reason=(
+                f"fence at {fence_path} carries role {fence.role!r} but this hook was "
+                f"rendered for {role!r}; denied rather than enforcing another role's rules"
             ),
         )
         return decision, _hook_output(decision)
@@ -137,7 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--fence", required=True, help="path to the persisted fence JSON")
-    parser.add_argument("--role", default=None, help="role name, for diagnostics only")
+    parser.add_argument(
+        "--role",
+        default=None,
+        help="role this hook was rendered for; the persisted fence must match it",
+    )
     return parser
 
 
@@ -178,7 +201,7 @@ def main(argv: list[str] | None = None) -> int:
             event = {}
         if not isinstance(event, dict):
             event = {}
-        decision, payload = decide_payload(Path(args.fence), event)
+        decision, payload = decide_payload(Path(args.fence), event, role=args.role)
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - deliberate catch-all

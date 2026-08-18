@@ -19,7 +19,46 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-from .rules import Fence, FenceRule
+from .rules import (
+    KIND_PERMISSION_DENY,
+    KIND_SANDBOX_DENY_READ,
+    KIND_SANDBOX_DENY_WRITE,
+    LAYER_PERMISSIONS,
+    LAYER_SANDBOX,
+    Fence,
+    FenceRule,
+)
+
+_LAYERS = frozenset({LAYER_PERMISSIONS, LAYER_SANDBOX})
+_KINDS = frozenset({KIND_PERMISSION_DENY, KIND_SANDBOX_DENY_READ, KIND_SANDBOX_DENY_WRITE})
+
+
+def _rule_from_json(entry: Any) -> FenceRule:
+    """Reconstruct one rule, refusing anything that is not exactly a rule.
+
+    Coercing these fields with ``str()`` would let a corrupted-but-still-valid
+    JSON fence through in the one direction that is silent: a mistyped
+    ``layer`` is skipped by :func:`rules.decide`, and a ``null`` spec becomes
+    the string ``"None"`` and matches nothing. Either removes a denial while
+    the hook goes on treating the fence as sound -- so the vocabularies are
+    closed and every field is type-checked.
+    """
+
+    if not isinstance(entry, Mapping):
+        raise FenceStateError(f"persisted rule is not an object: {entry!r}")
+    fields = {}
+    for key in ("layer", "kind", "tool", "spec"):
+        value = entry.get(key)
+        if not isinstance(value, str) or not value:
+            raise FenceStateError(
+                f"persisted rule field {key!r} must be a non-empty string, got {value!r}"
+            )
+        fields[key] = value
+    if fields["layer"] not in _LAYERS:
+        raise FenceStateError(f"persisted rule has unknown layer: {fields['layer']!r}")
+    if fields["kind"] not in _KINDS:
+        raise FenceStateError(f"persisted rule has unknown kind: {fields['kind']!r}")
+    return FenceRule(**fields)
 
 FENCE_FORMAT_VERSION = 1
 
@@ -51,15 +90,7 @@ def fence_from_json(payload: Mapping[str, Any]) -> Fence:
     try:
         if payload.get("format") != FENCE_FORMAT_VERSION:
             raise FenceStateError(f"unsupported fence format: {payload.get('format')!r}")
-        rules = tuple(
-            FenceRule(
-                layer=str(entry["layer"]),
-                kind=str(entry["kind"]),
-                tool=str(entry["tool"]),
-                spec=str(entry["spec"]),
-            )
-            for entry in payload["rules"]
-        )
+        rules = tuple(_rule_from_json(entry) for entry in payload["rules"])
         if not rules:
             raise FenceStateError("persisted fence carries no rules")
         return Fence(

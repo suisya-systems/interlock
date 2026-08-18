@@ -270,6 +270,44 @@ class TestRefusals:
             render_fence("worker", broken_ctx, document=document)
         assert RefusalReason.HOOK_UNRESOLVABLE in excinfo.value.codes
 
+    def test_a_narrow_hook_matcher_refuses(self, ctx, document):
+        """The quietest hole of the lot.
+
+        With the deny hook scoped to ``"Bash"``, the fence still carries every
+        Read / Write / WebFetch rule and the self-battery still denies every
+        probe -- because the battery calls the decision function directly. The
+        CLI simply never consults the hook for the exempted tools, and nothing
+        anywhere goes red.
+        """
+
+        hooks = json.loads(json.dumps(document["roles"]["worker"]["hooks"]))
+        hooks["PreToolUse"][0]["matcher"] = "Bash"
+        broken = mutate(document, "worker", hooks=hooks)
+        with pytest.raises(FenceRefusal) as excinfo:
+            render_fence("worker", ctx, document=broken)
+        assert RefusalReason.HOOK_MATCHER_TOO_NARROW in excinfo.value.codes
+
+    def test_every_shipped_role_scopes_the_deny_hook_to_all_tools(self, ctx, document):
+        for role in role_names(document):
+            fence = render_fence(role, ctx, document=document)
+            for group in fence.settings["hooks"]["PreToolUse"]:
+                if any(str(ctx.hook_script) in h["command"] for h in group["hooks"]):
+                    assert group.get("matcher") in (None, "*", ".*", "")
+
+    def test_a_hook_entry_that_is_not_a_command_refuses(self, ctx, document):
+        """Only ``type: "command"`` entries are executed as commands.
+
+        An entry of another type carrying a ``command`` key reads as correct
+        and never runs.
+        """
+
+        hooks = json.loads(json.dumps(document["roles"]["worker"]["hooks"]))
+        hooks["PreToolUse"][0]["hooks"][0]["type"] = "prompt"
+        broken = mutate(document, "worker", hooks=hooks)
+        with pytest.raises(FenceRefusal) as excinfo:
+            render_fence("worker", ctx, document=broken)
+        assert RefusalReason.HOOK_NOT_A_COMMAND in excinfo.value.codes
+
     def test_unsubstituted_placeholder_refuses(self, ctx, document):
         broken = mutate(
             document,

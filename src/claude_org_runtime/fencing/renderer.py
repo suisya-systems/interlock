@@ -62,6 +62,8 @@ class RefusalReason:
     UNSUBSTITUTED_PLACEHOLDER = "unsubstituted-placeholder"
     HOOK_UNRESOLVABLE = "hook-unresolvable"
     HOOK_ABSENT = "hook-absent"
+    HOOK_MATCHER_TOO_NARROW = "hook-matcher-too-narrow"
+    HOOK_NOT_A_COMMAND = "hook-not-a-command"
     SANDBOX_PROFILE_ABSENT = "sandbox-profile-absent"
     RULE_SYNTAX = "rule-syntax"
     EMPTY_FENCE = "empty-fence"
@@ -354,6 +356,7 @@ def _check_hooks(hooks: Any, ctx: FenceContext) -> list[tuple[str, str]]:
         return [(RefusalReason.HOOK_ABSENT, "no PreToolUse hooks declared")]
     problems: list[tuple[str, str]] = []
     commands = 0
+    interlock_matchers: list[Any] = []
     for group in entries:
         if not isinstance(group, dict):
             problems.append((RefusalReason.RULE_SYNTAX, f"hook group not an object: {group!r}"))
@@ -362,29 +365,55 @@ def _check_hooks(hooks: Any, ctx: FenceContext) -> list[tuple[str, str]]:
             if not isinstance(hook, dict) or not isinstance(hook.get("command"), str):
                 problems.append((RefusalReason.RULE_SYNTAX, f"hook not a command: {hook!r}"))
                 continue
+            # Only ``type: "command"`` entries are executed as commands. An
+            # entry of another type carrying a ``command`` key looks correct
+            # to a reader and is never run, which is the silent direction.
+            if hook.get("type") != "command":
+                problems.append(
+                    (
+                        RefusalReason.HOOK_NOT_A_COMMAND,
+                        f"PreToolUse hook has type {hook.get('type')!r}, not 'command': "
+                        f"{hook['command']!r}",
+                    )
+                )
+                continue
             commands += 1
             problems.extend(_check_command_resolves(hook["command"]))
+            if str(ctx.hook_script) in hook["command"]:
+                interlock_matchers.append(group.get("matcher"))
     if not commands:
         problems.append((RefusalReason.HOOK_ABSENT, "no PreToolUse command hooks declared"))
-    if str(ctx.hook_script) not in _all_commands(entries):
+    if not interlock_matchers:
         problems.append(
             (
                 RefusalReason.HOOK_ABSENT,
                 f"no PreToolUse hook invokes Interlock's deny hook ({ctx.hook_script})",
             )
         )
+    elif not any(_matcher_is_universal(m) for m in interlock_matchers):
+        # A narrow matcher is the quietest hole of all: the fence still holds
+        # every rule, the self-battery still denies every probe -- because it
+        # calls the decision function directly -- and the CLI simply never
+        # consults the hook for the tools the matcher leaves out.
+        problems.append(
+            (
+                RefusalReason.HOOK_MATCHER_TOO_NARROW,
+                f"Interlock's deny hook is scoped to matcher {interlock_matchers!r}; it "
+                "must match all tools ('*'), because the fence spans Bash, Read, Write, "
+                "Edit and WebFetch rules and a narrow matcher silently exempts the rest",
+            )
+        )
     return problems
 
 
-def _all_commands(entries: list[Any]) -> str:
-    parts: list[str] = []
-    for group in entries:
-        if not isinstance(group, dict):
-            continue
-        for hook in group.get("hooks", []) or []:
-            if isinstance(hook, dict) and isinstance(hook.get("command"), str):
-                parts.append(hook["command"])
-    return "\n".join(parts)
+# Matchers the CLI treats as "every tool". Anything else is refused rather
+# than parsed: guessing at a regex's coverage is how a narrow matcher would
+# get admitted, and the fence has nothing to gain from the flexibility.
+_UNIVERSAL_MATCHERS = frozenset({"*", ".*", ""})
+
+
+def _matcher_is_universal(matcher: Any) -> bool:
+    return matcher is None or (isinstance(matcher, str) and matcher.strip() in _UNIVERSAL_MATCHERS)
 
 
 def _check_command_resolves(command: str) -> list[tuple[str, str]]:
