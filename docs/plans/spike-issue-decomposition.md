@@ -414,13 +414,16 @@ issues:
 
       - [ ] Spawn / structured-state read / signal-terminate / reap all complete with documented
             flags only, with argv, output and exit codes recorded verbatim.
-      - [ ] **The internals-free negative is proven**: the harness behaves identically with the CLI's
-            per-user config directory, transcript paths and any internal socket made unreadable or
-            absent. A harness that merely *does not currently* read them does not satisfy this — the
-            negative must be executed. Note the environmental trap the fence search hit (§2 of
-            `investigation/pre-spawn-fence-search.md`): under a sandbox a `-p` run succeeds and
-            returns a `session_id` while **no transcript is ever written**, which can silently turn a
-            refusal probe into a false negative. State which commands ran sandboxed.
+      - [ ] **The internals-free negative is proven, against the harness and not against the child**:
+            with **the harness's own process** denied the CLI's per-user config directory, transcript
+            paths and any internal socket — the child keeping normal access to all three — the
+            harness behaves identically. A harness that merely *does not currently* read them does
+            not satisfy this; the negative must be executed. Denying the *child* its own state is a
+            different experiment and not this one: the fence search hit exactly that trap (§2 of
+            `investigation/pre-spawn-fence-search.md`), where under a sandbox a `-p` run succeeded
+            and returned a `session_id` while **no transcript was ever written**, which can silently
+            turn a refusal probe into a false negative. State which commands ran sandboxed, and which
+            side of the boundary each restriction was applied to.
       - [ ] Stream framing, flush-on-abnormal-exit, and the `stderr`-only content are recorded, with
             a verbatim example of each.
       - [ ] The exit-code table is complete for the causes above, and it states which distinct causes
@@ -550,10 +553,14 @@ issues:
             treat I-01's pass as covering it.
       - [ ] The structured state read here is machine-parseable from published output, not scraped
             from rendered screen text.
-      - [ ] **The internals-free negative is re-run on this half too**: with the CLI's per-user
-            config directory, transcript paths and any internal socket made unreadable, the
-            conversation-driven cycle behaves identically. I-01's negative covers the single-shot
-            path only.
+      - [ ] **The internals-free negative is re-run on this half too**, and on this half it must be
+            run the right way round: the restriction applies to **Interlock's own process**, never to
+            the child. Under C2 the CLI reconstructs the conversation from its own transcript, so
+            denying the transcript denies the provider its documented function and proves nothing —
+            it would also contradict the resume criterion below. Run Interlock under a restriction
+            that blocks *its* reads of the CLI's per-user config directory, transcript paths and any
+            internal socket, while the child keeps normal access, and show the conversation-driven
+            cycle behaves identically. I-01's negative covers the single-shot path only.
       - [ ] Resume preserves **both** the conversation and the `session_id`, demonstrated across at
             least three successive resumes in fresh processes, with the transcript shown to grow in
             place. Any fork-like behaviour is recorded as a finding of the same class as U33.
@@ -1385,14 +1392,25 @@ issues:
             and a supervisor that treats that refusal as fatal will fail to recover its own worker.
       - [ ] No orphan session is adopted twice, and orphans left by a killed **supervisor** (I-01's
             finding) are included in the cases.
-      - [ ] **The residual is stated, in the gate record, in the same spirit D-0023 requires for item
-            3.** Interlock's token decides who writes *Interlock's* records and who performs side
-            effects. It cannot stop a losing process that the provider admitted from appending turns
-            to the shared transcript (U27 showed two user and two assistant turns under one
-            `sessionId`; U32 showed the documented interleaving on resume). Record what the
-            implementation does about it — terminate the loser promptly, and say how quickly — and
-            record what remains uncovered. **If a human judges that residual unacceptable, item 2
-            fails on C2 as well**, and that is a report, not a workaround.
+      - [ ] **No two provider processes are ever concurrently live against one session id**, at any
+            injection point, in any of the races above. Under C2 Interlock is the **only** party that
+            spawns a worker, so this is preventable on our side and must be prevented: acquire the
+            lease *before* the spawn, and reclaim or terminate a suspected orphan *before* resuming
+            it. Two live processes on one id is not a residual to be weighed — it is the violation
+            item 2 names, and the fence search calls the observed instance exactly that: *"a
+            demonstrated single-writer violation at the provider's own identity level"* (§4.1).
+      - [ ] **Interleaved turns in the shared transcript fail item 2.** Assert on the transcript
+            itself: one user turn per dispatched task, no duplicate assistant turn, no two writers
+            under one `sessionId` (U27 §4.1 showed 2+2 under one id; U32 showed the same on resume).
+            If the implementation cannot keep the loser from taking a model turn, that is a **failed
+            gate item**, not an accepted weakening — D-0024 rules out mitigations that reclassify the
+            item, and no human acceptance is invited here.
+      - [ ] **The residual that *is* stateable is the absence of a backstop**, and it belongs in the
+            gate record in the spirit D-0023 requires for item 3: the provider refuses nothing inside
+            the admission window (U27) and nothing at all on `--resume` (U32), so **Interlock's own
+            correctness is the only thing between a run and an interleaved transcript**. Record that
+            plainly — including how quickly a detected loser is terminated, measured — rather than
+            implying the token covers what it does not.
       - [ ] **A single-writer violation at any injection point is a gate failure** and is reported as
             one. An adoption rule that picks a winner without proving the loser never wrote is a
             reclassification of item 2 wearing the clothes of a mitigation (D-0024) — do not ship one.
@@ -1829,12 +1847,13 @@ issues:
       - [ ] **Item 3's residual is stated in D-0023's own terms** — the breach-probe substitution is
             a deliberate weakening accepted by a human, not an equivalent method, and diffing our own
             rendered inputs proves what we wrote rather than what the provider loaded.
-      - [ ] **Item 2's residual is stated the same way** (I-13): under C2 the provider admits two
-            processes to one session inside the admission window (U27) and any number on `--resume`
-            (U32). Interlock's fencing token decides who writes Interlock's records and performs side
-            effects; it cannot stop a losing process the provider admitted from appending turns to
-            the shared transcript. State what remains uncovered rather than implying the token covers
-            everything.
+      - [ ] **Item 2's residual is stated the same way** (I-13) — and stated as what it is, which is
+            the absence of a backstop rather than a tolerated violation. Under C2 the provider admits
+            two processes to one session inside the admission window (U27) and any number on
+            `--resume` (U32), so nothing but Interlock's own correctness stands between a run and an
+            interleaved transcript. Record that. Do **not** record an interleaved transcript as an
+            accepted residual: if two processes were ever concurrently live on one session id, item 2
+            **failed**, and the record says so.
       - [ ] **Item 6's F1 caveat is stated**, and stated in its now-stronger form — the "no UI
             attached" condition is trivially satisfied because the UI is not on the delivery path,
             and under C2 there is no Agent View UI at all. Claiming it as a strong result would be
