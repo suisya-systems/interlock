@@ -44,19 +44,33 @@ SECTION_RE = re.compile(r"^### Item (\d+) — (.+)$", re.MULTILINE)
 CODE_RE = re.compile(r"`([^`]+)`")
 
 
-def _leading_tokens(value: str, vocabulary: set[str]) -> list[str]:
-    """Backticked tokens from the start of a field, up to the first non-token.
+def _value_region(value: str) -> str:
+    """The part of a field that holds values, i.e. everything before its prose.
 
-    A field says its verdict first and its prose afterwards ("`failed` on C1;
-    `pending` on C2"), so scanning stops at the first backticked span that is
-    not part of the vocabulary — that span is a file name or a decision id, not
-    a value.
+    A field states its value(s) first and explains afterwards, separated by an
+    em dash: "`pending` — a control-plane property". The split has to ignore em
+    dashes *inside* backticks, because one of the labels is `n/a — failed`.
     """
-    tokens: list[str] = []
-    for match in CODE_RE.finditer(value):
-        if match.group(1) not in vocabulary:
-            break
-        tokens.append(match.group(1))
+    inside = False
+    for index, char in enumerate(value):
+        if char == "`":
+            inside = not inside
+        elif not inside and value.startswith(" — ", index):
+            return value[:index]
+    return value
+
+
+def _tokens(value: str, vocabulary: set[str]) -> list[str]:
+    """Ordered values of a field, in the order the field states them.
+
+    Every backticked span in the value region must be a member of the closed
+    vocabulary. Stopping at the first unrecognised span instead would let a
+    field pass on its prefix alone — and would silently drop everything after a
+    stray reference, including a second provider's verdict.
+    """
+    tokens = CODE_RE.findall(_value_region(value))
+    unknown = [token for token in tokens if token not in vocabulary]
+    assert not unknown, f"{unknown!r} is not in the closed vocabulary; prose goes after an em dash"
     return tokens
 
 
@@ -119,7 +133,7 @@ def test_all_eleven_items_present_none_omitted_none_merged(table_rows, sections)
 def test_row_uses_the_closed_vocabularies(item, table_rows):
     verdict, label, provider = table_rows[item][2:5]
     for value, vocabulary in ((verdict, VERDICTS), (label, LABELS), (provider, PROVIDERS)):
-        tokens = _leading_tokens(value, vocabulary)
+        tokens = _tokens(value, vocabulary)
         assert tokens, f"item {item}: no recognised value in {value!r}"
 
 
@@ -136,32 +150,50 @@ def test_table_and_section_agree(item, table_rows, sections):
         # Ordered, not set-compared: item 2 carries one value per provider, and a
         # table reading "failed on C1, pending on C2" must not match a section
         # reading the reverse.
-        assert _leading_tokens(_field(section, name), vocabulary) == _leading_tokens(
+        assert _tokens(_field(section, name), vocabulary) == _tokens(
             table_rows[item][column], vocabulary
         ), f"item {item}: {name} disagrees between the table and its section"
 
 
 @pytest.mark.parametrize("item", range(1, 12))
 def test_every_row_names_its_provider_and_its_evidence(item, table_rows, sections):
-    assert _leading_tokens(table_rows[item][4], PROVIDERS)
+    assert _tokens(table_rows[item][4], PROVIDERS)
     assert _field(sections[item], "Evidence").strip()
     assert table_rows[item][5].strip()
 
 
-@pytest.mark.parametrize("item", (8, 10))
+@pytest.mark.parametrize("item", DEFERRED_ITEMS)
 def test_the_scoped_exception_is_not_widened(item, table_rows, sections):
-    """Items 8 and 10 are deferred, not waived — and nothing else joins them."""
-    assert "discharged" not in _leading_tokens(table_rows[item][2], VERDICTS)
-    assert "not discharged" in table_rows[item][2]
-    assert "not discharged" in _field(sections[item], "Verdict")
-    assert _field(sections[item], "Discharge point")
+    """Items 8 and 10 are deferred, not waived — and nothing else joins them.
+
+    "Deferred" is a statement about a point in time, so the check is against the
+    item's own record of whether that point has been reached. Before it, the
+    item may not read `discharged`; at it, the row is *required* to move — to
+    `discharged` if the predicate was met and to `failed` if it was not. A test
+    that forbade the move outright would have to be deleted to record the very
+    evidence it exists to protect.
+    """
+    section = sections[item]
+    assert _field(section, "Discharge point")
+    reached = _tokens(_field(section, "Discharge point reached"), {"yes", "no"})
+    assert reached in (["yes"], ["no"])
+
+    verdict = _tokens(table_rows[item][2], VERDICTS)
+    if reached == ["no"]:
+        assert "discharged" not in verdict
+        assert "not discharged" in table_rows[item][2]
+        assert "not discharged" in _field(section, "Verdict")
+    else:
+        assert verdict in (["discharged"], ["failed"]), (
+            f"item {item}: the discharge point is reached, so the verdict is terminal"
+        )
 
 
 @pytest.mark.parametrize("item", [n for n in range(1, 12) if n not in DEFERRED_ITEMS])
 def test_no_other_item_borrows_the_deferred_verdict(item, table_rows, sections):
     """Only items 8 and 10 may be rehearsed rather than discharged."""
-    assert DEFERRED_VERDICT not in _leading_tokens(table_rows[item][2], VERDICTS)
-    assert DEFERRED_VERDICT not in _leading_tokens(_field(sections[item], "Verdict"), VERDICTS)
+    assert DEFERRED_VERDICT not in _tokens(table_rows[item][2], VERDICTS)
+    assert DEFERRED_VERDICT not in _tokens(_field(sections[item], "Verdict"), VERDICTS)
     assert "not discharged" not in table_rows[item][2]
 
 
@@ -177,8 +209,8 @@ def test_the_exception_is_stated_as_scoped_to_those_two_items(text):
 
 
 def test_item_9_is_discharged_independently_and_provider_independent(table_rows, sections):
-    assert _leading_tokens(table_rows[9][2], VERDICTS) == ["discharged"]
-    assert _leading_tokens(table_rows[9][4], PROVIDERS) == ["provider-independent"]
+    assert _tokens(table_rows[9][2], VERDICTS) == ["discharged"]
+    assert _tokens(table_rows[9][4], PROVIDERS) == ["provider-independent"]
     section = sections[9]
     assert "independently of the spike" in section
     assert "untouched by the provider switch" in section
@@ -186,7 +218,7 @@ def test_item_9_is_discharged_independently_and_provider_independent(table_rows,
 
 def test_item_2_keeps_its_c1_failure(table_rows, sections):
     """The provider history is the row nobody should have to reconstruct."""
-    assert "failed" in _leading_tokens(table_rows[2][2], VERDICTS)
+    assert "failed" in _tokens(table_rows[2][2], VERDICTS)
     section = sections[2]
     assert "C1 (Agent View)" in _field(section, "Provider")
     assert "u1-session-id-bg-experiment.md" in section

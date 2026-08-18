@@ -226,7 +226,8 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 - **Evidence:** `#21` — a stub Secretary intake with an explicit queue boundary under a load
   generator at the worker cap, asserting structurally that intake and queue boundary are
   asynchronous and recording baseline-vs-load latency. Not yet landed.
-- **Discharge point:** **before the canary starts** (D-0022, D-0013). A Secretary that blocks under
+- **Discharge point:** **before the canary starts** (D-0022, D-0013).
+- **Discharge point reached:** `no` — the canary has not started. A Secretary that blocks under
   load would invalidate the canary's own measurements.
 - **Residual:** the numeric latency threshold is **unresolved** — `Q-0011`. The gate check is the
   absence of blocking dependencies plus a recorded baseline-vs-load comparison, and the real proof
@@ -238,7 +239,7 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 - **Verdict:** **`discharged` in full**, 2026-08-18.
 - **D-0022 label:** `proven on the spike slice`.
-- **Provider:** `provider-independent`. Item 9 tests nothing about the session backend, and
+- **Provider:** `provider-independent` — item 9 tests nothing about the session backend, and
   `ACCEPTANCE.md` §4 deliberately omits it from the re-run list. **Uniquely among the eleven, it was
   untouched by the provider switch** — it was the one issue exempt from the phase-0 block, ran in
   parallel from day 1, and the C2 ruling did not touch it. If the gate fails outright on C2 as well,
@@ -269,7 +270,8 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 - **Evidence:** `#23` — a run-start routing point, a run→owning-system ledger and a writer audit
   over both stores against a **synthetic** counterparty, plus a rehearsed rollback that changes only
   the routing decision. Not yet landed.
-- **Discharge point:** **at the canary itself** (D-0022). The item passes when canary runs complete
+- **Discharge point:** **at the canary itself** (D-0022).
+- **Discharge point reached:** `no` — the canary has not run. The item passes when canary runs complete
   with exactly one owner per run, no record written by both systems, and a real rollback that
   changes only routing.
 - **Residual:** canary duration, sample size and numeric go/no-go criteria are **unresolved** —
@@ -378,8 +380,11 @@ Later issues fill **one item at a time**. To close out an item:
    own. If there is none, write "none".
 5. **Never overwrite history.** Item 2's C1 failure is retained alongside its C2 outcome; anything
    later that supersedes a row is appended next to it, not in place of it.
-6. Items 8 and 10 may not be set to `discharged` before their named discharge points (§4). If a
-   discharge point is reached without its predicate met, record `failed`.
+6. Items 8 and 10 may not be set to `discharged` before their named discharge points (§4). When a
+   discharge point is reached, flip that item's **Discharge point reached** field to `yes` and set
+   the verdict in the same edit: `discharged` if its predicate was met, **`failed` if it was not**.
+   The flag is what lets the record move at the discharge point without letting it move early; a
+   `discharged` verdict while the flag reads `no` is the widening D-0022 forbids.
 
 `tests/gate_record/test_gate_record.py` enforces the structural half of these rules — eleven items
 present and distinct, closed vocabularies, table and sections agreeing, the D-0022 exception not
