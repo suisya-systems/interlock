@@ -100,6 +100,14 @@ Records are written verbatim, one JSON object per step, by
 `investigation/i01_supervisor_probe.py`. Excerpts below are quoted from those records; long token
 arrays are elided at `...` and nothing else is edited.
 
+**Provenance, since the harness was corrected mid-investigation.** A review pass found four
+measurement defects (§3.7, §3.10). §3.7's concurrency figures and §3.10's negative were **re-run**
+against the corrected harness and the numbers quoted here are the re-run ones. §§3.1-3.6, 3.8 and
+3.9 were recorded before the correction, and none of the four defects touches them: they concern the
+scenario's signal target, its post-reap descendant scan, the observer's claim path (disabled in the
+run that produced §3.8.2), and the concurrency reader. The corrected harness was re-verified against
+a stub binary so that every subcommand still records what it recorded then.
+
 ### 3.1 E1 — capability and version probe
 
 ```

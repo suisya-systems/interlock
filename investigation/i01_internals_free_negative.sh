@@ -68,6 +68,15 @@ PY
 )
 echo "restricted run requested session id: $SID"
 if [ -n "$SID" ]; then
-  find "$CFG/projects" -name "*$SID*" -printf '%p  %s bytes\n' 2>/dev/null | head -5 \
-    || echo "no transcript found"
+  # find exits 0 even when nothing matches, so test the captured output.
+  hits=$(find "$CFG/projects" -name "*$SID*" -printf '%p  %s bytes\n' 2>/dev/null | head -5)
+  if [ -n "$hits" ]; then
+    echo "$hits"
+  else
+    echo "NO TRANSCRIPT FOUND -- the child did NOT get normal access; this run is void"
+    exit 1
+  fi
+else
+  echo "NO restricted-run record found in $OUT/records.jsonl; this run is void"
+  exit 1
 fi

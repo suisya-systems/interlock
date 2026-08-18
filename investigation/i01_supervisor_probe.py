@@ -210,6 +210,18 @@ def cli_pid(p):
     return p.pid
 
 
+def comm(p, timeout=180):
+    """communicate() on a binary pipe, decoded. Every direct caller must use
+    this: spawn() opens binary pipes, and rec() cannot serialise bytes.
+    """
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        out, err = p.communicate()
+    return (out or b"").decode("utf-8", "replace"), (err or b"").decode("utf-8", "replace")
+
+
 def run(args, cwd, timeout=180, env_extra=None):
     t0 = time.time()
     p = spawn(args, cwd, env_extra=env_extra)
@@ -287,7 +299,7 @@ def cmd_spawn(a):
                      "HOME": os.environ.get("HOME", "")},
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, start_new_session=True)
-            out, err = p.communicate(timeout=180)
+            out, err = comm(p, timeout=180)
             r = {"argv": child_argv(args), "cwd": a.cwd, "rc": p.returncode,
                  "dur_s": round(time.time() - t0, 2), "stdout": out, "stderr": err,
                  "env": "PATH+HOME only"}
@@ -401,8 +413,8 @@ def cmd_exits(a):
                        (signal.SIGKILL, "SIGKILL")):
         p = spawn(["-p", LONG_PROMPT, "--output-format", "json"], a.cwd)
         time.sleep(a.kill_after)
-        os.kill(p.pid, sig)
-        out, err = p.communicate(timeout=60)
+        os.kill(cli_pid(p), sig)
+        out, err = comm(p, timeout=60)
         rec("exit_code", {"case": "interrupted-" + label, "rc": p.returncode,
                           "stdout": out, "stderr": err,
                           "stdout_empty": out == ""})
@@ -445,11 +457,7 @@ def cmd_signals(a):
         else:
             os.kill(p.pid, sig)
         t0 = time.time()
-        try:
-            out, err = p.communicate(timeout=30)
-        except subprocess.TimeoutExpired:
-            p.kill()
-            out, err = p.communicate()
+        out, err = comm(p, timeout=30)
         time.sleep(2.0)
         survivors = [d for d in before if alive(d["pid"])]
         rec("signal", {
@@ -550,7 +558,7 @@ def cmd_window(a):
         time.sleep(stagger)
         second = run(["-p", SHORT_PROMPT, "--output-format", "json",
                       "--session-id", u], a.cwd, timeout=180)
-        hout, herr = holder.communicate(timeout=300)
+        hout, herr = comm(holder, timeout=300)
         rec("window", {
             "stagger_s": stagger, "uuid": u,
             "second_rc": second["rc"], "second_dur_s": second["dur_s"],
@@ -696,7 +704,7 @@ def cmd_readback(a):
     ):
         p = spawn(["-p", SHORT_PROMPT, "--output-format", "stream-json", "--verbose"]
                   + extra, a.cwd)
-        out, err = p.communicate(timeout=180)
+        out, err = comm(p, timeout=180)
         init = None
         for ln in out.splitlines():
             try:
@@ -820,7 +828,7 @@ def cmd_observe(a):
     first_assistant = None
     claims = []
     reader = LineReader(p.stdout)
-    next_claim = t0 + a.claim_every
+    next_claim = t0 + a.claim_every if a.claim_every > 0 else float("inf")
     while time.time() - t0 < a.observe_seconds:
         for root, _dirs, files in os.walk(cfg):
             for fn in files:
@@ -841,7 +849,7 @@ def cmd_observe(a):
                 first_init_event = round(time.time() - t0, 3)
             if j.get("type") == "assistant" and first_assistant is None:
                 first_assistant = round(time.time() - t0, 3)
-        if time.time() >= next_claim:
+        if a.claim_every > 0 and time.time() >= next_claim:
             # Launched asynchronously and collected at the end. A synchronous
             # claimant would stop the scan for several seconds -- inside the
             # very interval being measured -- and an admitted one would itself
@@ -852,17 +860,13 @@ def cmd_observe(a):
                                           "json", "--session-id", u], a.cwd)})
             next_claim = time.time() + a.claim_every
         time.sleep(0.02)
-    try:
-        p.communicate(timeout=300)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        p.communicate()
+    comm(p, timeout=300)
     collected = []
     for c in claims:
         cp = c.pop("proc")
-        out, cerr = cp.communicate(timeout=180)
+        _out, cerr = comm(cp, timeout=180)
         c["rc"] = cp.returncode
-        c["stderr"] = cerr.decode("utf-8", "replace").strip()[:200]
+        c["stderr"] = cerr.strip()[:200]
         c["verdict"] = "admitted" if cp.returncode == 0 else "refused"
         collected.append(c)
     rec("observe_u34", {
@@ -896,7 +900,11 @@ def main():
     ap.add_argument("--config-dir", default=os.path.expanduser("~/.claude"),
                     help="observe only: CLI per-user config directory")
     ap.add_argument("--observe-seconds", type=float, default=40.0)
-    ap.add_argument("--claim-every", type=float, default=0.5)
+    ap.add_argument("--claim-every", type=float, default=0.0,
+                    help="observe only: seconds between second-claimant probes. "
+                         "0 (the default) issues none at all, which is what the "
+                         "landmark measurement needs: an admitted claimant can "
+                         "itself create the first file carrying the uuid.")
     ap.add_argument("--deny-paths", nargs="*", default=[],
                     help="scenario only: internal paths to self-check for denial")
     a = ap.parse_args()
