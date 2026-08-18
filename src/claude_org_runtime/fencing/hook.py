@@ -31,12 +31,39 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from .rules import Decision
-from .state import FenceStateError, read_fence
+# The rendered settings invoke this file **by path** (`python3 .../hook.py`),
+# which means it runs with no parent package and a plain `from .rules import`
+# raises `ImportError` before `main()` can deny -- exiting **1**, the status
+# i04 §4 measured being absorbed. A hook that cannot import itself is a hook
+# that is not there, and it would fail in the one direction that is silent.
+#
+# So the import is bootstrapped for the by-path case and, more importantly,
+# **its failure is not allowed to escape**: `_IMPORT_ERROR` is checked in
+# `main()`, which denies. There is no path through this file that reaches the
+# interpreter's own error handling.
+_IMPORT_ERROR: Exception | None = None
+try:
+    if __package__:
+        from .rules import Decision
+        from .state import FenceStateError, read_fence
+    else:  # invoked as a bare script
+        _SRC_ROOT = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        if _SRC_ROOT not in sys.path:
+            sys.path.insert(0, _SRC_ROOT)
+        from claude_org_runtime.fencing.rules import Decision
+        from claude_org_runtime.fencing.state import FenceStateError, read_fence
+except Exception as exc:  # noqa: BLE001 - deliberate catch-all, see above
+    _IMPORT_ERROR = exc
+    Decision = None  # type: ignore[assignment]
+    FenceStateError = Exception  # type: ignore[assignment,misc]
+    read_fence = None  # type: ignore[assignment]
 
 # The CLI treats exit 2 as a blocking error for PreToolUse. Exit 1 is what A6
 # watched get absorbed, so it is never used to mean "deny".
@@ -115,6 +142,30 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if _IMPORT_ERROR is not None:
+        # Nothing in this module is usable, so the deny is emitted literally
+        # rather than through the Decision machinery that failed to import.
+        reason = (
+            "Interlock deny hook could not load its own fence logic and denied "
+            f"by default: {_IMPORT_ERROR!r}"
+        )
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    },
+                    "decision": "block",
+                    "reason": reason,
+                    "interlock": {"rule_id": DENY_SELF_CHECK, "layer": "hook"},
+                }
+            )
+        )
+        sys.stdout.flush()
+        sys.stderr.write(reason + "\n")
+        return EXIT_DENY
     try:
         args = build_parser().parse_args(argv)
         try:

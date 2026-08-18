@@ -238,3 +238,102 @@ class TestExitStatusContract:
         })
         assert json.loads(result.stdout)["decision"] == "block"
         assert result.stderr.strip()
+
+
+class TestTheRenderedCommandIsTheOneThatWorks:
+    """Run the command the *renderer emits*, not a convenient equivalent.
+
+    The rest of this file invokes the hook as
+    ``python -m claude_org_runtime.fencing.hook``, and that is exactly how a
+    real hole hid: the rendered settings invoke the file **by path**, which
+    runs it with no parent package, and the relative imports at the top raised
+    ``ImportError`` and exited **1** -- the status i04 §4 measured being
+    absorbed. Every shipped role would have run behind an inert fence, and the
+    suite would have stayed green.
+
+    So these tests take the command string out of the rendered settings and
+    execute it, with the package deliberately *not* importable from the child's
+    environment.
+    """
+
+    @staticmethod
+    def _rendered_command(fence):
+        groups = fence.settings["hooks"]["PreToolUse"]
+        return [hook["command"] for group in groups for hook in group["hooks"]][0]
+
+    @staticmethod
+    def _clean_env():
+        import os
+
+        env = dict(os.environ)
+        env.pop("PYTHONPATH", None)
+        return env
+
+    def test_the_rendered_command_denies_a_probe(self, ctx, document, tmp_path):
+        import shlex
+
+        fence = render_fence("worker", ctx, document=document)
+        write_fence(fence, ctx.fence_path)
+        probe = probes_for(fence)[0]
+        result = subprocess.run(
+            shlex.split(self._rendered_command(fence)),
+            input=json.dumps(
+                {"tool_name": probe.tool_name, "tool_input": dict(probe.tool_input)}
+            ),
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env=self._clean_env(),
+            check=False,
+        )
+        assert result.returncode != 1, result.stderr
+        assert json.loads(result.stdout)["decision"] == "block"
+
+    def test_the_rendered_command_never_exits_1_even_when_it_cannot_work(
+        self, ctx, document, tmp_path
+    ):
+        """The failure direction that is silent.
+
+        Exit 1 is absorbed, so a hook that breaks *must not* break that way --
+        including when the thing that broke is the hook's own ability to load.
+        """
+
+        import shlex
+
+        fence = render_fence("worker", ctx, document=document)
+        command = shlex.split(self._rendered_command(fence))
+        # No fence file at all: the hook cannot answer, so it must deny.
+        result = subprocess.run(
+            command,
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}}),
+            capture_output=True,
+            text=True,
+            cwd=str(tmp_path),
+            env=self._clean_env(),
+            check=False,
+        )
+        assert result.returncode == EXIT_DENY, result.stderr
+        assert json.loads(result.stdout)["decision"] == "block"
+
+    def test_every_role_rendered_command_runs(self, ctx, document, tmp_path):
+        import shlex
+        from dataclasses import replace
+
+        for role in role_names(document):
+            role_ctx = replace(ctx, fence_path=tmp_path / role / "fence.json")
+            fence = render_fence(role, role_ctx, document=document)
+            write_fence(fence, role_ctx.fence_path)
+            probe = probes_for(fence)[0]
+            result = subprocess.run(
+                shlex.split(self._rendered_command(fence)),
+                input=json.dumps(
+                    {"tool_name": probe.tool_name, "tool_input": dict(probe.tool_input)}
+                ),
+                capture_output=True,
+                text=True,
+                cwd=str(tmp_path),
+                env=self._clean_env(),
+                check=False,
+            )
+            assert result.returncode == EXIT_DENY, f"{role}: {result.stderr}"
+            assert json.loads(result.stdout)["decision"] == "block", role

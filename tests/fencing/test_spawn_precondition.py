@@ -139,6 +139,32 @@ class TestBrokenConfigurationsRefuse:
         assert not (ctx.fence_path.parent / "settings.local.json").exists()
 
 
+class TestPublicationIsAllOrNothing:
+    def test_a_failed_settings_write_leaves_no_fence_behind(
+        self, ctx, document, ledger, monkeypatch
+    ):
+        """Half a publication is not "nothing published".
+
+        A fence left on disk by a spawn that was then refused would be read by
+        the hook on the next start and enforced as though it had been admitted
+        -- the refusal invariant would be satisfied in the ledger and violated
+        on the filesystem.
+        """
+
+        spawner = RecordingSpawner()
+        fenced = FencedSpawner(ledger=ledger, document=document)
+        monkeypatch.setattr(
+            FencedSpawner,
+            "_write_settings",
+            lambda *_a, **_k: (_ for _ in ()).throw(OSError("no space left on device")),
+        )
+        outcome = fenced.spawn("worker", ctx, spawner)
+        assert not outcome.admitted
+        assert spawner.calls == []
+        assert not ctx.fence_path.exists()
+        assert ledger.refusals()
+
+
 class TestTheRefusalIsRecordedDurably:
     def test_the_refusal_is_on_disk_with_its_reasons(self, ctx, document, ledger):
         FencedSpawner(ledger=ledger, document=document).spawn(

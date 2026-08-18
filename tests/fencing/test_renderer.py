@@ -227,6 +227,49 @@ class TestRefusals:
             render_fence("worker", ctx, document=broken)
         assert RefusalReason.RULE_SYNTAX in excinfo.value.codes
 
+    def test_a_deny_list_authored_as_a_string_refuses(self, ctx, document):
+        """The mis-authoring that renders one rule per *letter*.
+
+        ``"deny": "WebFetch"`` iterates character by character, so the fence
+        gains rules for tools ``W``, ``e``, ``b`` ... each of which the
+        self-battery cheerfully denies -- while the rule that was meant is
+        simply absent. A green battery over the wrong rules is the worst shape
+        this fence can take.
+        """
+
+        broken = mutate(
+            document, "worker", permissions={"allow": [], "deny": "WebFetch"}
+        )
+        with pytest.raises(FenceRefusal) as excinfo:
+            render_fence("worker", ctx, document=broken)
+        assert RefusalReason.RULE_SYNTAX in excinfo.value.codes
+
+    def test_a_sandbox_deny_list_authored_as_a_string_refuses(self, ctx, document):
+        broken = mutate(
+            document,
+            "worker",
+            sandbox={"filesystem": {"denyRead": "/etc/shadow", "denyWrite": []}},
+        )
+        with pytest.raises(FenceRefusal) as excinfo:
+            render_fence("worker", ctx, document=broken)
+        assert RefusalReason.RULE_SYNTAX in excinfo.value.codes
+
+    def test_an_unlaunchable_hook_refuses(self, ctx, document):
+        """The launcher is as load-bearing as the script it launches.
+
+        i04 §5 measured an unresolvable hook failing **open** at exit 127 under
+        ``bash``. A launcher that does not exist produces the same 127, so
+        checking only the script leaves the identical hole one token to the
+        left.
+        """
+
+        from dataclasses import replace
+
+        broken_ctx = replace(ctx, python="python3-that-does-not-exist")
+        with pytest.raises(FenceRefusal) as excinfo:
+            render_fence("worker", broken_ctx, document=document)
+        assert RefusalReason.HOOK_UNRESOLVABLE in excinfo.value.codes
+
     def test_unsubstituted_placeholder_refuses(self, ctx, document):
         broken = mutate(
             document,

@@ -25,7 +25,9 @@ of the bad value.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
@@ -193,7 +195,21 @@ def render_fence(
     reasons.extend(_check_forbidden_allow(permissions.get("allow", []), global_cfg))
 
     rules: list[FenceRule] = []
-    for raw in permissions.get("deny", []) or []:
+    deny = permissions.get("deny", [])
+    # A string here iterates character by character and renders one rule per
+    # letter -- each of which the self-battery then happily "denies", while the
+    # rule that was meant is absent. Refuse the shape rather than the symptom.
+    if deny is None:
+        deny = []
+    elif not isinstance(deny, list):
+        reasons.append(
+            (
+                RefusalReason.RULE_SYNTAX,
+                f"permissions.deny must be a list, got {type(deny).__name__}",
+            )
+        )
+        deny = []
+    for raw in deny:
         try:
             rules.append(parse_permission_rule(raw))
         except RuleSyntaxError as exc:
@@ -217,7 +233,19 @@ def render_fence(
             ("denyRead", KIND_SANDBOX_DENY_READ),
             ("denyWrite", KIND_SANDBOX_DENY_WRITE),
         ):
-            for entry in filesystem.get(key, []) or []:
+            entries = filesystem.get(key, [])
+            if entries is None:
+                continue
+            if not isinstance(entries, list):
+                reasons.append(
+                    (
+                        RefusalReason.RULE_SYNTAX,
+                        f"sandbox.filesystem.{key} must be a list, "
+                        f"got {type(entries).__name__}",
+                    )
+                )
+                continue
+            for entry in entries:
                 try:
                     rules.append(parse_sandbox_entry(entry, kind))
                 except RuleSyntaxError as exc:
@@ -335,11 +363,7 @@ def _check_hooks(hooks: Any, ctx: FenceContext) -> list[tuple[str, str]]:
                 problems.append((RefusalReason.RULE_SYNTAX, f"hook not a command: {hook!r}"))
                 continue
             commands += 1
-            for token in _script_tokens(hook["command"]):
-                if not Path(token).is_file():
-                    problems.append(
-                        (RefusalReason.HOOK_UNRESOLVABLE, f"hook script not found: {token}")
-                    )
+            problems.extend(_check_command_resolves(hook["command"]))
     if not commands:
         problems.append((RefusalReason.HOOK_ABSENT, "no PreToolUse command hooks declared"))
     if str(ctx.hook_script) not in _all_commands(entries):
@@ -363,12 +387,39 @@ def _all_commands(entries: list[Any]) -> str:
     return "\n".join(parts)
 
 
-def _script_tokens(command: str) -> list[str]:
-    return [
-        token.strip("'\"")
-        for token in command.split()
-        if token.strip("'\"").endswith((".sh", ".py"))
-    ]
+def _check_command_resolves(command: str) -> list[tuple[str, str]]:
+    """Both halves of a hook command must resolve: the launcher and the script.
+
+    i04 §5 measured an unresolvable hook failing **open** at exit 127 when it
+    was launched through ``bash``. A launcher that does not exist produces the
+    same 127, so checking only the script would leave the identical hole one
+    token to the left.
+    """
+
+    problems: list[tuple[str, str]] = []
+    tokens = [token.strip("'\"") for token in command.split() if token.strip("'\"")]
+    if not tokens:
+        return [(RefusalReason.RULE_SYNTAX, "empty hook command")]
+
+    launcher = tokens[0]
+    if os.sep in launcher or (os.altsep and os.altsep in launcher):
+        resolved = Path(launcher).is_file() and os.access(launcher, os.X_OK)
+    else:
+        resolved = shutil.which(launcher) is not None
+    if not resolved:
+        problems.append(
+            (
+                RefusalReason.HOOK_UNRESOLVABLE,
+                f"hook launcher not executable: {launcher}",
+            )
+        )
+
+    for token in tokens[1:]:
+        if token.endswith((".sh", ".py")) and not Path(token).is_file():
+            problems.append(
+                (RefusalReason.HOOK_UNRESOLVABLE, f"hook script not found: {token}")
+            )
+    return problems
 
 
 def _check_placeholders(value: Any, path: str = "") -> list[tuple[str, str]]:

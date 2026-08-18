@@ -198,10 +198,33 @@ class FencedSpawner:
                     battery=battery,
                 )
 
+            # Publication is all-or-nothing. A fence left on disk by a spawn
+            # that was then refused would be read by the hook on the next
+            # start and enforced as though it had been admitted -- the refusal
+            # invariant says nothing is published, and half of something is
+            # not nothing.
+            fence_path = None
             try:
                 fence_path = write_fence(fence, ctx.fence_path)
                 settings_path = self._write_settings(fence, ctx)
             except OSError as exc:
+                if fence_path is not None:
+                    try:
+                        fence_path.unlink()
+                    except OSError:
+                        # The rollback itself failed, so the refusal must say
+                        # so: an operator has a stale fence to remove by hand.
+                        return self._refuse(
+                            role,
+                            [
+                                (
+                                    RefusalReason.DOCUMENT_UNREADABLE,
+                                    f"cannot publish fence: {exc}; and the partially "
+                                    f"published fence at {fence_path} could not be "
+                                    f"removed -- delete it before the next spawn",
+                                )
+                            ],
+                        )
                 return self._refuse(
                     role, [(RefusalReason.DOCUMENT_UNREADABLE, f"cannot publish fence: {exc}")]
                 )

@@ -102,6 +102,20 @@ Three consequences, all wired into `fencing/hook.py`:
   assertion to one class, whose only claim is that a deny never uses exit 1. Enforcement is
   measured in the investigation file, by whether the forbidden operation happened.
 
+**The hook must survive being invoked the way it is actually invoked.** The rendered settings run
+the hook **by path** (`python3 .../hook.py`), which means it executes with no parent package. A
+first cut of this file used ordinary relative imports at module scope; they raised `ImportError`
+and the process exited **1** — the absorbed status — so every shipped role would have run behind an
+inert fence while the suite stayed green, because the tests invoked the hook as
+`python -m claude_org_runtime.fencing.hook` instead of as the command the renderer emits. Two
+things now hold that shut: the import is bootstrapped for the by-path case, and its failure is
+routed to a literal deny rather than to the interpreter's error handling. And
+`tests/fencing/test_deny_hook.py::TestTheRenderedCommandIsTheOneThatWorks` takes the command string
+**out of the rendered settings** and runs it with the package deliberately not importable.
+
+The general lesson is the one A6 already taught in a different costume: **a fence you test through
+a convenient equivalent is not the fence you shipped.**
+
 ## 5. U15 — `PreToolUse` ordering under `bypassPermissions`
 
 **Answered:** the hook fires and its `deny` is honoured under `bypassPermissions`. The mode does not
@@ -147,6 +161,10 @@ rows are the same missing script, differing only in launcher: `python3` exits 2 
 exits 127 and does not. Nothing about the missing script decided that. A missing hook cannot report
 its own absence — it does not fail, it simply never runs — so the last moment it can be caught is
 before the child is spawned.
+
+**The launcher is checked too, not just the script.** A launcher that does not exist produces the
+same exit 127 as a missing shell script, so validating only the `.py`/`.sh` token would leave the
+identical hole one token to the left.
 
 ## 7. Restart, under C2
 
