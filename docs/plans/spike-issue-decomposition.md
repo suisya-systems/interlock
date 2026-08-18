@@ -34,8 +34,9 @@ Three consequences run through the whole file:
    **moot and closed** (I-03), twelve untouched.
 3. **The provider supplies no exclusion, and the spike must stop expecting one.** U27 is negative
    (a ~2–3 s admission window at `--session-id` creation, inside which two processes were admitted,
-   both exited 0, and **both wrote to one transcript**), U32 is negative (`--resume` excludes nothing
-   at all, at any stagger), U28 is positive but only for *identity durability* across SIGKILL. The
+   both exited 0, and **both wrote to one transcript**), U32 is negative (`--resume` refused no second
+   concurrent claimant — two were tested, simultaneously and at a 5 s stagger, i.e. outside U27's
+   window), U28 is positive but only for *identity durability* across SIGKILL. The
    fence search's §5.3 conclusion is now a design premise of this plan: **Interlock's own fencing
    token, validated atomically as part of each protected write, is the only exclusion in the
    system.** Where that changes an acceptance criterion, it is written into the issue rather than
@@ -531,7 +532,11 @@ issues:
         (U33), and the same must be checked, not assumed, on `-p`.
       - **Resume across a supervisor restart.** Kill the supervisor (not the child), restart it, and
         resume from persisted state only. This is the C2 shape of the lifecycle question and it is
-        the path a crash actually takes.
+        the path a crash actually takes. **Resolve the child before resuming**: I-01 probes whether a
+        `-p` child survives its parent's SIGKILL, and where it does, the restarted supervisor must
+        adopt it, or terminate it and confirm its exit, before issuing `--resume`. Resuming past a
+        live orphan creates a second writer the provider will not refuse (U32) — the same rule I-12
+        implements and I-13 is graded on, and this probe must not model the unsafe order.
       - **Working-tree ownership (item 7).** A git fixture carrying **uncommitted**, **untracked**
         and **unpushed** changes, driven through every lifecycle transition Interlock performs —
         spawn, stop, resume, worker exit, cleanup. Observe whether the `-p` child ever creates a
@@ -564,7 +569,10 @@ issues:
       - [ ] Resume preserves **both** the conversation and the `session_id`, demonstrated across at
             least three successive resumes in fresh processes, with the transcript shown to grow in
             place. Any fork-like behaviour is recorded as a finding of the same class as U33.
-      - [ ] Resume works after the **supervisor** is killed and restarted, from persisted state only.
+      - [ ] Resume works after the **supervisor** is killed and restarted, from persisted state only,
+            **with the surviving child resolved first** — adopted, or terminated with its exit
+            confirmed. Both cases are exercised: a child that died with its parent, and a child that
+            outlived it.
       - [ ] For every transition × every fixture state: working-tree content is **byte-identical**
             afterwards, **or** the transition is refused while unsaved work exists. Byte-identical
             means a recorded hash comparison, not an eyeballed `git status`. The untracked case is
@@ -1884,9 +1892,10 @@ issues:
             rendered inputs proves what we wrote rather than what the provider loaded.
       - [ ] **Item 2's residual is stated the same way** (I-13) — and stated as what it is, which is
             the absence of a backstop rather than a tolerated violation. Under C2 the provider admits
-            two processes to one session inside the admission window (U27) and any number on
-            `--resume` (U32), so nothing but Interlock's own correctness stands between a run and an
-            interleaved transcript. Record that. Do **not** record an interleaved transcript as an
+            two processes to one session inside the admission window (U27) and refuses no second
+            concurrent `--resume` (U32 — two is the number tested, simultaneously and at a 5 s
+            stagger; no larger count was probed), so nothing but Interlock's own correctness stands
+            between a run and an interleaved transcript. Record that. Do **not** record an interleaved transcript as an
             accepted residual: if two processes were ever concurrently live on one session id, item 2
             **failed**, and the record says so.
       - [ ] **Item 6's F1 caveat is stated**, and stated in its now-stronger form — the "no UI
