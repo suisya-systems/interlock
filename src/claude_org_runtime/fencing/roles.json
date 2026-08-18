@@ -1,0 +1,191 @@
+{
+  "$comment": "Interlock's per-role fence document. Carried from claude-org-runtime settings/role_configs_schema.json MINUS the discarded transport and sandbox_by_pattern axes (PORTING_LEDGER, R5). Spike artifact under D-0026: the shape and its tests are durable, the bodies are throwaway.",
+  "version": 1,
+  "global": {
+    "$comment_forbidden_allow": "An allow rule matching any of these is an authoring error that widens the fence, and it refuses the render rather than being dropped.",
+    "forbidden_allow_exact": [
+      "Bash(git *)",
+      "Bash(git push *)",
+      "Bash(git push:*)",
+      "Bash(gh *)",
+      "Bash(gh:*)",
+      "Bash(rm -rf *)",
+      "Bash"
+    ],
+    "forbidden_allow_regex": [
+      "^Bash\\(\\s*\\*\\s*\\)$",
+      "^Read\\(\\s*\\*\\s*\\)$",
+      "^mcp__claude-peers__"
+    ],
+    "permission_modes": ["default", "plan", "acceptEdits"]
+  },
+  "roles": {
+    "worker": {
+      "description": "The claude -p child Interlock owns. Git read/write inside its own worktree, no push, no worktree surgery, no credential reads.",
+      "role_kind": "worker",
+      "permission_mode": "default",
+      "permissions": {
+        "allow": [
+          "Bash(git add:*)",
+          "Bash(git commit:*)",
+          "Bash(git status:*)",
+          "Bash(git diff:*)",
+          "Bash(git log:*)",
+          "Bash(git show:*)"
+        ],
+        "deny": [
+          "Bash(git push)",
+          "Bash(git push *)",
+          "Bash(git worktree *)",
+          "Bash(git remote set-url *)",
+          "Bash(git config --global *)",
+          "Bash(git reflog delete *)",
+          "Bash(rm -rf *)",
+          "Bash(curl *)",
+          "Read(.env)",
+          "Read(**/*.pem)",
+          "Read(**/credentials*)",
+          "Write(~/.claude/settings.json)",
+          "WebFetch"
+        ]
+      },
+      "sandbox": {
+        "filesystem": {
+          "denyRead": [
+            "{interlock_root}/.secrets",
+            {"path": "~/.ssh"}
+          ],
+          "denyWrite": [
+            "{interlock_root}/.state",
+            "{claude_org_path}"
+          ]
+        }
+      },
+      "hooks": {
+        "PreToolUse": [
+          {
+            "matcher": "*",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "{python} {hook_script} --role worker --fence {fence_path}"
+              }
+            ]
+          }
+        ]
+      },
+      "env": {
+        "WORKER_DIR": "{worker_dir}",
+        "INTERLOCK_ROOT": "{interlock_root}"
+      }
+    },
+    "curator": {
+      "description": "Proposes skill material and may never write it (D-0018, gate item 9). The promotion gate is the only writer into skill material; the fence says so at the tool layer as well.",
+      "role_kind": "org",
+      "permission_mode": "default",
+      "permissions": {
+        "allow": ["Bash(git log:*)", "Bash(git show:*)"],
+        "deny": [
+          "Bash(git push)",
+          "Bash(git push *)",
+          "Bash(rm -rf *)",
+          "Write(**/.claude/skills/**)",
+          "Edit(**/.claude/skills/**)",
+          "Read(**/*.pem)"
+        ]
+      },
+      "sandbox": {
+        "filesystem": {
+          "denyRead": ["~/.ssh"],
+          "denyWrite": ["{interlock_root}/skills", "{interlock_root}/.state"]
+        }
+      },
+      "hooks": {
+        "PreToolUse": [
+          {
+            "matcher": "*",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "{python} {hook_script} --role curator --fence {fence_path}"
+              }
+            ]
+          }
+        ]
+      },
+      "env": {"INTERLOCK_ROOT": "{interlock_root}"}
+    },
+    "dispatcher": {
+      "description": "Plans and dispatches. Never edits a worker tree and never pushes.",
+      "role_kind": "org",
+      "permission_mode": "default",
+      "permissions": {
+        "allow": ["Bash(git log:*)", "Bash(git status:*)"],
+        "deny": [
+          "Bash(git push)",
+          "Bash(git push *)",
+          "Bash(git commit *)",
+          "Bash(rm -rf *)",
+          "Read(**/*.pem)"
+        ]
+      },
+      "sandbox": {
+        "filesystem": {
+          "denyRead": ["~/.ssh"],
+          "denyWrite": ["{worker_dir}", "{interlock_root}/.state"]
+        }
+      },
+      "hooks": {
+        "PreToolUse": [
+          {
+            "matcher": "*",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "{python} {hook_script} --role dispatcher --fence {fence_path}"
+              }
+            ]
+          }
+        ]
+      },
+      "env": {"INTERLOCK_ROOT": "{interlock_root}"}
+    },
+    "secretary": {
+      "description": "The human-facing window. Reads state, never writes code and never pushes.",
+      "role_kind": "org",
+      "permission_mode": "default",
+      "permissions": {
+        "allow": ["Bash(git log:*)", "Bash(git status:*)"],
+        "deny": [
+          "Bash(git push)",
+          "Bash(git push *)",
+          "Bash(git commit *)",
+          "Bash(rm -rf *)",
+          "Write(**/src/**)",
+          "Edit(**/src/**)",
+          "Read(**/*.pem)"
+        ]
+      },
+      "sandbox": {
+        "filesystem": {
+          "denyRead": ["~/.ssh"],
+          "denyWrite": ["{worker_dir}", "{interlock_root}/.state"]
+        }
+      },
+      "hooks": {
+        "PreToolUse": [
+          {
+            "matcher": "*",
+            "hooks": [
+              {
+                "type": "command",
+                "command": "{python} {hook_script} --role secretary --fence {fence_path}"
+              }
+            ]
+          }
+        ]
+      },
+      "env": {"INTERLOCK_ROOT": "{interlock_root}"}
+    }
+  }
+}
