@@ -302,7 +302,7 @@ The proposal's Decision 6a has an explicit tail: *if the experiment fails, searc
 substituting post-hoc adoption (F6).* The experiment failed. The tail therefore applies, and this
 section proposes — but does not decide — how.
 
-### 5.1 Gate item 2 on Agent View: **proposed FAIL**
+### 5.1 Gate item 2 on Agent View: the fence search is **triggered**, and is not done here
 
 `ACCEPTANCE.md` §1 item 2 requires that after a kill at each injection point, re-identification yields
 exactly one session per run, and that a single-writer violation at any injection point is a gate
@@ -317,8 +317,22 @@ not an identity (V20, and E2 shows the CLI *generates* it from the prompt — `"
 confirmation"` for the prompt `"reply with ok"`, so it is not even caller-controlled), and a
 crash-then-retry can leave two live sessions matching one intent before any reconciler runs.
 
-**Proposed verdict: gate item 2 fails on Agent View (C1), and this routes to `Q-0004` per Decision
-6a's tail.** Confirmation is a human's, in a `D-` entry.
+**But that is only the `--session-id` route.** Decision 6a's tail permits failing item 2 *after* a
+search for **any other pre-spawn fence** comes up empty, and this experiment did not conduct that
+search — it tested one hypothesis, `--session-id` with `--bg`, and refuted it. An independent token
+that Interlock itself mints and that protected writes carry, or some other provider handle not
+examined here, is not excluded by anything above.
+
+So the accurate statement is narrower than a verdict:
+
+> **U1 is negative, which triggers Decision 6a's fence search for C1. That search is outstanding. If
+> it comes up empty, item 2 fails on Agent View and routes to `Q-0004`; if it finds a pre-spawn fence,
+> item 2 survives on that fence instead.**
+
+What this note *can* say without the search is that the search must be for a **pre-spawn** handle:
+per F6, post-hoc adoption is not an available answer, so a search that returns only a reconciliation
+rule has come up empty for these purposes. Both the search and the resulting verdict are a human's,
+in a `D-` entry.
 
 ### 5.2 The failure mode is *soft*, and that is a finding in its own right
 
@@ -378,8 +392,12 @@ So the honest formulation is: **what this removes is an objection, not the remai
 - It does not select a `Q-0004` candidate. It supplies one input (O6 evidence for C1 and C2) to a
   decision that weighs seven candidates against six obligations.
 - It does not propose softening item 2. Per F6, an adoption rule that picks a winner without proving
-  the loser never wrote would be a reclassification wearing the clothes of a mitigation; the honest
-  move on a negative U1 is to fail the item and change providers, not to redefine the predicate.
+  the loser never wrote would be a reclassification wearing the clothes of a mitigation; on a negative
+  U1 the honest move is to look for a real pre-spawn fence and, failing that, change providers — not
+  to redefine the predicate.
+- **It does not conduct Decision 6a's search for another pre-spawn fence, and so does not deliver an
+  item 2 verdict.** It refutes one hypothesis (`--session-id` under `--bg`) and thereby triggers that
+  search. See §5.1.
 - The `-p` refusal was observed against a finished holder (E5) and a live one (E7), both in the same
   directory. It was **not** tested across directories, under a simultaneous race on the claim itself,
   or after an ungraceful kill of the holder — and that last one is the injection point item 2 actually
@@ -408,11 +426,17 @@ short `id` in every row seen (E1, E2). Convenient, undocumented, and should not 
 
 `--session-id` does not compose with `--bg`; it is discarded with a warning and exit 0, and the
 collision case does not arise because there is no identity input to collide. U1 is **negative**.
-Following Decision 6a's tail, this note **proposes** that gate item 2 fails on Agent View and that the
-`Q-0004` path opens. It also reports that the pre-spawn fence F6 specifies demonstrably exists on the
-`-p` surface: identity is chosen pre-spawn and a second claimant, live or finished, is refused. That
-removes `U13`'s stated objection for C2 without yet discharging item 2 for it — atomicity under a
-simultaneous race and behaviour across an ungraceful kill remain untested (U27/U28) — and it does not
-rescue C1 either way, since E6 confirms the two surfaces cannot be combined.
+Following Decision 6a's tail, this note **proposes** that the search for another pre-spawn fence on
+Agent View is now triggered, and that item 2 fails and the `Q-0004` path opens if that search comes up
+empty. It also reports that on the `-p` surface identity can be chosen pre-spawn and a second
+claimant — live or finished — is refused. Those are **ingredients** of F6's fence, not the fence
+itself — F6 additionally requires a token that
+protected writes carry and that the first commit invalidates, and neither write-time fencing nor
+atomicity under a simultaneous race was tested (U27/U28). What they do remove is `U13`'s stated
+objection for C2. They do not rescue C1 either way, since E6 confirms the two surfaces cannot be
+combined.
+
+For C1 itself, the negative U1 result **triggers** Decision 6a's search for some other pre-spawn
+fence; that search is outstanding, and the item 2 verdict follows from it rather than from this note.
 
 The gate verdict itself is left to a human and to a subsequent `D-` entry.
