@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gate record for the eleven Agent View gate items** (I-19, Issue #24).
+  `docs/gate-record.md` is the single place where each item carries a verdict,
+  its evidence, the provider that evidence was obtained against, and the D-0022
+  label -- "proven on the spike slice" or "re-proven on the real
+  implementation". Without one document holding that labelling, the scoped
+  exception D-0022 grants (items 8 and 10 deferred, **not waived**) degrades
+  into an unaccountable claim that the gate passed.
+
+  Two rows are settled. **Item 2 is recorded as failed on C1 (Agent View)** per
+  D-0027 -- U1 negative and the D-0024 fence search empty -- with its C2
+  re-proof pending in #18, so the provider history is on the record rather than
+  reconstructable only from git; its residual is stated as the absence of a
+  backstop (U27's admission window, U32's unfenced `--resume`), and an
+  interleaved transcript is explicitly *not* an accepted residual. **Item 9 is
+  recorded as discharged in full and independently of the spike** (#22,
+  PR #27), uniquely untouched by the provider switch. The other nine rows are
+  pending with their evidence sources named, because the record is most needed
+  on the branches where that evidence never arrives.
+
+  `tests/gate_record/` enforces the structural half: eleven items present and
+  distinct, closed verdict/label/provider vocabularies, the summary table and
+  the per-item sections agreeing, items 8 and 10 not marked discharged before
+  their named discharge points, and item 2's C1 failure not deleted by a later
+  edit. Per D-0026 the tests are durable; the record itself is a contract
+  artifact, and no artifact it classifies is promoted by being listed there.
+
 - **Curator promotion gate with a content-digest approval record** (gate item 9,
   Issue #22). Curator output cannot reach skill material without a human
   approval that names an immutable candidate version by content digest

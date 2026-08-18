@@ -33,6 +33,11 @@ All eleven items, verbatim in intent, none omitted. Every item is pass/fail (D-0
 verification methods below are proposals for how to demonstrate each item during the Agent View
 spike; where a numeric threshold would be required and the Issue fixes none, the row says so.
 
+**Where the verdicts live.** This section states the items and how each is to be verified. The
+per-item **verdicts** — verdict, evidence, provider, and the D-0022 label every entry must carry —
+live in `docs/gate-record.md`, which is written as the spike runs and is due whether the gate is
+discharged or terminated.
+
 **A caveat on "pre-implementation".** The items are not uniform in what they presuppose. Items 1–3
 are provable against the Agent View CLI with a thin spike harness. Items 4–6, 9, 10 and 11
 presuppose the very things they test — SQLite recovery, a `MessageBus`, a Curator promotion path, an
