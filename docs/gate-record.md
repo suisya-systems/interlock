@@ -199,6 +199,11 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
     or one writing malformed JSON at exit 0, was **not probed**, and the battery does not cover it.
   - **One machine, one CLI build, one load, one run per case** (U34). No case was repeated, so this
     is not a flakiness measurement.
+  - **No single run exercises the rendered fence end to end.** The attempt is recorded as
+    **inconclusive** (`investigation/i04-pretooluse-fence-probe.md` §5b): the control was blocked
+    too, because `permission_mode: default` stops bash writes regardless of any rule, so neither run
+    attributes anything to the fence. The hook's decision and the CLI's honouring of a `deny` are
+    two separate measurements and are **not** stitched into one claim.
 - **Notes:** fail-closed is **Interlock's own obligation** under D-0017 regardless of provider
   (D-0023 part 2), so that work is not wasted under any `Q-0004` outcome. A third provider would
   revert this row to `pending` (`ACCEPTANCE.md` §4) and would restore the D-0023 part 3 hole with

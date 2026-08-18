@@ -42,6 +42,15 @@ repeated in the gate record because it must not be softened in transit:
 Diffing our own rendered inputs proves **what we wrote, not what the provider loaded**, and that gap
 is exactly what item 3 exists to close. Probing every rule narrows it. It does not close it.
 
+**And no single run exercises the rendered fence end to end.** An attempt was made and is recorded
+as **inconclusive** in `investigation/i04-pretooluse-fence-probe.md` §5b: a real `-p` child was
+blocked when handed the rendered `worker` fence, but so was the control asking for an operation the
+fence has *no rule for*, because `permission_mode: default` stops bash writes regardless. Both runs
+were stopped by the permission surface, so neither attributes anything to a rule. What was verified
+is narrower: the hook command taken **verbatim from the rendered settings** returns the right
+decision for the right rule, and the CLI-level half — that a `deny` at exit 2 stops the operation —
+is measured separately in §2 of that file. The two halves are not stitched into one claim.
+
 **What it does prove**, and each of these is asserted mechanically in `tests/fencing/`:
 
 1. Every rule in every role's fence has a probe, and every probe is denied **by the rule it

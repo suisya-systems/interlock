@@ -121,6 +121,41 @@ spawned**, which is where `claude_org_runtime/fencing/spawn.py` catches it.
 
 ---
 
+## 5b. An end-to-end attempt against the real rendered fence — **inconclusive**, and why it is
+recorded anyway
+
+After the implementation landed, the full rendered `worker` fence was handed to a real `claude -p`
+child (`--settings <rendered settings.local.json> --permission-mode default`) and asked to run
+`curl --version > probe-output.txt`, which the fence denies via `Bash(curl *)`. The file was not
+created and the child reported being blocked.
+
+**That is not evidence, because the control failed too.** A second child, given the same fence and
+asked to run `printf ok > probe-output.txt` — an operation the fence has **no rule for** — was also
+blocked, and also created nothing. With `permission_mode: default` and a settings file whose `allow`
+list does not cover `Bash`, a non-interactive `-p` child cannot run bash writes at all. So both runs
+were stopped by the *permission surface*, and nothing about the specific rule can be attributed to
+the fence.
+
+This is exactly the confound §1 was written about, caught the same way: by a control. It is recorded
+rather than deleted because the tempting move — reporting the first run and not the second — would
+have read as a clean end-to-end pass.
+
+What *was* verified, directly and reproducibly, is narrower and worth stating precisely: the hook
+command taken verbatim out of the rendered `settings.local.json`, run against the published fence,
+returns the right decision for the right reason:
+
+```
+$ echo '{"tool_name":"Bash","tool_input":{"command":"curl --version > /x"}}' |     python3 .../fencing/hook.py --role worker --fence .../fence-worker.json
+{"hookSpecificOutput": {... "permissionDecision": "deny",
+ "permissionDecisionReason": "worker: Bash denied by permission-deny rule 'curl *'"}, ...}
+exit 2
+```
+
+The CLI-level half — that a `deny` at exit 2 actually stops the operation — is the `deny-*` rows of
+§2, measured with `--allowedTools Bash` and with `bypassPermissions` precisely so that the
+permission surface was *not* the thing doing the stopping. **The two halves are separate
+measurements and are not stitched into one claim.**
+
 ## 6. Scope and what this does not show
 
 - **One machine, one CLI build, one load.** Per U34 these numbers must not be designed on as
@@ -133,6 +168,10 @@ spawned**, which is where `claude_org_runtime/fencing/spawn.py` catches it.
   sandbox configuration (U3, `investigation/i01-supervisor-probe.md` §3.9). Every row here is
   behaviour observed against settings *we* passed. That gap is item 3's residual and D-0023 records
   it as a deliberate weakening accepted by a human, not as an equivalent method.
+- **No single run exercises the rendered fence end to end.** §5b explains why the attempt was
+  inconclusive and what was measured instead. Closing that gap needs a role whose `allow` list
+  admits the tool the probe uses, so that the permission surface is not the thing doing the
+  stopping — which is a different fence from the one shipped, and so a different experiment.
 - **`--allowedTools Bash` is not the fence Interlock renders.** It was used to give the control and
   the exit-1 case a permission surface that admits `Bash` at all, so that the hook is the only thing
   that could stop it. Interlock's rendered fence uses `permissions.deny`, and rows 2 and 5 are the
