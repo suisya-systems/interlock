@@ -48,6 +48,34 @@ def test_any_change_to_the_tree_changes_the_digest(mutated):
     assert candidate_digest(mutated) != original
 
 
+def test_line_endings_are_part_of_the_version():
+    """CRLF and LF renderings of the same characters are two versions.
+
+    This is deliberate, and it is why every writer into a candidate has to be
+    byte-exact rather than text-mode: if the digest folded newlines together it
+    would also stop noticing a one-byte substitution, which is the whole of gate
+    item 9's fourth negative.
+    """
+
+    lf = candidate_digest({"SKILL.md": b"a\nb\n"})
+    crlf = candidate_digest({"SKILL.md": b"a\r\nb\r\n"})
+    assert lf != crlf
+
+
+def test_read_tree_does_not_translate_line_endings(tmp_path):
+    """``read_tree`` reports the bytes on disk. Reading in text mode would
+    silently equate a CRLF file with its LF original and hand the gate a digest
+    for content that is not there."""
+
+    root = tmp_path / "candidate"
+    root.mkdir()
+    (root / "SKILL.md").write_bytes(b"a\r\nb\r\n")
+
+    assert read_tree(root) == {"SKILL.md": b"a\r\nb\r\n"}
+    assert digest_tree(root) == candidate_digest({"SKILL.md": b"a\r\nb\r\n"})
+    assert digest_tree(root) != candidate_digest({"SKILL.md": b"a\nb\n"})
+
+
 def test_length_prefixing_defeats_path_content_reshuffling():
     """Without length prefixes these two trees would serialize identically."""
 

@@ -91,8 +91,11 @@ class ApprovalLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(entry.to_json(), sort_keys=True) + "\n"
         # Open in append mode and flush to the OS on every event: a refusal that
-        # is lost on crash is a refusal that was not recorded.
-        with self.path.open("a", encoding="utf-8") as handle:
+        # is lost on crash is a refusal that was not recorded. ``newline=""``
+        # pins the record separator to the ``\n`` written above: text mode would
+        # otherwise emit CRLF on Windows, making the same ledger a different file
+        # byte-for-byte depending on where it was appended to.
+        with self.path.open("a", encoding="utf-8", newline="") as handle:
             handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
