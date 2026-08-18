@@ -173,7 +173,7 @@ def test_mutation_that_only_adds_a_file_is_refused(harness):
 
     candidate = harness.propose()
     approval = harness.authority.approve(candidate, "demo")
-    (candidate.root / "extra.md").write_text("payload\n", encoding="utf-8")
+    harness.add_file(candidate, "extra.md", "payload\n")
 
     decision = harness.gate.promote(candidate, "demo", approval)
 
@@ -191,8 +191,71 @@ def test_mutation_reverted_before_promotion_is_allowed(harness):
     assert not harness.gate.promote(candidate, "demo", approval).allowed
     harness.mutate(candidate, SKILL_BODY_V1)
 
+    # Byte-exact, not merely text-equal: a "revert" that lands CRLF where the
+    # approval named LF is a different version, and this assertion is what says
+    # so on a platform whose text mode would translate the newlines.
+    assert (candidate.root / "SKILL.md").read_bytes() == SKILL_BODY_V1.encode("utf-8")
     assert harness.gate.promote(candidate, "demo", approval).allowed
     assert harness.skill_material() == {"demo/SKILL.md": SKILL_BODY_V1}
+
+
+# -- line endings are part of the version --------------------------------
+
+
+def test_curator_writes_candidate_text_without_newline_translation(harness):
+    """The Curator is the reference writer: what it puts on disk is the bytes it
+    was handed, on every platform. If it translated newlines, the digest taken
+    right after ``propose`` would already name something the caller never
+    proposed."""
+
+    candidate = harness.propose()
+
+    on_disk = (candidate.root / "SKILL.md").read_bytes()
+    assert on_disk == SKILL_BODY_V1.encode("utf-8")
+    assert b"\r\n" not in on_disk
+
+
+def test_a_crlf_rewrite_of_the_approved_text_is_refused(harness):
+    """The same characters with different line endings are different bytes, and
+    the digest names bytes.
+
+    This is the Windows failure reproduced deliberately: the candidate is
+    rewritten with CRLF -- which is precisely what a text-mode write does there
+    -- and the gate must both refuse it and accept the LF bytes again once they
+    are restored. Refusing is the correct behaviour; the bug was a *writer* that
+    produced CRLF while claiming to reproduce the approved content."""
+
+    candidate = harness.propose()
+    approval = harness.authority.approve(candidate, "demo")
+
+    with open(candidate.root / "SKILL.md", "w", encoding="utf-8", newline="\r\n") as f:
+        f.write(SKILL_BODY_V1)
+    assert (candidate.root / "SKILL.md").read_bytes() != SKILL_BODY_V1.encode("utf-8")
+
+    decision = harness.gate.promote(candidate, "demo", approval)
+    assert not decision.allowed
+    assert decision.reason == RefusalReason.DIGEST_MISMATCH
+    assert harness.skill_material() == {}
+
+    harness.mutate(candidate, SKILL_BODY_V1)
+    assert harness.gate.promote(candidate, "demo", approval).allowed
+    assert harness.skill_material() == {"demo/SKILL.md": SKILL_BODY_V1}
+
+
+def test_promotion_publishes_the_approved_bytes_verbatim(harness):
+    """The published file is the approved bytes, not a re-encoded rendering of
+    them: the gate stages with ``open(..., "wb")`` so the promoted tree hashes
+    to the digest that was approved."""
+
+    body = "line-1\nline-2\n"
+    candidate = harness.curator.propose("demo", {"SKILL.md": body})
+    approval = harness.authority.approve(candidate, "demo")
+
+    assert harness.gate.promote(candidate, "demo", approval).allowed
+
+    published = (harness.skill_root / "demo" / "SKILL.md").read_bytes()
+    assert published == body.encode("utf-8")
+    assert b"\r\n" not in published
 
 
 # -- negative 5: valid approval replayed against a different candidate ----
@@ -348,7 +411,7 @@ def test_promotion_publishes_exactly_the_approved_tree(harness):
     assert set(harness.skill_material()) == {"demo/SKILL.md", "demo/extra.md"}
 
     (first.root / "extra.md").unlink()
-    (first.root / "SKILL.md").write_text(SKILL_BODY_V2, encoding="utf-8")
+    harness.mutate(first, SKILL_BODY_V2)
     second_approval = harness.authority.approve(first, "demo")
 
     assert harness.gate.promote(first, "demo", second_approval).allowed
