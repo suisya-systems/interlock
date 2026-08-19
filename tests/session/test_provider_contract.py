@@ -383,3 +383,37 @@ def test_an_ok_carrying_something_that_is_not_a_report_refuses_the_spawn():
 
     with pytest.raises(s1.SpawnRefused):
         s1.check_spawn_precondition(s1.Ok(_LooksCompatible()))
+
+
+def test_every_observer_is_asked_even_after_a_veto():
+    """The surface carries observation as well as veto; order must not decide."""
+
+    provider = _Provider(s1.Ok(_report()))
+    seen = []
+
+    class _Recording:
+        def __init__(self, name, verdict):
+            self.name = name
+            self.verdict = verdict
+
+        def on_workspace_transition(self, transition):
+            seen.append(self.name)
+            if self.verdict is s1.WorkspaceVerdict.VETO:
+                return s1.WorkspaceDecision(s1.WorkspaceVerdict.VETO, f"{self.name} objects")
+            return s1.WorkspaceDecision(s1.WorkspaceVerdict.ALLOW)
+
+    provider.register_workspace_observer(_Recording("first", s1.WorkspaceVerdict.VETO))
+    provider.register_workspace_observer(_Recording("second", s1.WorkspaceVerdict.ALLOW))
+    provider.register_workspace_observer(_Recording("third", s1.WorkspaceVerdict.VETO))
+
+    decision = provider.evaluate_workspace_transition(_transition())
+    assert seen == ["first", "second", "third"]
+    assert decision.verdict is s1.WorkspaceVerdict.VETO
+    assert "first objects" in decision.reason
+    assert "1 further veto" in decision.reason
+
+
+@pytest.mark.parametrize("verdict", list(s1.WorkspaceVerdict))
+def test_a_non_string_reason_is_this_interfaces_own_error(verdict):
+    with pytest.raises(s1.ContractViolation):
+        s1.WorkspaceDecision(verdict, None)

@@ -426,6 +426,12 @@ class WorkspaceDecision:
     def __post_init__(self) -> None:
         if not isinstance(self.verdict, WorkspaceVerdict):
             raise ContractViolation(f"verdict must be a WorkspaceVerdict, got {self.verdict!r}")
+        if not isinstance(self.reason, str):
+            raise ContractViolation(
+                f"reason must be a string, got {self.reason!r}. Checked before it "
+                "is read, so a malformed reason is this interface's own error "
+                "rather than an AttributeError from somewhere downstream."
+            )
         if self.verdict is WorkspaceVerdict.VETO and not self.reason.strip():
             raise ContractViolation(
                 "a veto must say why: an unexplained veto is an empty result "
@@ -721,22 +727,41 @@ class SessionProvider(ABC):
         :class:`WorkspaceDecision`, vetoes. An observer whose own failure let a
         transition through would be worse than no observer, because its
         presence is what the caller is relying on.
+
+        **Every observer is asked, including after a veto has been recorded.**
+        The capability this surface carries is *observe or veto* -- an observer
+        that keeps its own record of attempted transitions is doing the first
+        half, and short-circuiting on the first veto would make what it sees
+        depend on the registration order of parties it knows nothing about. The
+        first veto is the one returned; later ones are still collected so the
+        decision can say how many parties objected.
         """
 
+        first_veto: WorkspaceDecision | None = None
+        veto_count = 0
         for observer in self._workspace_observers:
             try:
                 decision = observer.on_workspace_transition(transition)
             except Exception as exc:  # noqa: BLE001 - any failure is a veto
-                return WorkspaceDecision(
+                decision = WorkspaceDecision(
                     WorkspaceVerdict.VETO,
                     f"observer {type(observer).__name__} raised {exc!r}",
                 )
             if not isinstance(decision, WorkspaceDecision):
-                return WorkspaceDecision(
+                decision = WorkspaceDecision(
                     WorkspaceVerdict.VETO,
                     f"observer {type(observer).__name__} returned {decision!r}, "
                     "which is not a WorkspaceDecision",
                 )
             if decision.verdict is WorkspaceVerdict.VETO:
-                return decision
-        return WorkspaceDecision(WorkspaceVerdict.ALLOW)
+                veto_count += 1
+                if first_veto is None:
+                    first_veto = decision
+        if first_veto is None:
+            return WorkspaceDecision(WorkspaceVerdict.ALLOW)
+        if veto_count == 1:
+            return first_veto
+        return WorkspaceDecision(
+            WorkspaceVerdict.VETO,
+            f"{first_veto.reason} (and {veto_count - 1} further veto(es))",
+        )
