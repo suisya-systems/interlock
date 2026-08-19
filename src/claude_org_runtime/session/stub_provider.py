@@ -40,6 +40,7 @@ path would make gate items 6 and 11 unmeasurable.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -96,19 +97,24 @@ _DEFAULT_CHILD_PROGRAM = (
 CREATE_WORKSPACE = "create-workspace"
 
 
+#: The characters a session id may use once this provider has to name a file
+#: after it. An allow-list rather than a list of things to reject: a stub that
+#: tried to canonicalise arbitrary ids would be reimplementing path semantics
+#: it has no need for, and each platform has its own way for a "harmless" id to
+#: land somewhere else -- a separator on POSIX, a drive qualifier such as
+#: ``C:foo`` on Windows, an embedded NUL on both.
+_SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9._-]+")
+
+
 def _is_one_path_component(session_id: str) -> bool:
-    """True when the id names a file and cannot reach out of a directory.
+    """True when the id is safe to use, whole, as a file name on any platform.
 
     A session id is the caller's to choose (S1), and this provider turns it
-    into a file name, so an id carrying a separator or a parent reference would
-    let a caller pick which file the provider deletes and rewrites. Checked
-    against both platforms' separators rather than the running one, so a
-    traversal an id would perform on Windows is refused on Linux too.
+    into a file name, so an id that escapes the state root would let a caller
+    pick which file the provider deletes and rewrites.
     """
 
-    return bool(session_id) and session_id not in {".", ".."} and not any(
-        character in session_id for character in ("/", "\\", os.sep, os.altsep or "/")
-    )
+    return bool(_SAFE_SESSION_ID.fullmatch(session_id)) and session_id not in {".", ".."}
 
 
 @dataclass
@@ -268,6 +274,17 @@ class LocalProcessSessionProvider(SessionProvider):
                 FailureKind.BACKEND_UNREACHABLE,
                 f"could not spawn a child for session {request.session_id!r}: {exc}",
                 {"command": list(command), "errno": exc.errno},
+            )
+        except (ValueError, IndexError) as exc:
+            # An empty command, or one carrying a NUL, is rejected by Popen
+            # before it reaches the operating system. That is the caller's
+            # settings being unusable, which the contract says is a reason-
+            # bearing Failure and not an exception at the caller.
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"the child command configured for session "
+                f"{request.session_id!r} is unusable: {exc}",
+                {"command": list(command)},
             )
 
         session = _Session(
@@ -445,6 +462,18 @@ class LocalProcessSessionProvider(SessionProvider):
                 could_not_observe_reason=(
                     f"the child is running but its state file "
                     f"{session.state_file} could not be read: {exc}"
+                ),
+                provider_detail=session.provider_detail,
+            )
+        except UnicodeDecodeError as exc:
+            # A child may write whatever it likes. Bytes that are not a word
+            # are a state this provider could not observe, with the reason --
+            # not an exception, and not a state invented on the child's behalf.
+            return SessionReadout(
+                session_id=session_id,
+                observation=Observation.COULD_NOT_OBSERVE,
+                could_not_observe_reason=(
+                    f"the child is running but wrote a state that is not UTF-8: {exc}"
                 ),
                 provider_detail=session.provider_detail,
             )

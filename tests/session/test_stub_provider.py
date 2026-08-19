@@ -327,7 +327,8 @@ def test_the_announce_delay_is_passed_to_the_child_by_environment(tmp_path: Path
 
 
 @pytest.mark.parametrize(
-    "session_id", ["../escape", "/absolute", "nested/id", "..", r"back\slash"]
+    "session_id",
+    ["../escape", "/absolute", "nested/id", "..", "back\\slash", "C:escape", "nul\x00id"],
 )
 def test_a_session_id_that_is_not_one_file_name_is_refused(
     tmp_path: Path, provider, session_id: str
@@ -383,3 +384,35 @@ def test_reading_an_exited_session_releases_its_child_pipe(tmp_path: Path, provi
     readout = provider.read_state("s-1").value
     assert readout.provider_state == "exited-0"
     assert provider._sessions["s-1"].process.stdin.closed
+
+
+def test_an_unusable_child_command_is_a_failure_not_an_exception(
+    tmp_path: Path, provider
+):
+    """Popen rejects these before the operating system sees them."""
+
+    for command in ([], [sys.executable, "-c", "pass\x00"]):
+        result = provider.start(_request(tmp_path, "s-1", command=command))
+        assert isinstance(result, s1.Failure), command
+        assert result.kind is s1.FailureKind.REFUSED_BY_PROVIDER
+    assert provider.list_sessions().value == ()
+
+
+def test_a_state_word_that_is_not_utf8_is_could_not_observe(tmp_path: Path, provider):
+    """A child writes what it likes; unreadable bytes are not a state."""
+
+    child = (
+        "import os, sys\n"
+        f"path = os.environ[{STATE_FILE_ENV!r}]\n"
+        "open(path, 'wb').write(b'\\xff\\xfe')\n"
+        "sys.stdin.read()\n"
+    )
+    provider.start(_request(tmp_path, command=[sys.executable, "-c", child]))
+    deadline = time.monotonic() + 10.0
+    while not (provider._sessions["s-1"].state_file.exists()):
+        assert time.monotonic() < deadline, "child never wrote its state file"
+        time.sleep(0.02)
+
+    readout = provider.read_state("s-1").value
+    assert readout.observation is s1.Observation.COULD_NOT_OBSERVE
+    assert "not UTF-8" in readout.could_not_observe_reason
