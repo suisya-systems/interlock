@@ -169,11 +169,38 @@ CREATE TABLE lease (
     CHECK (expires_at_ms > acquired_at_ms)
 );
 
+-- Two rules, one trigger, and the second is the one that is easy to lose:
+--
+--   * an epoch never decreases, whatever the update touches; and
+--   * a CHANGE OF HOLDER must raise it. A handover written as
+--     "UPDATE lease SET holder = ..., expires_at_ms = ..." without naming the
+--     epoch hands the replacement the previous holder's token -- and a paused
+--     former holder returning with that same token is then indistinguishable
+--     from the current one at any destination that validates the token rather
+--     than SQLite's idea of who holds it. That is precisely the stale writer
+--     the fence exists to reject.
+--
+-- The trigger is BEFORE UPDATE ON lease rather than BEFORE UPDATE OF epoch: a
+-- trigger scoped to the epoch column does not run for the update that omits it,
+-- which is the dangerous one. A renewal by the SAME holder keeps its epoch, as
+-- it must -- re-acquiring is not what invalidates a token.
 CREATE TRIGGER lease_epoch_is_monotonic
-BEFORE UPDATE OF epoch ON lease
-WHEN NEW.epoch <= OLD.epoch
+BEFORE UPDATE ON lease
+WHEN NEW.epoch < OLD.epoch
+  OR (NEW.holder <> OLD.holder AND NEW.epoch <= OLD.epoch)
 BEGIN
-    SELECT RAISE(ABORT, 'lease epoch must strictly increase');
+    SELECT RAISE(ABORT, 'a lease epoch never decreases, and a new holder must raise it');
+END;
+
+-- Blocking deletion is not enough to keep epochs from restarting: SQLite lets a
+-- primary key be updated, so renaming resource 'r' vacates 'r' and the next
+-- INSERT takes it at epoch 1 -- the same token reuse the no-delete rule exists
+-- to prevent, reached by a different statement.
+CREATE TRIGGER lease_resource_is_immutable
+BEFORE UPDATE OF resource ON lease
+WHEN NEW.resource <> OLD.resource
+BEGIN
+    SELECT RAISE(ABORT, 'a lease resource is never renamed; its epoch history belongs to it');
 END;
 
 -- Releasing a lease is setting expires_at_ms into the past, never deleting the
@@ -258,6 +285,15 @@ END;
 
 -- A resend is a new attempt on the same message identity, so the identity a
 -- delivery was deduplicated under may not be rewritten under a live row.
+-- The ack is recorded against this identity, so vacating it by rename would let
+-- a second row take the identity of a message that was already acked.
+CREATE TRIGGER outbox_message_id_is_frozen
+BEFORE UPDATE OF message_id ON outbox
+WHEN NEW.message_id <> OLD.message_id
+BEGIN
+    SELECT RAISE(ABORT, 'an outbox row keeps the message identity it was enqueued under');
+END;
+
 CREATE TRIGGER outbox_dedup_key_is_frozen
 BEFORE UPDATE OF dedup_key ON outbox
 WHEN NEW.dedup_key <> OLD.dedup_key

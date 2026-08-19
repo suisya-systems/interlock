@@ -432,12 +432,61 @@ def test_a_timestamp_that_is_not_an_integer_is_refused(cp):
 
 
 def test_a_lease_epoch_never_goes_backwards(cp):
-    add_lease(cp, epoch=7)
+    add_lease(cp, holder="holder-a", epoch=7)
     cp.execute("UPDATE lease SET epoch = 8 WHERE resource = 'run-1'")
-    with pytest.raises(sqlite3.IntegrityError, match="strictly increase"):
-        cp.execute("UPDATE lease SET epoch = 8 WHERE resource = 'run-1'")
-    with pytest.raises(sqlite3.IntegrityError, match="strictly increase"):
+    with pytest.raises(sqlite3.IntegrityError, match="never decreases"):
         cp.execute("UPDATE lease SET epoch = 3 WHERE resource = 'run-1'")
+
+    # A renewal by the same holder keeps its epoch: re-acquiring is not what
+    # invalidates a token, and forcing a bump would make every heartbeat
+    # invalidate writes that are still in flight.
+    cp.execute("UPDATE lease SET expires_at_ms = ? WHERE resource = 'run-1'", (T0 + 90_000,))
+    assert cp.execute("SELECT epoch FROM lease").fetchone() == (8,)
+
+
+def test_a_change_of_holder_must_raise_the_epoch(cp):
+    # The handover written without naming the epoch is the dangerous one: it
+    # hands the replacement the previous holder's token, and a paused former
+    # holder returning with that token is then indistinguishable from the
+    # current one at any destination that validates tokens rather than rows.
+    add_lease(cp, holder="holder-a", epoch=4)
+
+    with pytest.raises(sqlite3.IntegrityError, match="new holder must raise it"):
+        cp.execute(
+            "UPDATE lease SET holder = 'holder-b', acquired_at_ms = ?, expires_at_ms = ?"
+            " WHERE resource = 'run-1'",
+            (T0 + 60_000, T0 + 90_000),
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="new holder must raise it"):
+        cp.execute("UPDATE lease SET holder = 'holder-b', epoch = 4 WHERE resource = 'run-1'")
+
+    cp.execute(
+        "UPDATE lease SET holder = 'holder-b', epoch = 5, acquired_at_ms = ?, expires_at_ms = ?"
+        " WHERE resource = 'run-1'",
+        (T0 + 60_000, T0 + 90_000),
+    )
+    assert cp.execute("SELECT holder, epoch FROM lease").fetchone() == ("holder-b", 5)
+
+
+def test_a_lease_resource_cannot_be_renamed_out_of_the_way(cp):
+    # Blocking DELETE is not enough: renaming the primary key vacates the
+    # resource, and the next INSERT takes it at epoch 1 -- the same token reuse,
+    # reached by a different statement.
+    add_lease(cp, resource="run-1", epoch=9)
+
+    with pytest.raises(sqlite3.IntegrityError, match="never renamed"):
+        cp.execute("UPDATE lease SET resource = 'run-1-old' WHERE resource = 'run-1'")
+    with pytest.raises(sqlite3.IntegrityError):
+        add_lease(cp, resource="run-1", holder="holder-c", epoch=1)
+
+    assert cp.execute("SELECT resource, epoch FROM lease").fetchall() == [("run-1", 9)]
+
+
+def test_an_outbox_row_keeps_the_identity_its_ack_was_recorded_against(cp):
+    add_run(cp)
+    add_outbox(cp)
+    with pytest.raises(sqlite3.IntegrityError, match="message identity"):
+        cp.execute("UPDATE outbox SET message_id = 'msg-2' WHERE message_id = 'msg-1'")
 
 
 def test_a_lease_row_is_expired_not_deleted(cp):

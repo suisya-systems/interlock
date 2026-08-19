@@ -68,7 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constraint is only noticed at the moment it would have mattered. An empty
   string is treated as empty as a NULL wherever R4's distinction depends on it.
   Creation claims its path with `O_EXCL`, so a process that loses a creation
-  race cannot delete the winner's database.
+  race cannot delete the winner's database. The lease fence closes both ways
+  a token could be reused: a change of holder must raise the epoch (a
+  handover written without naming it would hand the replacement the previous
+  holder's token), and a resource is never renamed (renaming vacates it, and
+  the next acquisition would restart at epoch 1).
 
   Throwaway under D-0026, named explicitly by it, and it survives a C2 switch:
   nothing in it is provider-shaped.
