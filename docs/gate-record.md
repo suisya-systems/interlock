@@ -377,7 +377,7 @@ anything.
 
 | Artifact | Class (D-0026) | Where |
 |---|---|---|
-| S1 — the provisional `SessionProvider` interface | **durable (contract)** | `#10` — marked provisional in the file itself (D-0021); promoted to a settled contract only by a later `D-` entry |
+| S1 — the provisional `SessionProvider` interface | **durable (contract)** | `#10` — marked provisional in the file itself (D-0021); promoted to a settled contract only by a later `D-` entry. Landed 2026-08-19: `src/claude_org_runtime/session/provider.py`, tests `tests/session/`. Being written does not promote it |
 | Tests — fault injection, recovery, accident-derived fixtures, the control-plane suite | **durable (tests)** | `#15`, `#16`, `#18`, `#19`, `#20`, `tests/curator/`, `tests/fencing/` |
 | S2 — the C2 `SessionProvider` | throwaway | `#17` |
 | S3 — the stub provider | throwaway | `#11` |
