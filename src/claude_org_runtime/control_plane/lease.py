@@ -76,7 +76,7 @@ __all__ = [
     "Authority",
     "Claim",
     "ClockSkewRefused",
-    "Destination",
+    "DestinationFencing",
     "DestinationRejectedStaleToken",
     "EpochGuardedDestination",
     "FencedStatement",
@@ -1255,8 +1255,14 @@ def applied_epoch_regressions(
 
 
 @dataclass(frozen=True)
-class Destination:
-    """One place an effect lands, and what it can do about a stale token.
+class DestinationFencing:
+    """What one place an effect lands can do about a stale token.
+
+    Named for the property and not for the place, because S7's
+    :class:`~claude_org_runtime.control_plane.destination.Destination` is the
+    *place*: a delivery target with a receipt. This is a register entry about one
+    -- whether a stale epoch can be refused there, and what is left over when it
+    cannot.
 
     ``ACCEPTANCE.md`` section 2 asks that where a destination can enforce a
     stale token it does, and where it cannot, that this is written down rather
@@ -1288,8 +1294,8 @@ class Destination:
             )
 
 
-def _register(*destinations: Destination) -> Mapping[str, Destination]:
-    register: dict[str, Destination] = {}
+def _register(*destinations: DestinationFencing) -> Mapping[str, DestinationFencing]:
+    register: dict[str, DestinationFencing] = {}
     for destination in destinations:
         if destination.name in register:
             raise LeaseUsageError(f"duplicate destination {destination.name!r}")
@@ -1301,8 +1307,8 @@ def _register(*destinations: Destination) -> Mapping[str, Destination]:
 #: token. ``docs/lease-fencing.md`` carries the same table for a reader, and the
 #: suite asserts the two agree -- a written-down residual that drifts from the
 #: code is a residual nobody is holding any more.
-DESTINATIONS: Mapping[str, Destination] = _register(
-    Destination(
+DESTINATIONS: Mapping[str, DestinationFencing] = _register(
+    DestinationFencing(
         name="control_plane_sqlite",
         enforces_stale_token=True,
         note=(
@@ -1311,7 +1317,7 @@ DESTINATIONS: Mapping[str, Destination] = _register(
             "is recorded as an action row."
         ),
     ),
-    Destination(
+    DestinationFencing(
         name="reference_epoch_guarded_destination",
         enforces_stale_token=True,
         note=(
@@ -1321,7 +1327,7 @@ DESTINATIONS: Mapping[str, Destination] = _register(
             "ACCEPTANCE.md section 2 requires of an external effect."
         ),
     ),
-    Destination(
+    DestinationFencing(
         name="session_provider_child_process",
         enforces_stale_token=False,
         note=(
@@ -1338,7 +1344,7 @@ DESTINATIONS: Mapping[str, Destination] = _register(
             "a fence."
         ),
     ),
-    Destination(
+    DestinationFencing(
         name="worktree_filesystem",
         enforces_stale_token=False,
         note=(

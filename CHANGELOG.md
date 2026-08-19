@@ -70,7 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from a closed set, blank quoted literals before the structural scan of a
   fragment, refuse to assign the columns a row is attributed by, and carry
   `applied_at_ms IS NULL` on an `action` update, so finished evidence is added to
-  and never replaced.
+  and never replaced. Merged with S7 (#14): the register entry type is
+  `DestinationFencing`, named for the property rather than the place so it does
+  not shadow S7's `Destination` (a delivery target), and the package re-exports
+  neither `StaleWriterRefused` -- both modules define one and they mean the same
+  thing, so shadowing either would make `except` miss half the refusals.
+  Reconciling them to one class is follow-up work.
 
   **Where a destination can enforce a stale token it does, and where it cannot
   that is written down.** `DESTINATIONS` refuses to register a destination that
@@ -84,6 +89,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   found no exclusion at all on the `--resume` path, so this lease is the only
   exclusion in the system. Asserted structurally: neither the module nor the
   suite may import anything under `claude_org_runtime.session`.
+
+- **S7 -- the outbox: resend, ack, dedup, and one handler that names its
+  exactly-once mechanism** (`ACCEPTANCE.md` §2, D-0004 / D-0026, Issue #14).
+  `src/claude_org_runtime/control_plane/outbox.py` drives the S5 `outbox` and
+  `action` tables; `handlers.py` carries the one action handler;
+  `destination.py` carries the counterparty it delivers to. **Spike scaffold,
+  throwaway by default** -- D-0026 covers S7 exactly as it covers the schema it
+  sits on, and `Q-0001` stays open. The durable half is
+  `tests/control_plane/test_outbox.py`.
+
+  **At-least-once delivery, exactly-once effect -- and they are different
+  records.** The outbox delivers at least once: a lost ack is answered by a
+  resend, and a resend is not a failure. Exactly-once is a property of the
+  *effect*, evidenced by `action.idempotency_key` on our side and by the
+  destination's own ledger on the other. This is why S5 left `outbox.dedup_key`
+  non-unique: a sender killed after committing a row may legitimately re-enqueue
+  the same work under a new message id, and two rows delivering one effect is
+  the correct outcome rather than a defect.
+
+  **The exactly-once evidence is the destination's, because ours would not
+  count.** `ACCEPTANCE.md` §2 is explicit that *a case that asserts exactly-once
+  for an external effect using only our own rows does not pass*, and our
+  `action_one_effect_per_key` index makes the disallowed proof trivially easy to
+  write by accident -- it shows we did not *record* two effects, not that two
+  effects did not *happen*, and those come apart at exactly the injection point
+  the item is about. So the counterparty is a separate durable store with its
+  own deduplication (`KeyedDropbox`, where the exclusion is `O_EXCL` and so
+  belongs to the operating system rather than to any check-then-write of ours),
+  every exactly-once assertion reads the destination's effect count, and the
+  strongest case **deletes the control-plane database** before asking -- no row
+  of ours can be what makes it pass. The destination is a spike stand-in for one
+  supporting an idempotency key; re-proving the item against a real one is #16's
+  and the canary's.
+
+  **The fence is carried into the effect, because our own writes cannot reach
+  it.** Every protected statement validates the lease epoch inside the write --
+  the enqueue, the retry-count increment, the effect intent, the applied
+  transition and the delivered transition -- and none of that covers the window
+  where *this process* is paused past its own lease, because a paused process
+  issues no statement to be refused. `ACCEPTANCE.md` §2 asks external
+  destinations to reject a stale token where they can enforce it, so the epoch
+  travels with the effect and `KeyedDropbox` refuses a token below the highest
+  it has honoured -- checked *inside* the same critical section that publishes,
+  since separately they are a check-then-write with exactly the race a fence
+  exists to prevent. Tokens are scoped by lease resource: epochs from different
+  leases are different sequences, and one global maximum would reject live
+  writers rather than stale ones. Effect keys are namespaced by recipient for
+  the mirror-image reason -- two handlers sharing an action kind would otherwise
+  have the second silently deduplicate against the first's effect.
+
+  **The declaration is enforced, not conventional.** `HandlerRegistry` refuses a
+  handler that does not name a mechanism from the enumeration
+  `action.exactly_once_mechanism` already carries -- refused at *registration*,
+  since a check that fires on first delivery lets an undeclared handler ship --
+  and the suite re-checks every shipped handler class so that one bypassing the
+  registry still fails. The constant and the DDL's CHECK are pinned to each
+  other so two copies of the same clause cannot drift.
+
+  **Which handler, and why the other two were rejected.**
+  `NotifyDestinationHandler` declares `destination_idempotency_key`.
+  *Transactional commit with the record* was rejected because a handler
+  demonstrating it truthfully needs an effect inside our own SQLite -- and an
+  effect that commits with its own record cannot be killed in the window the
+  item exists to test, so it would pass by not being the case under test. A
+  *human gate* was rejected because for this action it would be false: the gate
+  is for actions where **neither** mechanism is achievable, and claiming one for
+  an effect whose destination does support a key understates what is provable
+  just as badly as the reverse. `HumanGatedHandler` therefore exists as the
+  third branch made expressible and testable (D-0004) -- `Outbox` records the
+  action and refuses to advance it, before any effect is attempted -- rather
+  than as a second delivery path.
+
+  **The kill windows are where they actually are.** `retry_count` is incremented
+  and committed *before* the attempt, so it counts attempts rather than
+  successes -- §2 holds the recipient unavailable across several retries, which
+  by construction never succeed -- and it is proven monotonic across a real
+  process restart, read back by a fresh interpreter that was never told
+  anything. The action row becomes durable before the effect, so a kill on
+  either side of the effect replays to the same place; our rows cannot tell the
+  two apart, which is the limit §2 names rather than one this module claims to
+  close. The four points are named constants (`CHECKPOINTS`) that S9 (#15) binds
+  to, and a test asserts each is actually reached -- a window no harness can stop
+  inside is one nobody can prove anything about.
+
+  **Ack.** Idempotent by predicate: the first ack moves the row, and a
+  duplicate, a late one, or one arriving after a restart changes nothing and is
+  not an error. It is deliberately **unfenced** -- an ack is the recipient
+  reporting what it already did, and refusing to record it because our own lease
+  moved on would turn a delivered message back into an undelivered one. Under
+  the backward clock skew §2 injects, the lifecycle order is preserved and the
+  clamp is *reported* on the outcome rather than applied silently.
+
+  **No row is left without an owner, and no retry policy is invented.**
+  `UNOWNED_OUTBOX_QUERY` is exported as SQL so the recovery criterion can be run
+  by hand against a database recovered from a crash (D-0001); `recover()`
+  re-stamps orphans under a fenced write, so a recovering process whose own
+  lease is not live adopts nothing rather than everything. No backoff, visibility
+  timeout or re-notification window appears anywhere -- `Q-0003` has not settled
+  tolerable detection latency, S5 kept every such number out of the schema for
+  the same reason, and a test asserts the absence rather than trusting it. The
+  lease itself belongs to S6 (#13), a sibling of this issue rather than a
+  dependency: S7 only validates an epoch inside its own writes, in the
+  single-statement form `spike_schema.sql` specifies.
 
 - **S5 -- the spike SQLite schema slice** (D-0026 / D-0001 / D-0007, R3, Issue
   #12). `src/claude_org_runtime/control_plane/spike_schema.sql` is the six-table

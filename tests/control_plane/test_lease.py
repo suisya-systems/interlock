@@ -34,7 +34,7 @@ from claude_org_runtime.control_plane.lease import (
     DESTINATIONS,
     FENCE_SQL,
     ClockSkewRefused,
-    Destination,
+    DestinationFencing,
     DestinationRejectedStaleToken,
     EpochGuardedDestination,
     FencedStatement,
@@ -1078,11 +1078,11 @@ def test_an_enforcing_destination_absorbs_a_duplicate_under_a_live_token(cp):
 
 def test_a_destination_that_cannot_enforce_must_record_its_residual():
     with pytest.raises(LeaseUsageError) as refused:
-        Destination(name="silent", enforces_stale_token=False, note="cannot", residual=None)
+        DestinationFencing(name="silent", enforces_stale_token=False, note="cannot", residual=None)
     assert "written down rather than assumed away" in str(refused.value)
 
     with pytest.raises(LeaseUsageError):
-        Destination(name="enforcing", enforces_stale_token=True, note="does", residual="but also")
+        DestinationFencing(name="enforcing", enforces_stale_token=True, note="does", residual="but also")
 
 
 def test_every_registered_destination_is_written_down_in_the_doc():
@@ -1155,6 +1155,31 @@ def test_no_dependency_edge_on_the_session_provider():
         for imported in _imported_modules(module):
             assert "session" not in imported.split("."), f"{module.name} imports {imported}"
             assert "provider" not in imported.split("."), f"{module.name} imports {imported}"
+
+
+def test_the_package_does_not_silently_shadow_a_clashing_name():
+    """S6 and S7 share a package, and two names collide in it.
+
+    ``StaleWriterRefused`` exists in both modules and means the same thing, so
+    re-exporting either would make ``except control_plane.StaleWriterRefused``
+    miss the other half of the refusals. ``Destination`` exists in both and means
+    two different things -- S7's is the delivery target, S6's register entry is
+    ``DestinationFencing``. Neither collision may be resolved by whichever import
+    happens to run second.
+    """
+
+    from claude_org_runtime import control_plane
+    from claude_org_runtime.control_plane import outbox
+
+    assert "StaleWriterRefused" not in control_plane.__all__
+    assert not hasattr(control_plane, "StaleWriterRefused")
+    assert control_plane.Destination is not DestinationFencing
+    assert s6.StaleWriterRefused is not outbox.StaleWriterRefused
+
+    # The one name both modules define that is genuinely the same value: it is
+    # ACCEPTANCE.md section 2's clause and the DDL's enumeration, not either
+    # module's policy, so the copies may not drift.
+    assert s6.EXACTLY_ONCE_MECHANISMS == outbox.EXACTLY_ONCE_MECHANISMS
 
 
 def test_no_dataclass_default_is_one_a_supported_python_would_reject(cp):

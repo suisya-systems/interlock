@@ -111,6 +111,10 @@ written-down half; `DESTINATIONS` in `lease.py` is the same table as data, a des
 enforce is refused at construction unless it carries a residual, and the suite asserts the two agree
 name for name. A residual that drifts out of the code is a residual nobody is holding any more.
 
+The entry type is `DestinationFencing`, named for the property rather than the place: S7's
+`control_plane.destination.Destination` is the delivery *target* itself, and the two coexist in one
+package rather than one shadowing the other.
+
 | Destination | Enforces a stale token? | How, or why not | Residual |
 |---|---|---|---|
 | `control_plane_sqlite` | yes | The fence is a clause of the write itself, evaluated by SQLite in the same statement, so a stale epoch changes no row and the refusal is recorded as an `action` row. | — |
