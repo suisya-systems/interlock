@@ -75,6 +75,20 @@ because our side is the thing that was paused. So :meth:`KeyedDropbox.apply`
 takes the writer's lease epoch, records the highest one it has honoured, and
 refuses anything below it: a returning stale writer is turned away by the
 counterparty, which is the only party still running.
+
+**Checking the token and publishing the effect are one critical section.**
+Separately they are a check-then-write, and the race is not hypothetical: a
+token-1 writer passes the check, pauses, a token-2 writer advances the fence and
+publishes, and the first writer resumes and publishes an effect under a token
+the destination has already superseded. That is the same defect the lease in
+``spike_schema.sql`` avoids by validating its epoch *inside* the protected write
+rather than in front of it, and it has to be avoided here for the same reason.
+A real destination would hold both in one server-side transaction; this
+stand-in holds an ``O_EXCL`` lock across the pair (:meth:`KeyedDropbox._locked`).
+Where it cannot take the lock it **refuses** rather than proceeding unserialised
+-- the message stays due, which the outbox already handles, and no timeout-based
+guess about a dead lock holder is made here. Choosing such a timeout is
+``Q-0003``'s business, not this file's.
 """
 
 from __future__ import annotations
@@ -84,6 +98,7 @@ import hashlib
 import json
 import os
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence, runtime_checkable
@@ -92,6 +107,7 @@ __all__ = [
     "ATTEMPT_LOG_NAME",
     "EFFECT_SUFFIX",
     "FENCE_NAME",
+    "LOCK_NAME",
     "DeliveryReceipt",
     "Destination",
     "DestinationRefusal",
@@ -114,6 +130,11 @@ EFFECT_SUFFIX = ".effect.json"
 #: that were turned away has not shown deduplication happening.
 ATTEMPT_LOG_NAME = "attempts.log"
 
+#: The lock serialising the fence check against effect publication. Held for the
+#: duration of two local filesystem operations and no external I/O, so it is
+#: uncontended in practice.
+LOCK_NAME = "fence.lock"
+
 #: Where the highest honoured fencing token is kept. One per destination rather
 #: than one per key: a lease fences a *writer*, not an individual effect, so a
 #: token that has been superseded is stale for everything this writer might send.
@@ -123,6 +144,9 @@ FENCE_NAME = "fence.json"
 #: docstring), so a file without it is a damaged read rather than a lifecycle
 #: state -- and it is still refused, because a partial record is not evidence.
 _COMPLETION_SENTINEL = "\n"
+
+#: How many times :meth:`KeyedDropbox._locked` retries before refusing.
+_LOCK_ATTEMPTS = 2000
 
 
 class DestinationRefusal(Exception):
@@ -251,7 +275,22 @@ class KeyedDropbox:
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         self._log_attempt(idempotency_key, digest, fencing_token)
 
-        # The fence is checked before anything else is done, and before the
+        # Everything from here to the publish is one critical section. Checking
+        # the token and then publishing would be a check-then-write, and the
+        # race it leaves is the whole point of a fence: a superseded writer that
+        # passed the check while paused would publish anyway.
+        with self._locked():
+            return self._apply_locked(idempotency_key, payload, digest, path, fencing_token)
+
+    def _apply_locked(
+        self,
+        idempotency_key: str,
+        payload: str,
+        digest: str,
+        path: Path,
+        fencing_token: int | None,
+    ) -> DeliveryReceipt:
+        # The fence is honoured before anything else, and before the
         # already-applied shortcut: a stale writer must be told it is stale even
         # when the effect it carries happens to be present, or it would read a
         # deduplicated success as evidence that it is still the live holder.
@@ -329,6 +368,39 @@ class KeyedDropbox:
             receipt_ref=path.name,
             fencing_token=fencing_token,
         )
+
+    @contextmanager
+    def _locked(self):
+        """Hold an ``O_EXCL`` lock for the fence-check-and-publish pair.
+
+        Bounded spin, then a refusal. A lock that could be *stolen* after some
+        interval would need that interval chosen, and choosing it is ``Q-0003``
+        (tolerable detection latency) rather than this file's call -- so a lock
+        that cannot be taken is reported as a refusal, the message stays due,
+        and nothing is guessed about whoever holds it.
+        """
+
+        lock = self._root / LOCK_NAME
+        handle = None
+        for _ in range(_LOCK_ATTEMPTS):
+            try:
+                handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                break
+            except FileExistsError:
+                continue
+        if handle is None:
+            raise DestinationRefusal(
+                f"{self.name!r} is busy: could not serialise the fence check "
+                f"against effect publication after {_LOCK_ATTEMPTS} attempts"
+            )
+        try:
+            yield
+        finally:
+            os.close(handle)
+            try:
+                os.unlink(lock)
+            except FileNotFoundError:  # pragma: no cover - nothing else removes it
+                pass
 
     def honoured_token(self) -> int | None:
         """The highest fencing token this destination has accepted, if any."""

@@ -35,6 +35,7 @@ import pytest
 
 import claude_org_runtime
 from claude_org_runtime.control_plane.destination import (
+    LOCK_NAME,
     DestinationRefusal,
     KeyedDropbox,
     StaleTokenRefused,
@@ -1185,6 +1186,175 @@ def test_the_unsupported_mechanism_is_still_part_of_the_vocabulary():
 
     for mechanism in UNSUPPORTED_MECHANISMS:
         assert mechanism in EXACTLY_ONCE_MECHANISMS
+
+
+def test_a_stale_writer_cannot_record_an_effect_intent(cp, dropbox):
+    """The action insert carries the lease predicate too.
+
+    The retry-count update validates the lease and then *commits*, and the
+    intent is written after it, so a writer superseded in that gap would
+    otherwise still record an intent to cause an effect. There is deliberately
+    no checkpoint between those two statements -- the four that exist are the
+    ones ``ACCEPTANCE.md`` section 2 names -- so the guard is exercised
+    directly rather than by inventing a fifth kill point to reach it.
+    """
+
+    outbox = make_outbox(cp, dropbox)
+    message = enqueue(outbox)
+    handler = spike_registry(dropbox).for_recipient(NOTIFY_RECIPIENT)
+
+    cp.execute("UPDATE lease SET holder = 'writer-b', epoch = 2 WHERE resource = ?", (RESOURCE,))
+    cp.commit()
+
+    with pytest.raises(StaleWriterRefused, match="record the effect intent"):
+        outbox._ensure_pending_action(
+            message, handler, "notify:dk-1", T0 + 10, EPOCH
+        )
+
+    assert actions(cp, status="pending") == [], "no intent was recorded"
+    refusals = actions(cp, status="refused")
+    assert len(refusals) == 1 and "effect intent" in refusals[0]["refusal_reason"]
+
+
+def test_the_effect_intent_insert_is_one_statement_and_not_a_check_then_write():
+    """Same property as the protected updates, asserted against the SQL.
+
+    A behavioural test cannot tell a fenced INSERT from a SELECT followed by an
+    INSERT that happens not to have raced yet.
+    """
+
+    import inspect
+
+    from claude_org_runtime.control_plane import outbox as module
+
+    source = inspect.getsource(module.Outbox._ensure_pending_action)
+    assert "INSERT INTO action" in source
+    assert "WHERE EXISTS (SELECT 1" in source and "expires_at_ms > :now_ms" in source
+
+
+def test_a_stale_writer_cannot_park_a_human_gated_action(cp, dropbox):
+    """The human-gate path reaches the action table with no protected update in
+    front of it, which would have made it the one write a stale holder could
+    always land."""
+
+    outbox = make_outbox(cp, dropbox)
+    enqueue(outbox, message_id="msg-gated", dedup_key="dk-gated",
+            recipient=HUMAN_GATED_RECIPIENT)
+    cp.execute("UPDATE lease SET holder = 'writer-b', epoch = 2 WHERE resource = ?", (RESOURCE,))
+    cp.commit()
+
+    with pytest.raises(StaleWriterRefused):
+        outbox.attempt("msg-gated", now_ms=T0 + 10, epoch=EPOCH)
+
+    assert actions(cp, kind="human_gated", status="pending") == []
+
+
+def test_a_writer_superseded_during_the_effect_may_not_record_the_result(cp, dropbox):
+    """The effect landed and we are no longer entitled to say so.
+
+    The action stays pending, so recovery replays it and the destination
+    deduplicates -- which is the ambiguous window the declared mechanism exists
+    to make survivable. What must not happen is a stale writer marking it
+    applied and leaving an applied action beside an unfinished outbox row.
+    """
+
+    class LosesTheLeaseMidFlight(NotifyDestinationHandler):
+        def apply(self, message, idempotency_key, fencing_token=None):
+            receipt = super().apply(message, idempotency_key, fencing_token)
+            cp.execute(
+                "UPDATE lease SET holder = 'writer-b', epoch = 2 WHERE resource = ?",
+                (RESOURCE,),
+            )
+            cp.commit()
+            return receipt
+
+    registry = HandlerRegistry()
+    registry.register(LosesTheLeaseMidFlight(dropbox))
+    outbox = make_outbox(cp, dropbox, registry=registry)
+    message = enqueue(outbox)
+
+    with pytest.raises(StaleWriterRefused, match="while the effect was in flight"):
+        outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
+
+    key = f"notify:{message.dedup_key}"
+    assert dropbox.effect_count(key) == 1, "the effect did land"
+    assert actions(cp, idempotency_key=key)[0]["status"] == "pending", (
+        "but it was not recorded applied by a writer that had been superseded"
+    )
+    assert outbox.load(message.message_id).status == "pending"
+    assert len(actions(cp, status="refused")) == 1
+
+
+def test_the_applied_instant_survives_a_backward_clock_skew(cp, dropbox):
+    """A restarted process retrying with a clock behind the recorded intent.
+
+    S5's ``applied_at_ms >= created_at_ms`` CHECK would abort the transaction and
+    strand a delivery whose effect has already landed until the clock caught up.
+    Same treatment as the delivery and ack instants: the column records
+    lifecycle order, not a wall-clock measurement.
+    """
+
+    kills = _Kills(at=CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT)
+    outbox = make_outbox(cp, dropbox, checkpoint=kills)
+    message = enqueue(outbox)
+    with pytest.raises(_Kills.Killed):
+        outbox.attempt(message.message_id, now_ms=T0 + 5_000, epoch=EPOCH)
+
+    key = f"notify:{message.dedup_key}"
+    assert actions(cp, idempotency_key=key)[0]["created_at_ms"] == T0 + 5_000
+
+    # The retry's clock runs behind the instant the intent was recorded.
+    resumed = make_outbox(cp, dropbox)
+    resumed.attempt(message.message_id, now_ms=T0 + 1_000, epoch=EPOCH)
+
+    (row,) = actions(cp, idempotency_key=key)
+    assert row["status"] == "applied"
+    assert row["applied_at_ms"] == T0 + 5_000
+    assert dropbox.effect_count(key) == 1
+
+
+def test_the_fence_check_and_the_publish_happen_under_one_lock(tmp_path):
+    """Separately they are a check-then-write, and the race is not hypothetical.
+
+    A token-1 writer passes the check, pauses, a token-2 writer advances the
+    fence and publishes, and the first resumes and publishes under a token the
+    destination has already superseded -- the same defect the lease avoids by
+    validating its epoch *inside* the protected write.
+    """
+
+    root = tmp_path / "destination"
+    seen = {}
+
+    class Observing(KeyedDropbox):
+        def _honour_token(self, fencing_token):
+            seen["at_check"] = (root / LOCK_NAME).exists()
+            return super()._honour_token(fencing_token)
+
+        def _fsync_root(self):
+            seen["at_publish"] = (root / LOCK_NAME).exists()
+            return super()._fsync_root()
+
+    Observing(root).apply("k", "payload", 1)
+
+    assert seen["at_check"] is True, "the token is checked inside the lock"
+    assert seen["at_publish"] is True, "and the effect is published still holding it"
+    assert not (root / LOCK_NAME).exists(), "and the lock is released afterwards"
+
+
+def test_an_apply_that_cannot_serialise_refuses_rather_than_racing(tmp_path):
+    """No timeout-based guess about a dead lock holder is made here.
+
+    Choosing that interval is ``Q-0003``'s business. A lock that cannot be taken
+    is a refusal, the message stays due, and the outbox already handles that.
+    """
+
+    root = tmp_path / "destination"
+    dropbox = KeyedDropbox(root)
+    (root / LOCK_NAME).write_text("held by someone else", encoding="utf-8")
+
+    with pytest.raises(DestinationRefusal, match="busy"):
+        dropbox.apply("k", "payload", 1)
+    assert dropbox.effect_count("k") == 0
 
 
 # --------------------------------------------------------------------------

@@ -627,7 +627,13 @@ class Outbox:
             # and parked. It is never advanced by this module -- an automatic
             # recovery path here is exactly the papering-over Issue #14 forbids.
             idempotency_key = handler.idempotency_key(message)
-            action_id = self._ensure_pending_action(message, handler, idempotency_key, now_ms)
+            # Fenced like every other action write. This path reaches the table
+            # without passing through any of the protected updates, so leaving
+            # it unfenced would have made it the one statement a stale holder
+            # could always land.
+            action_id, _, _, _ = self._ensure_pending_action(
+                message, handler, idempotency_key, now_ms, epoch
+            )
             raise HumanGateRequired(
                 f"{type(handler).__name__} declares 'human_gate': neither a "
                 f"destination-supported idempotency key nor a transactional "
@@ -652,8 +658,8 @@ class Outbox:
 
         # (2) the effect's intent, durable and committed before the effect.
         idempotency_key = handler.idempotency_key(message)
-        action_id, already_applied, prior_result = self._ensure_pending_action(
-            message, handler, idempotency_key, now_ms, with_state=True
+        action_id, already_applied, prior_result, created_at_ms = (
+            self._ensure_pending_action(message, handler, idempotency_key, now_ms, epoch)
         )
 
         self._checkpoint(CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT)
@@ -705,14 +711,50 @@ class Outbox:
         if not already_applied:
             receipt_ref = receipt.receipt_ref if receipt is not None else None
             with self._connection:
-                self._connection.execute(
+                cursor = self._connection.execute(
                     """
                     UPDATE action
-                       SET status = 'applied', applied_at_ms = :now_ms, result = :result
+                       SET status = 'applied', applied_at_ms = :applied_at_ms,
+                           result = :result
                      WHERE action_id = :action_id AND status = 'pending'
+                       AND EXISTS (SELECT 1
+                                     FROM lease
+                                    WHERE resource      = :resource
+                                      AND holder        = :holder
+                                      AND epoch         = :epoch
+                                      AND expires_at_ms > :now_ms)
                     """,
-                    {"action_id": action_id, "now_ms": now_ms, "result": receipt_ref},
+                    {
+                        "action_id": action_id,
+                        # A restarted process retrying with a clock behind the
+                        # instant the intent was recorded would violate S5's
+                        # applied_at_ms >= created_at_ms CHECK and abort the
+                        # transaction -- stranding a delivery whose effect has
+                        # already landed until the clock caught up. Same
+                        # treatment as the delivery and ack instants: the column
+                        # records lifecycle order, not a wall-clock measurement.
+                        "applied_at_ms": max(now_ms, created_at_ms),
+                        "result": receipt_ref,
+                        "resource": self._resource,
+                        "holder": self._holder,
+                        "epoch": epoch,
+                        "now_ms": now_ms,
+                    },
                 )
+                recorded = cursor.rowcount == 1
+            if not recorded:
+                # The effect landed and we are no longer entitled to say so. The
+                # action stays pending, so recovery replays it and the
+                # destination deduplicates -- which is exactly the ambiguous
+                # window the declared mechanism exists to make survivable. What
+                # must not happen is a stale writer marking it applied.
+                reason = (
+                    f"refused to record the result for {message_id!r}: epoch "
+                    f"{epoch} stopped being a live lease on {self._resource!r} "
+                    f"held by {self._holder!r} while the effect was in flight"
+                )
+                self._record_refusal(message, handler, reason, now_ms=now_ms, epoch=epoch)
+                raise StaleWriterRefused(reason)
         self._mark_delivered(message_id, now_ms=now_ms, epoch=epoch,
                              message=message, handler=handler)
         self._checkpoint(CHECKPOINT_DELIVERED_BEFORE_ACK)
@@ -848,10 +890,11 @@ class Outbox:
         handler: ActionHandler,
         idempotency_key: str,
         now_ms: int,
-        *,
-        with_state: bool = False,
+        epoch: int,
     ):
         """Make the effect's intent durable, or find the record that already is.
+
+        Returns ``(action_id, already_applied, prior_result, created_at_ms)``.
 
         The insert is allowed to lose to ``action_one_effect_per_key``. Losing
         is the dedup: it means this exact effect already has a record, either
@@ -859,18 +902,31 @@ class Outbox:
         (a previous attempt died, and this one resumes it under the same key).
         Asking first and inserting second would leave the window between the two
         statements, which is the shape of race item 4 exists to rule out.
+
+        It is also **fenced**. The retry-count update validated the lease and
+        then committed, so a writer superseded in the gap between the two would
+        otherwise still record an intent to cause an effect -- and on the
+        human-gate path this statement is reached without any protected update
+        in front of it at all, which would have made it the one write a stale
+        holder could always land.
         """
 
         action_id = f"act-{idempotency_key}"
         try:
             with self._connection:
-                self._connection.execute(
+                cursor = self._connection.execute(
                     """
                     INSERT INTO action (action_id, run_id, kind, idempotency_key,
                                         exactly_once_mechanism, status,
                                         writer_epoch, created_at_ms)
-                    VALUES (:action_id, :run_id, :kind, :idempotency_key,
-                            :mechanism, 'pending', :epoch, :now_ms)
+                    SELECT :action_id, :run_id, :kind, :idempotency_key,
+                           :mechanism, 'pending', :epoch, :now_ms
+                     WHERE EXISTS (SELECT 1
+                                     FROM lease
+                                    WHERE resource      = :resource
+                                      AND holder        = :holder
+                                      AND epoch         = :epoch
+                                      AND expires_at_ms > :now_ms)
                     """,
                     {
                         "action_id": action_id,
@@ -878,14 +934,17 @@ class Outbox:
                         "kind": handler.action_kind,
                         "idempotency_key": idempotency_key,
                         "mechanism": handler.exactly_once_mechanism,
-                        "epoch": message.writer_epoch,
+                        "epoch": epoch,
                         "now_ms": now_ms,
+                        "resource": self._resource,
+                        "holder": self._holder,
                     },
                 )
-            existing_status, existing_result, existing_id = "pending", None, action_id
+            if cursor.rowcount == 1:
+                return action_id, False, None, now_ms
         except sqlite3.IntegrityError:
             row = self._one(
-                "SELECT action_id, status, result FROM action "
+                "SELECT action_id, status, result, created_at_ms FROM action "
                 " WHERE idempotency_key = :key AND status <> 'refused'",
                 {"key": idempotency_key},
             )
@@ -893,13 +952,21 @@ class Outbox:
                 # The unique index did not cause this, so the row is malformed
                 # rather than duplicated and swallowing it would hide it.
                 raise
-            existing_id = str(row["action_id"])
-            existing_status = str(row["status"])
-            existing_result = None if row["result"] is None else str(row["result"])
+            return (
+                str(row["action_id"]),
+                str(row["status"]) == "applied",
+                None if row["result"] is None else str(row["result"]),
+                int(row["created_at_ms"]),
+            )
 
-        if not with_state:
-            return existing_id
-        return existing_id, existing_status == "applied", existing_result
+        # No row, and no unique-index collision: the fence rejected the writer.
+        reason = (
+            f"refused to record the effect intent for {message.message_id!r}: "
+            f"epoch {epoch} is not a live lease on {self._resource!r} held by "
+            f"{self._holder!r} at {now_ms}"
+        )
+        self._record_refusal(message, handler, reason, now_ms=now_ms, epoch=epoch)
+        raise StaleWriterRefused(reason)
 
     def _mark_delivered(
         self,
