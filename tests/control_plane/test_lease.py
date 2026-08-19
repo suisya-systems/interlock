@@ -22,6 +22,7 @@ requires.
 from __future__ import annotations
 
 import ast
+import dataclasses
 import re
 import sqlite3
 from pathlib import Path
@@ -1154,6 +1155,30 @@ def test_no_dependency_edge_on_the_session_provider():
         for imported in _imported_modules(module):
             assert "session" not in imported.split("."), f"{module.name} imports {imported}"
             assert "provider" not in imported.split("."), f"{module.name} imports {imported}"
+
+
+def test_no_dataclass_default_is_one_a_supported_python_would_reject(cp):
+    """The rule Python 3.11 applies, checked on whatever version is running.
+
+    3.11's dataclasses refuse any default whose type is unhashable -- a
+    ``MappingProxyType({})`` among them -- while 3.10 and 3.12 accept it, so a
+    module that imports fine here can fail to import at all on one row of the
+    support matrix. The project supports 3.10 through 3.12; this reproduces the
+    strictest of their rules rather than waiting for CI to find it on one third
+    of the jobs.
+    """
+
+    for name, value in vars(s6).items():
+        if not (isinstance(value, type) and dataclasses.is_dataclass(value)):
+            continue
+        for declared in dataclasses.fields(value):
+            if declared.default is dataclasses.MISSING:
+                continue
+            assert type(declared.default).__hash__ is not None, (
+                f"{name}.{declared.name} defaults to a "
+                f"{type(declared.default).__name__}, which Python 3.11 rejects as a "
+                "mutable default; use field(default_factory=...)"
+            )
 
 
 def test_the_only_exclusion_is_the_lease_and_the_module_says_so():

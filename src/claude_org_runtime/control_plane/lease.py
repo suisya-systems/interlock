@@ -64,7 +64,7 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -565,7 +565,12 @@ class ProtectedWrite:
     idempotency_key: str
     statement: FencedStatement
     exactly_once_mechanism: str
-    params: Mapping[str, Any] = MappingProxyType({})
+    # A default_factory, not MappingProxyType({}): Python 3.11's dataclasses
+    # reject a mappingproxy default as mutable, so the module did not import at
+    # all there while 3.10 and 3.12 accepted it. The mapping is frozen in
+    # __post_init__ instead, which is where it belongs on a frozen dataclass --
+    # a default that is only immutable is not the same as a field that is.
+    params: Mapping[str, Any] = field(default_factory=dict)
     run_id: str | None = None
     incident_id: str | None = None
 
@@ -588,7 +593,8 @@ class ProtectedWrite:
                 "out -- and so does a statement that mentions the fence without "
                 "letting it decide whether the row changes"
             )
-        collisions = sorted(set(dict(self.params)) & set(FENCE_PARAMS))
+        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        collisions = sorted(set(self.params) & set(FENCE_PARAMS))
         if collisions:
             raise LeaseUsageError(
                 f"parameters {collisions} are bound by the fence itself; a caller "
