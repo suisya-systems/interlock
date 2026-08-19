@@ -99,6 +99,7 @@ __all__ = [
     "fenced_update",
     "overlapping_claims",
     "read_lease",
+    "resource_of_kind",
     "release",
     "renew",
     "write_history",
@@ -138,14 +139,25 @@ EXACTLY_ONCE_MECHANISMS = (
 #: recovered from a crash (D-0001). ``action`` has no resource column -- which
 #: component owns which state item is ``Q-0001`` and open -- so the caller names
 #: the effect *kind* it wants the history of, and :func:`effect_kind` is how a
-#: kind carries the resource whose epochs its rows were written under.
+#: kind carries the resource whose epochs its rows were written under -- which is
+#: also what lets this filter by resource across every effect taken under one
+#: lease.
+#:
+#: The order is ``rowid``, the database's own insertion order, and **not**
+#: ``created_at_ms``. The timestamp is the caller's clock (that is the point of
+#: the whole module), so under the skew ``ACCEPTANCE.md`` section 2 injects it can
+#: disagree with the order the rows were actually written in -- and an ordering
+#: claim read out of a skewed clock would manufacture regressions that never
+#: happened and hide ones that did.
 WRITE_HISTORY_QUERY = """
-    SELECT action_id, kind, status, writer_epoch, refusal_reason,
-           created_at_ms, applied_at_ms
+    SELECT rowid AS write_seq, action_id, kind, status, writer_epoch,
+           refusal_reason, created_at_ms, applied_at_ms
       FROM action
      WHERE writer_epoch IS NOT NULL
        AND (:kind IS NULL OR kind = :kind)
-     ORDER BY created_at_ms, action_id
+       AND (:resource IS NULL
+            OR substr(kind, -(length(:resource) + 1)) = '@' || :resource)
+     ORDER BY write_seq
 """
 
 
@@ -595,6 +607,10 @@ _BUILDER = object()
 #: does not mean what it says.
 _STAMP = re.compile(r"\bwriter_epoch\s*=\s*:fence_epoch\b")
 
+#: Every mention of the column, so a second assignment cannot hide behind the
+#: first one matching.
+_WRITER_EPOCH = re.compile(r"\bwriter_epoch\b")
+
 
 def fenced_update(
     table: str, *, set_clause: str, where: str, stamps_writer_epoch: bool = True
@@ -612,6 +628,8 @@ def fenced_update(
     """
 
     _require_identifier("table", table)
+    _require_fragment("set_clause", set_clause)
+    _require_fragment("where", where)
     _require_stamp(table, set_clause, stamps_writer_epoch)
     return FencedStatement(
         f"UPDATE {table}\n"
@@ -644,6 +662,9 @@ def fenced_insert(
         raise LeaseUsageError(
             f"{len(columns)} column(s) but {len(values)} value expression(s)"
         )
+    for index, (column, value) in enumerate(zip(columns, values)):
+        _require_fragment(f"columns[{index}]", column)
+        _require_fragment(f"values[{index}]", value)
     pairs = [f"{column.strip()} = {value.strip()}" for column, value in zip(columns, values)]
     _require_stamp(table, ", ".join(pairs), stamps_writer_epoch)
     return FencedStatement(
@@ -657,14 +678,55 @@ def fenced_insert(
 def _require_stamp(table: str, assignments: str, stamps_writer_epoch: bool) -> None:
     if not stamps_writer_epoch:
         return
-    if not _STAMP.search(assignments):
+    # Exactly one, not at least one: SQLite accepts "SET writer_epoch =
+    # :fence_epoch, writer_epoch = 1" and applies the *last* assignment, so a
+    # statement can satisfy a "contains the stamp" check and still store an
+    # epoch the caller chose.
+    mentions = len(_WRITER_EPOCH.findall(assignments))
+    if mentions != 1 or not _STAMP.search(assignments):
         raise UnfencedStatement(
-            f"a protected write to {table} must assign writer_epoch = :fence_epoch. "
-            "The single-writer property is read back out of the epoch each row was "
+            f"a protected write to {table} must assign writer_epoch = :fence_epoch "
+            f"exactly once; this one names the column {mentions} time(s). The "
+            "single-writer property is read back out of the epoch each row was "
             "written under, so a row that carries no epoch -- or one a caller chose "
             "-- is refused here rather than found unprovable later. Pass "
             "stamps_writer_epoch=False if the target genuinely has no such column"
         )
+
+
+def _require_fragment(field: str, fragment: str) -> None:
+    """Refuse a SQL fragment that could reach outside the shape it is placed in.
+
+    The builders compose the fence into the statement by text, so a fragment
+    that closes a parenthesis it did not open, or opens a comment, can put the
+    fence somewhere it no longer gates the write: ``where="id = :id) OR 1 = 1
+    --"`` renders as ``WHERE (id = :id) OR 1 = 1 --) AND <fence>``, and every row
+    matching ``1 = 1`` changes under a stale token. Nothing about that is
+    hypothetical once the fence is claimed to be structural rather than
+    conventional, so the structural characters are refused outright: a protected
+    write's predicate is a predicate, not an opportunity to restructure the
+    statement.
+    """
+
+    if not isinstance(fragment, str) or not fragment.strip():
+        raise LeaseUsageError(f"{field} must be a non-empty SQL fragment")
+    for token in ("--", "/*", "*/", ";"):
+        if token in fragment:
+            raise UnfencedStatement(
+                f"{field} contains {token!r}. A comment or statement separator in a "
+                "fragment the fence is composed into can move the fence out of the "
+                "write's predicate, so it is refused rather than rendered"
+            )
+    depth = 0
+    for character in fragment:
+        depth += (character == "(") - (character == ")")
+        if depth < 0:
+            raise UnfencedStatement(
+                f"{field} closes a parenthesis it did not open, which would let the "
+                "fragment escape the parentheses the fence is ANDed onto"
+            )
+    if depth:
+        raise UnfencedStatement(f"{field} leaves {depth} parenthesis(es) unclosed")
 
 
 def effect_kind(resource: str, effect: str) -> str:
@@ -691,6 +753,25 @@ def effect_kind(resource: str, effect: str) -> str:
             "unrecoverable from the row"
         )
     return f"{effect}@{resource}"
+
+
+def resource_of_kind(kind: str) -> str:
+    """The resource :func:`effect_kind` composed *kind* for.
+
+    :raises LeaseUsageError: if *kind* was not composed by :func:`effect_kind`.
+        A row whose kind does not name a resource cannot say which lease
+        allocated its epoch, and the spike ``action`` table has no other column
+        that could (``Q-0001``).
+    """
+
+    _require_identifier("kind", kind)
+    effect, separator, resource = kind.partition("@")
+    if not separator or not effect or not resource:
+        raise LeaseUsageError(
+            f"kind {kind!r} was not composed by effect_kind(resource, effect), so "
+            "nothing in the row says which lease its writer_epoch came from"
+        )
+    return resource
 
 
 def protected_write(
@@ -724,6 +805,16 @@ def protected_write(
     """
 
     _require_int("now_ms", now_ms)
+    if resource_of_kind(write.kind) != lease.resource:
+        # Without this, one kind could accumulate epochs allocated by several
+        # different leases, and the history read back under that kind would be
+        # two unrelated sequences with no way left to tell them apart.
+        raise LeaseUsageError(
+            f"kind {write.kind!r} names resource "
+            f"{resource_of_kind(write.kind)!r} but the token is for "
+            f"{lease.resource!r}; a kind is how an action row records which lease "
+            "its epoch was allocated by, so the two may not disagree"
+        )
     fence = {
         "fence_resource": lease.resource,
         "fence_holder": lease.holder,
@@ -962,7 +1053,10 @@ def epoch_regressions(timeline: Sequence[Authority]) -> tuple[tuple[Authority, A
 
 
 def write_history(
-    connection: sqlite3.Connection, *, kind: str | None = None
+    connection: sqlite3.Connection,
+    *,
+    resource: str | None = None,
+    kind: str | None = None,
 ) -> tuple[Mapping[str, Any], ...]:
     """Every fenced write attempt recorded in ``action``, oldest first.
 
@@ -972,13 +1066,29 @@ def write_history(
     with the epoch that was refused. :func:`applied_epoch_regressions` reads the
     single-writer property out of it by query (D-0001: from SQLite alone).
 
-    Pass the *kind* :func:`effect_kind` composed. Epochs belong to a resource
-    and two resources allocate theirs independently, so an unfiltered history is
-    several sequences shuffled together and no ordering claim over it means
-    anything; that is why the regression check refuses a mixed history outright.
+    Filter by *resource*, which is what the single-writer property is about: one
+    lease's epochs, across every effect taken under it. Epochs belong to a
+    resource and two resources allocate theirs independently, so an unfiltered
+    history is several sequences shuffled together and no ordering claim over it
+    means anything -- which is why the regression check refuses a history
+    spanning more than one resource. *kind* narrows further, to a single effect.
+
+    Rows come back in the database's own insertion order (``rowid``, exposed as
+    ``write_seq``), never in the caller's clock order -- see
+    :data:`WRITE_HISTORY_QUERY`.
+
+    **This reads ``action``, and only ``action``.** A protected write to another
+    table -- S7's ``outbox`` is the case in point -- stamps ``writer_epoch`` on
+    *its own* row, and its history is read there by the same shape of query.
+    Nothing here synthesises an action row per protected write, and that is
+    deliberate: ``action`` is the exactly-once *effect* record, guarded by
+    ``action_one_effect_per_key``, and manufacturing a row for a write that is
+    not an effect would corrupt the evidence gate item 4 is read out of. What
+    ``action`` does carry for every table is the **refusals**, because a refused
+    write has no row of its own to be stamped on.
     """
 
-    cursor = connection.execute(WRITE_HISTORY_QUERY, {"kind": kind})
+    cursor = connection.execute(WRITE_HISTORY_QUERY, {"kind": kind, "resource": resource})
     try:
         columns = [column[0] for column in cursor.description]
         return tuple(dict(zip(columns, row)) for row in cursor.fetchall())
@@ -997,21 +1107,25 @@ def applied_epoch_regressions(
     Refused rows are ignored -- they are the record that the writer was kept
     out, so their epochs are expected to be lower than what surrounds them.
 
-    :raises LeaseUsageError: if *history* mixes kinds. Epochs are allocated per
-        resource and two resources' sequences are unrelated, so comparing them
-        would report a valid epoch 2 for one resource followed by a valid epoch
-        1 for another as a violation -- and would hide real interleavings behind
-        the noise. Since the spike ``action`` table has no resource column
-        (``Q-0001``), one kind is as far as a row can identify its lease, so the
-        check refuses rather than answering a question the rows cannot support.
+    The order is the rows' own insertion order, not their timestamps: the clock
+    is the caller's and the suite skews it on purpose.
+
+    :raises LeaseUsageError: if *history* spans more than one leased resource, or
+        contains a kind :func:`effect_kind` did not compose. Epochs are allocated
+        per resource and two resources' sequences are unrelated, so comparing
+        them would report a valid epoch 2 for one resource followed by a valid
+        epoch 1 for another as a violation -- and would hide real interleavings
+        behind the noise. Several *effects* under the same lease do belong in one
+        history, and are kept together.
     """
 
-    kinds = {row["kind"] for row in history}
-    if len(kinds) > 1:
+    resources = {resource_of_kind(row["kind"]) for row in history}
+    if len(resources) > 1:
         raise LeaseUsageError(
-            f"this history mixes kinds {sorted(kinds)}, whose epochs were allocated "
-            "under different leases and are not comparable. Filter with the kind "
-            "effect_kind(resource, effect) composed -- one resource at a time"
+            f"this history spans resources {sorted(resources)}, whose epochs were "
+            "allocated under different leases and are not comparable. Filter with "
+            "write_history(resource=...) -- one leased resource at a time, across "
+            "every effect taken under it"
         )
 
     applied = [row for row in history if row["status"] == "applied"]

@@ -29,7 +29,8 @@ UPDATE outbox
 ```
 
 `protected_write()` accepts only a `FencedStatement`, which `fenced_update()` / `fenced_insert()`
-alone can issue — a substring check over SQL text is not enough, because a statement can carry
+alone can issue (and those builders refuse a fragment carrying a comment, a statement separator, or
+an unbalanced parenthesis, since any of the three can move the fence out of the write's predicate) — a substring check over SQL text is not enough, because a statement can carry
 `FENCE_SQL` verbatim inside a `SET` expression while its `WHERE` gates nothing, change its row under
 a stale token, and report a positive `rowcount`. The builders put the fence in the write's own
 predicate and nowhere else, and they also require `writer_epoch = :fence_epoch` among the
@@ -118,6 +119,17 @@ name for name. A residual that drifts out of the code is a residual nobody is ho
   therefore reconstructs the timeline from the row states the caller observed, while the durable,
   query-answerable evidence is `write_history()` over `action`. Which table records lease history is
   `Q-0001` and open; adding one here would answer it by inertia.
+- **`write_history()` reads `action`, and only `action`.** A protected write to another table — S7's
+  `outbox` is the case in point — stamps `writer_epoch` on its own row, and its history is read there
+  by the same shape of query. Nothing synthesises an action row per protected write, deliberately:
+  `action` is the exactly-once *effect* record guarded by `action_one_effect_per_key`, and
+  manufacturing a row for a write that is not an effect would corrupt the evidence gate item 4 is
+  read out of. Refusals are the exception and are always recorded in `action`, whatever table was
+  being written, because a refused write has no row of its own to carry the stamp.
+- **The history is ordered by `rowid`**, the database's own insertion order, never by
+  `created_at_ms`. The timestamp is the caller's clock — that is the point of the whole module — so
+  under injected skew it can disagree with the order the writes actually happened in, and an ordering
+  claim read out of a skewed clock would manufacture regressions and hide real ones.
 - **`action` has no resource column**, for the same reason, so nothing in a row says which lease
   allocated its `writer_epoch`. Two resources' epochs are independent, so comparing them would report
   a valid epoch 2 for one and a valid epoch 1 for another as a violation while hiding a real

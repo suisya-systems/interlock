@@ -50,6 +50,7 @@ from claude_org_runtime.control_plane.lease import (
     authority_timeline,
     claimed_timeline,
     effect_kind,
+    resource_of_kind,
     epoch_regressions,
     fenced_insert,
     fenced_update,
@@ -288,7 +289,12 @@ def test_a_refusal_is_recorded_even_when_the_lease_row_is_gone_entirely(cp):
     )
 
     with pytest.raises(StaleWriterRefused) as refused:
-        protected_write(cp, invented, effect("a1", now_ms=T0 + 1), now_ms=T0 + 1)
+        protected_write(
+            cp,
+            invented,
+            effect("a1", now_ms=T0 + 1, kind=effect_kind("run/never-taken", "deliver_task")),
+            now_ms=T0 + 1,
+        )
 
     assert refused.value.observed is None
     (row,) = action_rows(cp)
@@ -575,7 +581,7 @@ def test_the_write_history_shows_no_interleaving_from_the_rejected_writer(cp):
         protected_write(cp, alpha, effect("a2", now_ms=T0 + TTL + 3), now_ms=T0 + TTL + 3)
     protected_write(cp, beta, effect("b2", now_ms=T0 + TTL + 4), now_ms=T0 + TTL + 4)
 
-    history = write_history(cp, kind=EFFECT_KIND)
+    history = write_history(cp, resource=RESOURCE)
 
     assert [row["status"] for row in history] == ["applied", "applied", "refused", "applied"]
     # The applied rows are a linear sequence in epoch order with nothing from
@@ -614,11 +620,111 @@ def test_two_resources_epochs_are_not_compared_with_each_other(cp):
     assert first.epoch < promoted.epoch and other.epoch == 1  # epoch 3 then epoch 1
     with pytest.raises(LeaseUsageError) as refused:
         applied_epoch_regressions(write_history(cp))
-    assert "effect_kind" in str(refused.value)
+    assert "one leased resource at a time" in str(refused.value)
 
     # Scoped to one resource, each history is a clean sequence of its own.
-    assert not applied_epoch_regressions(write_history(cp, kind=EFFECT_KIND))
-    assert not applied_epoch_regressions(write_history(cp, kind=other_kind))
+    assert not applied_epoch_regressions(write_history(cp, resource=RESOURCE))
+    assert not applied_epoch_regressions(write_history(cp, resource="run/r2"))
+    assert resource_of_kind(other_kind) == "run/r2"
+
+
+def test_every_effect_under_one_lease_stays_in_one_history(cp):
+    """Two effect kinds, one lease: they share an epoch sequence and a history.
+
+    Filtering by exact kind would split them, and a writer whose stale epoch
+    landed under a *different* effect than the one before it would fall through
+    the gap between the two halves.
+    """
+
+    lease = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
+    other_effect = effect_kind(RESOURCE, "update_status")
+    protected_write(cp, lease, effect("a1", now_ms=T0 + 1), now_ms=T0 + 1)
+    protected_write(cp, lease, effect("a2", now_ms=T0 + 2, kind=other_effect), now_ms=T0 + 2)
+
+    history = write_history(cp, resource=RESOURCE)
+
+    assert [row["kind"] for row in history] == [EFFECT_KIND, other_effect]
+    assert not applied_epoch_regressions(history)
+    # Narrowing to one effect is still available; it is just not the scope the
+    # single-writer property is about.
+    assert len(write_history(cp, resource=RESOURCE, kind=EFFECT_KIND)) == 1
+
+
+def test_the_history_is_ordered_by_the_database_not_by_the_callers_clock(cp):
+    """Under skew a later write can carry an earlier timestamp.
+
+    Ordering the evidence by `created_at_ms` would then invent a regression that
+    never happened, so the query orders by the rows' own insertion order and
+    exposes it as ``write_seq``.
+    """
+
+    alpha = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
+    protected_write(cp, alpha, effect("a1", now_ms=T0 + 10_000), now_ms=T0 + 1)
+    beta = acquire(cp, resource=RESOURCE, holder="beta", now_ms=T0 + TTL + 1, ttl_ms=TTL)
+    # beta's clock lags alpha's: its write is later, and stamped earlier.
+    protected_write(cp, beta, effect("b1", now_ms=T0 + 1), now_ms=T0 + TTL + 2)
+
+    history = write_history(cp, resource=RESOURCE)
+
+    assert [row["action_id"] for row in history] == ["a1", "b1"]
+    assert [row["write_seq"] for row in history] == sorted(row["write_seq"] for row in history)
+    assert history[1]["created_at_ms"] < history[0]["created_at_ms"]
+    assert not applied_epoch_regressions(history)
+
+
+def test_a_protected_write_to_another_table_is_stamped_on_its_own_row(cp):
+    """The scope of `write_history()`, pinned rather than left implied.
+
+    It reads `action`, which is the exactly-once effect record. A fenced write to
+    `outbox` carries its epoch on the outbox row, where the same shape of query
+    reads it; nothing synthesises an action row for it, because manufacturing an
+    effect record for a write that is not an effect would corrupt the evidence
+    gate item 4 is read out of.
+    """
+
+    lease = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
+    enqueue = ProtectedWrite(
+        kind=EFFECT_KIND,
+        idempotency_key="m1",
+        statement=fenced_insert(
+            "outbox",
+            columns=[
+                "message_id",
+                "run_id",
+                "recipient",
+                "payload",
+                "dedup_key",
+                "status",
+                "writer_epoch",
+                "enqueued_at_ms",
+            ],
+            values=[
+                "'m1'",
+                "'r1'",
+                "'secretary'",
+                "'{}'",
+                "'d1'",
+                "'pending'",
+                ":fence_epoch",
+                ":now_ms",
+            ],
+        ),
+        exactly_once_mechanism="transactional_with_record",
+        params={"now_ms": T0 + 1},
+    )
+
+    assert protected_write(cp, lease, enqueue, now_ms=T0 + 1) == 1
+
+    assert cp.execute("SELECT writer_epoch FROM outbox WHERE message_id = 'm1'").fetchone() == (
+        lease.epoch,
+    )
+    assert write_history(cp, resource=RESOURCE) == ()
+    # Refusals are the exception: a refused write has no row of its own to be
+    # stamped on, so it is recorded in `action` whatever table it was aimed at.
+    acquire(cp, resource=RESOURCE, holder="beta", now_ms=T0 + TTL + 1, ttl_ms=TTL)
+    with pytest.raises(StaleWriterRefused):
+        protected_write(cp, lease, enqueue, now_ms=T0 + TTL + 2)
+    assert [row["status"] for row in write_history(cp, resource=RESOURCE)] == ["refused"]
 
 
 def test_write_history_is_answerable_by_query_after_the_process_is_gone(cp, db_path):
@@ -628,7 +734,7 @@ def test_write_history_is_answerable_by_query_after_the_process_is_gone(cp, db_p
 
     reopened = open_control_plane(db_path)
     try:
-        history = write_history(reopened, kind=EFFECT_KIND)
+        history = write_history(reopened, resource=RESOURCE)
         assert [row["writer_epoch"] for row in history] == [1]
         # The lease row itself is durable too, epoch included -- the recovering
         # process is not told which epoch was live, it reads it.
@@ -1003,15 +1109,48 @@ def test_the_fence_matches_the_whole_token_not_just_the_resource(cp):
 
     lease = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
 
-    for wrong in (
-        Lease("run/other", lease.holder, lease.epoch, lease.acquired_at_ms, lease.expires_at_ms),
-        Lease(lease.resource, "beta", lease.epoch, lease.acquired_at_ms, lease.expires_at_ms),
-        Lease(lease.resource, lease.holder, 2, lease.acquired_at_ms, lease.expires_at_ms),
+    for index, wrong in enumerate(
+        (
+            Lease("run/other", lease.holder, lease.epoch, lease.acquired_at_ms, lease.expires_at_ms),
+            Lease(lease.resource, "beta", lease.epoch, lease.acquired_at_ms, lease.expires_at_ms),
+            Lease(lease.resource, lease.holder, 2, lease.acquired_at_ms, lease.expires_at_ms),
+        )
     ):
         with pytest.raises(StaleWriterRefused):
-            protected_write(cp, wrong, effect(f"a-{wrong.holder}-{wrong.epoch}-{wrong.resource}", now_ms=T0 + 1), now_ms=T0 + 1)
+            protected_write(
+                cp,
+                wrong,
+                effect(
+                    f"a-{index}",
+                    now_ms=T0 + 1,
+                    kind=effect_kind(wrong.resource, "deliver_task"),
+                ),
+                now_ms=T0 + 1,
+            )
 
     assert protected_write(cp, lease, effect("good", now_ms=T0 + 2), now_ms=T0 + 2) == 1
+
+
+def test_a_kind_may_not_name_a_resource_the_token_is_not_for(cp):
+    """A kind is how a row records which lease allocated its epoch.
+
+    If the two could disagree, one kind would accumulate epochs from several
+    leases and the history read back under it would be two unrelated sequences
+    with nothing left to tell them apart.
+    """
+
+    lease = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
+
+    with pytest.raises(LeaseUsageError):
+        protected_write(
+            cp,
+            lease,
+            effect("a1", now_ms=T0 + 1, kind=effect_kind("run/elsewhere", "deliver_task")),
+            now_ms=T0 + 1,
+        )
+    with pytest.raises(LeaseUsageError):
+        protected_write(cp, lease, effect("a2", now_ms=T0 + 1, kind="uncomposed"), now_ms=T0 + 1)
+    assert not action_rows(cp)
 
 
 def test_acquire_refuses_a_lease_that_expires_when_it_starts(cp):

@@ -63,6 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two resources' epochs are independent and comparing them means nothing.
   Releasing a lease only ever shortens it: a late release may not push an
   expired lease's expiry forward and revive the releasing holder's own token.
+  The history is ordered by the database's own insertion order rather than by
+  the caller's (skewable) clock, and it reads `action` only -- a protected write
+  to another table stamps `writer_epoch` on its own row, and `docs/lease-fencing.md`
+  §5 says so rather than leaving the scope implied.
 
   **Where a destination can enforce a stale token it does, and where it cannot
   that is written down.** `DESTINATIONS` refuses to register a destination that
