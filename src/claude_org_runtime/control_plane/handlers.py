@@ -137,6 +137,7 @@ class NotifyDestinationHandler(ActionHandler):
         message: OutboxMessage,
         idempotency_key: str,
         fencing_token: int | None = None,
+        fence_scope: str | None = None,
     ) -> DeliveryReceipt:
         # The token is handed to the destination rather than checked here.
         # Checking it on this side would prove nothing: the window it closes is
@@ -145,7 +146,7 @@ class NotifyDestinationHandler(ActionHandler):
         # still running (ACCEPTANCE.md section 2: *external destinations must
         # reject a stale token where they can enforce it*).
         receipt = self._destination.apply(
-            idempotency_key, message.payload, fencing_token
+            idempotency_key, message.payload, fencing_token, fence_scope
         )
         if receipt.payload_conflict:
             # The key is already bound to a different payload. The destination
@@ -190,6 +191,7 @@ class HumanGatedHandler(ActionHandler):
         message: OutboxMessage,
         idempotency_key: str,
         fencing_token: int | None = None,
+        fence_scope: str | None = None,
     ) -> DeliveryReceipt:
         raise AssertionError(
             "a human-gated action is never applied automatically (D-0004); "

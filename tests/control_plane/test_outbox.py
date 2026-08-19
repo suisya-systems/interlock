@@ -160,6 +160,17 @@ def enqueue(outbox, *, message_id="msg-1", dedup_key="dk-1", payload='{"body":"h
     )
 
 
+def key_for(dedup_key: str, recipient: str = NOTIFY_RECIPIENT, kind: str = "notify") -> str:
+    """The effect key a handler derives from a dedup key.
+
+    Spelled out here rather than inlined at thirty call sites so that the
+    namespacing rule -- recipient, then action kind, then the dedup key -- has
+    one place to be read and one place to change.
+    """
+
+    return f"{recipient}:{kind}:{dedup_key}"
+
+
 def actions(cp, **where):
     clause = " AND ".join(f"{k} = :{k}" for k in where) or "1"
     cursor = cp.execute(f"SELECT * FROM action WHERE {clause} ORDER BY action_id", where)
@@ -313,7 +324,7 @@ def test_a_lost_ack_causes_a_resend_and_the_effect_count_stays_one(cp, dropbox):
 
     outbox = make_outbox(cp, dropbox)
     message = enqueue(outbox)
-    key = f"notify:{message.dedup_key}"
+    key = key_for(message.dedup_key)
 
     outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
     assert [m.message_id for m in outbox.due(T0 + 20)] == ["msg-1"], (
@@ -465,7 +476,7 @@ def test_the_retry_count_counts_attempts_not_successes(cp, dropbox):
         action_kind = "notify"
         exactly_once_mechanism = "destination_idempotency_key"
 
-        def apply(self, message, idempotency_key, fencing_token=None):
+        def apply(self, message, idempotency_key, fencing_token=None, fence_scope=None):
             raise DestinationRefusal("the recipient is unavailable")
 
     registry = HandlerRegistry()
@@ -673,7 +684,7 @@ def test_a_reconstructed_process_sees_every_unfinished_row(cp, dropbox):
 def test_duplicate_delivery_causes_exactly_one_effect(cp, dropbox):
     outbox = make_outbox(cp, dropbox)
     message = enqueue(outbox)
-    key = f"notify:{message.dedup_key}"
+    key = key_for(message.dedup_key)
 
     first = outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
     second = outbox.attempt(message.message_id, now_ms=T0 + 20, epoch=EPOCH)
@@ -693,7 +704,7 @@ def test_one_effect_record_per_dedup_key(cp, dropbox):
     for at in (T0 + 10, T0 + 20, T0 + 30):
         outbox.attempt(message.message_id, now_ms=at, epoch=EPOCH)
 
-    applied = actions(cp, idempotency_key=f"notify:{message.dedup_key}", status="applied")
+    applied = actions(cp, idempotency_key=key_for(message.dedup_key), status="applied")
     assert len(applied) == 1
     assert applied[0]["applied_at_ms"] == T0 + 10, "the first apply is the one on record"
 
@@ -715,8 +726,8 @@ def test_a_re_enqueue_of_the_same_dedup_key_still_causes_one_effect(cp, dropbox)
     second = outbox.attempt("msg-1-again", now_ms=T0 + 20, epoch=EPOCH)
 
     assert second.deduplicated is True
-    assert dropbox.effect_count("notify:shared") == 1
-    assert len(actions(cp, idempotency_key="notify:shared", status="applied")) == 1
+    assert dropbox.effect_count(key_for("shared")) == 1
+    assert len(actions(cp, idempotency_key=key_for("shared"), status="applied")) == 1
     assert outbox.load("msg-1").status == "delivered"
     assert outbox.load("msg-1-again").status == "delivered", (
         "the second row is delivered too -- its effect is present, which is what "
@@ -736,7 +747,7 @@ def test_a_kill_after_the_effect_and_before_its_record_replays_to_one_effect(cp,
     kills = _Kills(at=CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD)
     outbox = make_outbox(cp, dropbox, checkpoint=kills)
     message = enqueue(outbox)
-    key = f"notify:{message.dedup_key}"
+    key = key_for(message.dedup_key)
 
     with pytest.raises(_Kills.Killed):
         outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
@@ -761,7 +772,7 @@ def test_a_kill_after_the_record_and_before_the_effect_loses_nothing(cp, dropbox
     kills = _Kills(at=CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT)
     outbox = make_outbox(cp, dropbox, checkpoint=kills)
     message = enqueue(outbox)
-    key = f"notify:{message.dedup_key}"
+    key = key_for(message.dedup_key)
 
     with pytest.raises(_Kills.Killed):
         outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
@@ -795,7 +806,7 @@ def test_a_kill_after_delivery_and_before_the_ack_resends_to_one_effect(cp, drop
     kills = _Kills(at=CHECKPOINT_DELIVERED_BEFORE_ACK)
     outbox = make_outbox(cp, dropbox, checkpoint=kills)
     message = enqueue(outbox)
-    key = f"notify:{message.dedup_key}"
+    key = key_for(message.dedup_key)
 
     with pytest.raises(_Kills.Killed):
         outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
@@ -836,7 +847,7 @@ def test_the_exactly_once_evidence_outlives_our_database(cp, db_path, dropbox):
 
     outbox = make_outbox(cp, dropbox)
     message = enqueue(outbox)
-    key = f"notify:{message.dedup_key}"
+    key = key_for(message.dedup_key)
     for at in (T0 + 10, T0 + 20, T0 + 30, T0 + 40):
         outbox.attempt(message.message_id, now_ms=at, epoch=EPOCH)
     cp.close()
@@ -866,8 +877,8 @@ def test_the_destination_refuses_a_key_that_is_already_bound_to_another_payload(
     with pytest.raises(DestinationRefusal, match="different payload"):
         outbox.attempt("msg-2", now_ms=T0 + 20, epoch=EPOCH)
 
-    assert dropbox.effect_count("notify:shared") == 1
-    assert json.loads(dropbox.payload_of("notify:shared") or "{}") == {"body": "one"}
+    assert dropbox.effect_count(key_for("shared")) == 1
+    assert json.loads(dropbox.payload_of(key_for("shared")) or "{}") == {"body": "one"}
     assert outbox.load("msg-2").status == "pending", "and msg-2 was not recorded delivered"
 
 
@@ -1132,7 +1143,7 @@ def test_the_fencing_token_reaches_the_destination_from_the_outbox(cp, dropbox):
     outbox = make_outbox(cp, dropbox)
     message = enqueue(outbox)
     outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
-    assert dropbox.honoured_token() == EPOCH
+    assert dropbox.honoured_token(RESOURCE) == EPOCH
 
 
 def test_every_refusal_is_recorded_even_within_one_millisecond(cp, dropbox):
@@ -1208,7 +1219,7 @@ def test_a_stale_writer_cannot_record_an_effect_intent(cp, dropbox):
 
     with pytest.raises(StaleWriterRefused, match="record the effect intent"):
         outbox._ensure_pending_action(
-            message, handler, "notify:dk-1", T0 + 10, EPOCH
+            message, handler, key_for("dk-1"), T0 + 10, EPOCH
         )
 
     assert actions(cp, status="pending") == [], "no intent was recorded"
@@ -1259,8 +1270,8 @@ def test_a_writer_superseded_during_the_effect_may_not_record_the_result(cp, dro
     """
 
     class LosesTheLeaseMidFlight(NotifyDestinationHandler):
-        def apply(self, message, idempotency_key, fencing_token=None):
-            receipt = super().apply(message, idempotency_key, fencing_token)
+        def apply(self, message, idempotency_key, fencing_token=None, fence_scope=None):
+            receipt = super().apply(message, idempotency_key, fencing_token, fence_scope)
             cp.execute(
                 "UPDATE lease SET holder = 'writer-b', epoch = 2 WHERE resource = ?",
                 (RESOURCE,),
@@ -1276,7 +1287,7 @@ def test_a_writer_superseded_during_the_effect_may_not_record_the_result(cp, dro
     with pytest.raises(StaleWriterRefused, match="while the effect was in flight"):
         outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
 
-    key = f"notify:{message.dedup_key}"
+    key = key_for(message.dedup_key)
     assert dropbox.effect_count(key) == 1, "the effect did land"
     assert actions(cp, idempotency_key=key)[0]["status"] == "pending", (
         "but it was not recorded applied by a writer that had been superseded"
@@ -1300,7 +1311,7 @@ def test_the_applied_instant_survives_a_backward_clock_skew(cp, dropbox):
     with pytest.raises(_Kills.Killed):
         outbox.attempt(message.message_id, now_ms=T0 + 5_000, epoch=EPOCH)
 
-    key = f"notify:{message.dedup_key}"
+    key = key_for(message.dedup_key)
     assert actions(cp, idempotency_key=key)[0]["created_at_ms"] == T0 + 5_000
 
     # The retry's clock runs behind the instant the intent was recorded.
@@ -1326,9 +1337,9 @@ def test_the_fence_check_and_the_publish_happen_under_one_lock(tmp_path):
     seen = {}
 
     class Observing(KeyedDropbox):
-        def _honour_token(self, fencing_token):
+        def _honour_token(self, fencing_token, fence_scope=None):
             seen["at_check"] = (root / LOCK_NAME).exists()
-            return super()._honour_token(fencing_token)
+            return super()._honour_token(fencing_token, fence_scope)
 
         def _fsync_root(self):
             seen["at_publish"] = (root / LOCK_NAME).exists()
@@ -1357,6 +1368,96 @@ def test_an_apply_that_cannot_serialise_refuses_rather_than_racing(tmp_path):
     assert dropbox.effect_count("k") == 0
 
 
+def test_tokens_from_different_leases_are_different_sequences(tmp_path):
+    """One destination, two lease resources, two independent epoch counters.
+
+    Epochs are per-lease. A destination keeping one global maximum silently
+    conflates them, and the damage is not a missed refusal but a wrongful one:
+    after a writer on resource A applies at epoch 10, a perfectly live writer on
+    resource B at epoch 1 would be rejected as stale forever.
+    """
+
+    dropbox = KeyedDropbox(tmp_path / "destination")
+    dropbox.apply("a-effect", "payload", 10, "resource-a")
+
+    receipt = dropbox.apply("b-effect", "payload", 1, "resource-b")
+    assert receipt.deduplicated is False, "a live writer on another lease is not stale"
+    assert dropbox.effect_count("b-effect") == 1
+    assert dropbox.honoured_token("resource-a") == 10
+    assert dropbox.honoured_token("resource-b") == 1
+
+
+def test_a_superseded_writer_is_still_refused_within_its_own_scope(tmp_path):
+    """Scoping the fence must not weaken it -- only stop it over-reaching."""
+
+    dropbox = KeyedDropbox(tmp_path / "destination")
+    dropbox.apply("newer", "payload", 7, "resource-a")
+    with pytest.raises(StaleTokenRefused, match="resource-a"):
+        dropbox.apply("older", "payload", 3, "resource-a")
+    assert dropbox.effect_count("older") == 0
+
+
+def test_an_unscoped_token_is_its_own_scope_and_not_a_wildcard(tmp_path):
+    dropbox = KeyedDropbox(tmp_path / "destination")
+    dropbox.apply("scoped", "payload", 9, "resource-a")
+    receipt = dropbox.apply("unscoped", "payload", 1)
+    assert receipt.deduplicated is False
+    assert dropbox.honoured_token() == 1
+    assert dropbox.honoured_token("resource-a") == 9
+
+
+def test_the_effect_key_is_namespaced_by_recipient_not_only_by_action_kind(cp, dropbox):
+    """Two handlers may share an ``action_kind`` while serving different
+    recipients, and nothing in the registry stops them.
+
+    If they did, the second would find the first's action row already applied,
+    skip recording its own receipt, and report an effect at *its* destination
+    that no record of ours points at. The recipient is what the registry makes
+    unique, so the recipient is what the key is namespaced by.
+    """
+
+    class Twin(NotifyDestinationHandler):
+        recipient = "a-different-recipient"
+        action_kind = "notify"  # deliberately the same kind
+
+    first = NotifyDestinationHandler(dropbox)
+    twin = Twin(dropbox)
+    message = enqueue(make_outbox(cp, dropbox), dedup_key="shared")
+
+    assert first.idempotency_key(message) != twin.idempotency_key(message), (
+        "same action kind, same dedup key, different destinations -- and so a "
+        "different effect"
+    )
+    assert first.idempotency_key(message).startswith(NOTIFY_RECIPIENT)
+
+
+def test_two_handlers_sharing_an_action_kind_each_get_their_own_effect(cp, dropbox, tmp_path):
+    """The behavioural half: two destinations, two effects, two records."""
+
+    other = KeyedDropbox(tmp_path / "other-destination", name="other")
+
+    class Twin(NotifyDestinationHandler):
+        recipient = "a-different-recipient"
+        action_kind = "notify"
+
+    registry = HandlerRegistry()
+    registry.register(NotifyDestinationHandler(dropbox))
+    registry.register(Twin(other))
+    outbox = make_outbox(cp, dropbox, registry=registry)
+
+    enqueue(outbox, message_id="msg-1", dedup_key="shared")
+    enqueue(outbox, message_id="msg-2", dedup_key="shared",
+            recipient="a-different-recipient")
+    outbox.attempt("msg-1", now_ms=T0 + 10, epoch=EPOCH)
+    second = outbox.attempt("msg-2", now_ms=T0 + 20, epoch=EPOCH)
+
+    assert second.deduplicated is False, "a different destination is a different effect"
+    assert dropbox.effect_count(key_for("shared")) == 1
+    assert other.effect_count(key_for("shared", "a-different-recipient")) == 1
+    assert len(actions(cp, status="applied")) == 2, "and each has its own record"
+    assert second.receipt_ref is not None, "the second receipt was recorded, not skipped"
+
+
 # --------------------------------------------------------------------------
 # the third branch -- neither mechanism is achievable, so a human gate (D-0004)
 # --------------------------------------------------------------------------
@@ -1377,7 +1478,7 @@ def test_a_human_gated_action_is_recorded_and_never_applied(cp, dropbox):
     with pytest.raises(HumanGateRequired, match="human_gate"):
         outbox.attempt("msg-gated", now_ms=T0 + 10, epoch=EPOCH)
 
-    (row,) = actions(cp, idempotency_key="human_gated:dk-gated")
+    (row,) = actions(cp, idempotency_key=key_for("dk-gated", HUMAN_GATED_RECIPIENT, "human_gated"))
     assert row["status"] == "pending", "recorded, and waiting for a human"
     assert row["exactly_once_mechanism"] == "human_gate"
     assert dropbox.effects() == (), "and no effect was attempted"

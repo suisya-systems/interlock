@@ -135,9 +135,16 @@ ATTEMPT_LOG_NAME = "attempts.log"
 #: uncontended in practice.
 LOCK_NAME = "fence.lock"
 
-#: Where the highest honoured fencing token is kept. One per destination rather
-#: than one per key: a lease fences a *writer*, not an individual effect, so a
-#: token that has been superseded is stale for everything this writer might send.
+#: Where the highest honoured fencing token is kept, **per fence scope**.
+#:
+#: One entry per scope rather than one per key: a lease fences a *writer*, not an
+#: individual effect, so a token that has been superseded is stale for everything
+#: that writer might send. But epochs from different leases are different
+#: sequences, and a single destination-wide maximum silently conflates them --
+#: after a writer on one resource applies at epoch 10, a perfectly live writer on
+#: another resource at epoch 1 would be refused forever. The scope is the lease
+#: resource the token was drawn from, so each sequence is compared only against
+#: itself.
 FENCE_NAME = "fence.json"
 
 #: A record ends with this byte. Records are published complete (see the module
@@ -147,6 +154,12 @@ _COMPLETION_SENTINEL = "\n"
 
 #: How many times :meth:`KeyedDropbox._locked` retries before refusing.
 _LOCK_ATTEMPTS = 2000
+
+
+def _scope_key(fence_scope: str | None) -> str:
+    """The stored name of a fence scope. ``None`` is its own scope, not a wildcard."""
+
+    return "" if fence_scope is None else fence_scope
 
 
 class DestinationRefusal(Exception):
@@ -219,6 +232,7 @@ class Destination(Protocol):
         idempotency_key: str,
         payload: str,
         fencing_token: int | None = None,
+        fence_scope: str | None = None,
     ) -> DeliveryReceipt:
         """Apply the effect, or recognise that it is already applied.
 
@@ -230,6 +244,11 @@ class Destination(Protocol):
         (:class:`StaleTokenRefused`); one that cannot must ignore it rather than
         pretend, since a token accepted without being checked is worse than no
         token at all.
+
+        *fence_scope* names the sequence the token was drawn from -- in practice
+        the lease resource. Tokens from different leases are different sequences
+        and comparing them against one another rejects live writers, so a
+        destination that enforces tokens must keep one maximum per scope.
         """
 
     def effect_count(self, idempotency_key: str) -> int:
@@ -264,6 +283,7 @@ class KeyedDropbox:
         idempotency_key: str,
         payload: str,
         fencing_token: int | None = None,
+        fence_scope: str | None = None,
     ) -> DeliveryReceipt:
         if not idempotency_key:
             # An empty key is not a key: every effect would deduplicate against
@@ -280,7 +300,9 @@ class KeyedDropbox:
         # race it leaves is the whole point of a fence: a superseded writer that
         # passed the check while paused would publish anyway.
         with self._locked():
-            return self._apply_locked(idempotency_key, payload, digest, path, fencing_token)
+            return self._apply_locked(
+                idempotency_key, payload, digest, path, fencing_token, fence_scope
+            )
 
     def _apply_locked(
         self,
@@ -289,12 +311,13 @@ class KeyedDropbox:
         digest: str,
         path: Path,
         fencing_token: int | None,
+        fence_scope: str | None,
     ) -> DeliveryReceipt:
         # The fence is honoured before anything else, and before the
         # already-applied shortcut: a stale writer must be told it is stale even
         # when the effect it carries happens to be present, or it would read a
         # deduplicated success as evidence that it is still the live holder.
-        self._honour_token(fencing_token)
+        self._honour_token(fencing_token, fence_scope)
 
         existing = self._read_record(path)
         if existing is not None:
@@ -402,13 +425,19 @@ class KeyedDropbox:
             except FileNotFoundError:  # pragma: no cover - nothing else removes it
                 pass
 
-    def honoured_token(self) -> int | None:
-        """The highest fencing token this destination has accepted, if any."""
+    def honoured_token(self, fence_scope: str | None = None) -> int | None:
+        """The highest fencing token accepted for *fence_scope*, if any."""
 
+        return self._fence().get(_scope_key(fence_scope))
+
+    def _fence(self) -> dict:
         fence = self._root / FENCE_NAME
         if not fence.exists():
-            return None
-        return int(json.loads(fence.read_text(encoding="utf-8"))["fencing_token"])
+            return {}
+        return {
+            str(scope): int(token)
+            for scope, token in json.loads(fence.read_text(encoding="utf-8")).items()
+        }
 
     def effect_count(self, idempotency_key: str) -> int:
         return 1 if self._read_record(self._effect_path(idempotency_key)) is not None else 0
@@ -496,35 +525,36 @@ class KeyedDropbox:
         finally:
             os.close(handle)
 
-    def _honour_token(self, fencing_token: int | None) -> None:
-        """Refuse a token below the highest one already honoured.
+    def _honour_token(self, fencing_token: int | None, fence_scope: str | None) -> None:
+        """Refuse a token below the highest one already honoured *for its scope*.
 
         An apply carrying no token is not fenced and is let through unchanged:
         pretending to check one that was never offered would be the "token
         accepted without being checked" the protocol warns about. Once a token
-        *is* offered, it is recorded, and every later apply is measured against
-        it -- so the transition from unfenced to fenced is one-way.
+        *is* offered, it is recorded, and every later apply in the same scope is
+        measured against it -- so the transition from unfenced to fenced is
+        one-way, per scope.
         """
 
         if fencing_token is None:
             return
-        highest = self.honoured_token()
+        scope = _scope_key(fence_scope)
+        fence = self._fence()
+        highest = fence.get(scope)
         if highest is not None and fencing_token < highest:
             raise StaleTokenRefused(
-                f"{self.name!r} has honoured fencing token {highest} and "
-                f"refuses {fencing_token}: the writer offering it was "
-                "superseded while it was away"
+                f"{self.name!r} has honoured fencing token {highest} for scope "
+                f"{scope!r} and refuses {fencing_token}: the writer offering it "
+                "was superseded while it was away"
             )
         if highest is None or fencing_token > highest:
-            fence = self._root / FENCE_NAME
+            fence[scope] = fencing_token
             staging = self._root / f".{os.getpid()}.{uuid.uuid4().hex}.fence"
-            staging.write_text(
-                json.dumps({"fencing_token": fencing_token}), encoding="utf-8"
-            )
+            staging.write_text(json.dumps(fence, sort_keys=True), encoding="utf-8")
             # Replace rather than rewrite in place: a torn fence file would read
             # back as no fence at all, which is the one failure that silently
             # re-admits every stale writer.
-            os.replace(staging, fence)
+            os.replace(staging, self._root / FENCE_NAME)
 
     def _fsync_root(self) -> None:
         # A record whose file exists only in the directory cache is a durable

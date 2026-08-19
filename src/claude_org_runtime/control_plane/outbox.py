@@ -343,13 +343,21 @@ class ActionHandler:
     def idempotency_key(self, message: OutboxMessage) -> str:
         """The key one effect is identified by.
 
-        The outbox dedup key namespaced by the action kind. Namespacing is not
-        decoration: ``action.idempotency_key`` is unique across the whole table,
-        so two handlers deriving keys from the same dedup key would have one
-        silently deduplicate against the other's effect.
+        The outbox dedup key namespaced by the **recipient** and the action
+        kind. Namespacing is not decoration: ``action.idempotency_key`` is
+        unique across the whole table, so two handlers deriving keys from the
+        same dedup key would have one silently deduplicate against the other's
+        effect -- an effect that never happens, reported as exactly-once.
+
+        The recipient is in the key and the action kind alone is not, because
+        the recipient is what the registry makes unique. Nothing stops two
+        handlers from sharing an ``action_kind`` while serving different
+        recipients -- and if they did, the second would find the first's action
+        row already applied, skip recording its own receipt, and report an
+        effect at *its* destination that no record of ours points at.
         """
 
-        return f"{self.action_kind}:{message.dedup_key}"
+        return f"{self.recipient}:{self.action_kind}:{message.dedup_key}"
 
     def apply(
         self,
@@ -365,11 +373,14 @@ class ActionHandler:
         present at the destination; raising means it is not, and the message
         stays due.
 
-        *fencing_token* is the writer's lease epoch, to be carried to the
-        destination so it can refuse a superseded writer. It is **not** a
-        substitute for the fence on our own writes: those two guard different
-        windows, and only the destination's guards the one where this process
-        was paused past its own lease.
+        *fencing_token* is the writer's lease epoch and *fence_scope* is the
+        lease resource it was drawn from, both to be carried to the destination
+        so it can refuse a superseded writer. The scope matters: epochs from
+        different leases are different sequences, and a destination comparing
+        them against one another would reject live writers. The token is **not**
+        a substitute for the fence on our own writes -- those two guard
+        different windows, and only the destination's guards the one where this
+        process was paused past its own lease.
         """
 
         raise NotImplementedError
@@ -695,7 +706,7 @@ class Outbox:
         # refuse the duplicate is what at-least-once delivery with an
         # exactly-once effect actually looks like.
         try:
-            receipt = handler.apply(message, idempotency_key, epoch)
+            receipt = handler.apply(message, idempotency_key, epoch, self._resource)
         except DestinationRefusal:
             # The destination will not carry the effect. The action row stays
             # pending and the message stays due; recording it applied here would

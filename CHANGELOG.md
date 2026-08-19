@@ -42,6 +42,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supporting an idempotency key; re-proving the item against a real one is #16's
   and the canary's.
 
+  **The fence is carried into the effect, because our own writes cannot reach
+  it.** Every protected statement validates the lease epoch inside the write --
+  the enqueue, the retry-count increment, the effect intent, the applied
+  transition and the delivered transition -- and none of that covers the window
+  where *this process* is paused past its own lease, because a paused process
+  issues no statement to be refused. `ACCEPTANCE.md` §2 asks external
+  destinations to reject a stale token where they can enforce it, so the epoch
+  travels with the effect and `KeyedDropbox` refuses a token below the highest
+  it has honoured -- checked *inside* the same critical section that publishes,
+  since separately they are a check-then-write with exactly the race a fence
+  exists to prevent. Tokens are scoped by lease resource: epochs from different
+  leases are different sequences, and one global maximum would reject live
+  writers rather than stale ones. Effect keys are namespaced by recipient for
+  the mirror-image reason -- two handlers sharing an action kind would otherwise
+  have the second silently deduplicate against the first's effect.
+
   **The declaration is enforced, not conventional.** `HandlerRegistry` refuses a
   handler that does not name a mechanism from the enumeration
   `action.exactly_once_mechanism` already carries -- refused at *registration*,
