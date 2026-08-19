@@ -272,6 +272,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Per D-0026 the tests are the durable output; the implementation is throwaway
   by default. Design note: `docs/curator-promotion-gate.md`.
 
+### Fixed
+
+- **The stub `SessionProvider` classified an unusable child command by
+  platform** (S3, Issue #37). An empty argv, or one carrying a NUL, is the
+  caller's `settings` being unusable, and the contract answers that with
+  `REFUSED_BY_PROVIDER`. The check was left to `subprocess.Popen`, and **which
+  layer rejects these is platform-dependent**: on POSIX an empty argv is an
+  `IndexError` and a NUL a `ValueError`, both raised before the operating system
+  is involved, but on Windows an empty argv reaches `CreateProcess` and returns
+  `OSError` — `[WinError 87] The parameter is incorrect`, `errno` 22 — which is
+  indistinguishable at the call site from a genuine spawn failure and was
+  therefore classified `BACKEND_UNREACHABLE`.
+
+  The same request thus got two different answers depending on where it ran, and
+  the wrong one inverted the advice: unusable settings say *fix your
+  configuration*, while an unreachable backend says *the child could not be
+  started* and invites a retry that cannot succeed. This is what turned all
+  three `windows-latest` CI jobs red from `79cf515` onward.
+
+  The command is now validated in `_child_command`, before any spawn is
+  attempted, so the verdict is a property of the request rather than of the
+  platform. The `Popen` handler remains as a backstop for anything else it
+  refuses without reaching the operating system. A well-formed command that
+  simply cannot be started is still `BACKEND_UNREACHABLE` — the fix deliberately
+  does not collapse the two, since a genuinely broken environment must not be
+  reported as a configuration mistake.
+
+  The regression is provable without a Windows runner: the tests assert that the
+  caller's argv never reaches `Popen` at all, and one injects the Windows
+  `OSError` directly, so moving the check back behind the spawn fails on every
+  platform.
+
 ## [0.1.42] - 2026-08-14
 
 ### Added

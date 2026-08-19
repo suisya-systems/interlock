@@ -272,11 +272,23 @@ class LocalProcessSessionProvider(SessionProvider):
 
         try:
             command = self._child_command(request)
-        except TypeError as exc:
+        except (TypeError, ValueError) as exc:
+            # The caller's settings are unusable -- the wrong shape, empty, or
+            # carrying a NUL. All of them are the same answer, and it is reached
+            # before any spawn is attempted so that no platform's idea of which
+            # exception to raise can change it.
+            #
+            # Echoing the setting back is shape-checked for the same reason
+            # ``_child_command`` checks it: ``settings`` is opaque, so the value
+            # may be an int, or a bare string whose iteration would report its
+            # characters as arguments. Anything that is not already a sequence
+            # of arguments is reported as itself, not taken apart.
+            raw = request.settings.get("command")
             return Failure(
                 FailureKind.REFUSED_BY_PROVIDER,
                 f"the child command configured for session "
                 f"{request.session_id!r} is unusable: {exc}",
+                {"command": list(raw) if isinstance(raw, (list, tuple)) else repr(raw)},
             )
         try:
             process = subprocess.Popen(
@@ -294,10 +306,14 @@ class LocalProcessSessionProvider(SessionProvider):
                 {"command": list(command), "errno": exc.errno},
             )
         except (ValueError, IndexError) as exc:
-            # An empty command, or one carrying a NUL, is rejected by Popen
-            # before it reaches the operating system. That is the caller's
-            # settings being unusable, which the contract says is a reason-
-            # bearing Failure and not an exception at the caller.
+            # A backstop. The two cases that used to arrive here -- an empty
+            # command and one carrying a NUL -- are now refused by
+            # ``_child_command`` before any spawn is attempted, precisely so
+            # that the answer does not depend on which platform's layer rejects
+            # them. Anything else ``Popen`` refuses without reaching the
+            # operating system is still the caller's settings being unusable,
+            # which the contract says is a reason-bearing Failure and not an
+            # exception at the caller.
             return Failure(
                 FailureKind.REFUSED_BY_PROVIDER,
                 f"the child command configured for session "
@@ -406,7 +422,33 @@ class LocalProcessSessionProvider(SessionProvider):
             raise TypeError(
                 f"a child command must be a list or tuple of arguments, got {command!r}"
             )
-        return [str(part) for part in command]
+        argv = [str(part) for part in command]
+
+        # The contents are checked HERE rather than by letting ``Popen`` reject
+        # them, because *which layer rejects them is platform-dependent and the
+        # classification must not be*.
+        #
+        # On POSIX an empty argv raises ``IndexError`` and an embedded NUL
+        # raises ``ValueError``, both before the operating system is involved.
+        # On Windows an empty argv reaches ``CreateProcess``, which fails with
+        # ``OSError`` (``WinError 87``, ``errno`` 22) -- indistinguishable at the
+        # call site from a genuine spawn failure, and so classified as
+        # ``BACKEND_UNREACHABLE``. That inverted the answer the contract owes
+        # the caller: unusable *settings* say "fix your configuration"
+        # (``REFUSED_BY_PROVIDER``), while an unreachable backend says "the
+        # child could not be started" and invites a retry that cannot succeed.
+        #
+        # Deciding it before the spawn makes the verdict a property of the
+        # request rather than of the platform.
+        if not argv:
+            raise ValueError("a child command must name at least one argument")
+        for index, part in enumerate(argv):
+            if "\x00" in part:
+                raise ValueError(
+                    f"argument {index} of the child command contains a NUL, "
+                    "which no operating system can carry in an argv"
+                )
+        return argv
 
     def _state_file(self, session_id: str) -> Path:
         return self._state_root / f"{session_id}.state"
