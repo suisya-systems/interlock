@@ -233,8 +233,19 @@ class LocalProcessSessionProvider(SessionProvider):
                 "does not reuse a session id",
             )
 
-        workspace = Path(request.workspace)
-        if not workspace.is_dir():
+        try:
+            workspace = Path(request.workspace)
+            workspace_exists = workspace.is_dir()
+        except ValueError as exc:
+            # A NUL in the path, say. S1 only requires the workspace to be a
+            # non-empty string, so an unusable one is caller input this verb
+            # refuses with a reason rather than an exception.
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"the workspace configured for session {request.session_id!r} "
+                f"is not a usable path: {exc}",
+            )
+        if not workspace_exists:
             refusal = self._create_workspace(request, workspace)
             if refusal is not None:
                 return refusal
@@ -259,7 +270,14 @@ class LocalProcessSessionProvider(SessionProvider):
         if announce_after is not None:
             environment[ANNOUNCE_AFTER_ENV] = str(announce_after)
 
-        command = self._child_command(request)
+        try:
+            command = self._child_command(request)
+        except TypeError as exc:
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"the child command configured for session "
+                f"{request.session_id!r} is unusable: {exc}",
+            )
         try:
             process = subprocess.Popen(
                 command,
@@ -358,6 +376,7 @@ class LocalProcessSessionProvider(SessionProvider):
                 f"this provider holds no session {session_id!r}",
             )
         if session.process.poll() is not None:
+            self._close_child_input(session)
             return Failure(
                 FailureKind.REFUSED_BY_PROVIDER,
                 f"the child of session {session_id!r} has exited; a local child "
@@ -380,6 +399,13 @@ class LocalProcessSessionProvider(SessionProvider):
         command = request.settings.get("command")
         if command is None:
             return [self._python, "-c", _DEFAULT_CHILD_PROGRAM]
+        if not isinstance(command, (list, tuple)):
+            # ``settings`` is opaque, so anything at all can arrive here. A
+            # bare string is rejected along with the rest: iterating it would
+            # spawn its first character.
+            raise TypeError(
+                f"a child command must be a list or tuple of arguments, got {command!r}"
+            )
         return [str(part) for part in command]
 
     def _state_file(self, session_id: str) -> Path:
@@ -417,6 +443,15 @@ class LocalProcessSessionProvider(SessionProvider):
                 FailureKind.REFUSED_BY_PROVIDER,
                 f"workspace {workspace} could not be created: {exc}",
                 {"errno": exc.errno},
+            )
+        except ValueError as exc:
+            # A path the operating system is never even asked about -- one
+            # carrying a NUL, say. ``is_dir()`` answers False for it rather
+            # than raising, so this is where an unusable workspace surfaces.
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"the workspace configured for session {request.session_id!r} "
+                f"is not a usable path: {exc}",
             )
         return None
 

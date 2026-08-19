@@ -8,6 +8,7 @@ item 11's re-run leans on and the ones a happy-path-only suite would let rot.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -416,3 +417,50 @@ def test_a_state_word_that_is_not_utf8_is_could_not_observe(tmp_path: Path, prov
     readout = provider.read_state("s-1").value
     assert readout.observation is s1.Observation.COULD_NOT_OBSERVE
     assert "not UTF-8" in readout.could_not_observe_reason
+
+
+def test_an_unusable_workspace_path_is_a_failure_not_an_exception(
+    tmp_path: Path, provider
+):
+    """S1 only requires a non-empty string, so the provider checks the rest."""
+
+    result = provider.start(
+        s1.StartRequest(
+            session_id="s-1",
+            workspace=str(tmp_path / "with\x00nul"),
+            role="worker",
+        )
+    )
+    assert isinstance(result, s1.Failure)
+    assert result.kind is s1.FailureKind.REFUSED_BY_PROVIDER
+    assert provider.list_sessions().value == ()
+
+
+@pytest.mark.parametrize("command", [1, "a-bare-string", {"argv": ["x"]}])
+def test_a_child_command_that_is_not_a_list_is_refused(tmp_path: Path, provider, command):
+    """``settings`` is opaque, so anything at all can arrive as a command."""
+
+    result = provider.start(_request(tmp_path, command=command))
+    assert isinstance(result, s1.Failure)
+    assert result.kind is s1.FailureKind.REFUSED_BY_PROVIDER
+    assert provider.list_sessions().value == ()
+
+
+def test_a_refused_resume_releases_the_exited_childs_pipe(tmp_path: Path, provider):
+    """Repeated failed resumes must not be a way to exhaust descriptors."""
+
+    provider.start(_request(tmp_path))
+    provider.stop("s-1")
+    provider._sessions["s-1"].process.stdin = _reopened_pipe(provider, "s-1")
+
+    resumed = provider.resume("s-1")
+    assert isinstance(resumed, s1.Failure)
+    assert provider._sessions["s-1"].process.stdin.closed
+
+
+def _reopened_pipe(provider, session_id: str):
+    """A stand-in for a pipe stop() has not already closed."""
+
+    read_end, write_end = os.pipe()
+    os.close(read_end)
+    return open(write_end, "wb")
