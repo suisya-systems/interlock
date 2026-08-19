@@ -108,8 +108,12 @@ claim about the present contents of this repository — see [Purge record](#purg
 Explicitly **not** covered, and therefore **unclassified**:
 
 - Anything outside `src/`, `tests/`, and `docs/` — repository root files, packaging, CI
-  configuration, and tooling. In particular `README.md` and `pyproject.toml` are untouched and
-  unclassified; the rename question is recorded as `Q-0008` in `DECISIONS.md`, not settled here.
+  configuration, and tooling. In particular `README.md` and `pyproject.toml` were not
+  classified by this scan; the rename question is recorded as `Q-0008` in `DECISIONS.md`, not
+  settled here. (interlock#39 later edited `pyproject.toml` anyway — it had to, because its
+  `package-data` named two deleted packages — and deliberately left `README.md` alone. Both are
+  recorded in [Purge record](#purge-record). "Unclassified" bounds what this scan judged, not what
+  a later change may touch.)
 - Non-`.py` assets referenced from scanned code but not separately enumerated (for example the
   bundled JSON Schema files are covered only through their loader package row).
 - The claude-org-ja repository, which is a **different repository** and therefore has no path rows
@@ -381,6 +385,8 @@ work into a `discard` purge. It needs its own change.
 | `tests/test_schema.py` | `discard` | `deleted` |  |
 | `tests/transport/__init__.py` | `discard` | `deleted` |  |
 | `tests/transport/test_descriptor.py` | `discard` | `deleted` |  |
+| `README.md` | unclassified | `retained` | **Knowingly stale, deliberately deferred.** It documents three surfaces this purge deletes: the `org up` / `org down` quick start, the tmux / wezterm / herdr terminal-adapter prose, and a `claude_org_runtime.prompts` example that now raises `ModuleNotFoundError`. Left untouched because repository-root files sit outside this ledger's scan and belong to `Q-0018` / `Q-0008`; correcting them here would smuggle unclassified-surface work into a `discard` purge. It needs its own change. |
+| `pyproject.toml` | unclassified | `content stripped, file kept` | Two `package-data` entries named deleted packages (`schema.json_schema`, `prompts.templates`) and the `description` advertised reference role prompts. Edited out of necessity, not classification. |
 | `docs/cli.md` | `discard` | `content stripped, file kept` | Trimmed rather than deleted (D-0015): the `settings generate` / `settings show` / `sandbox doctor` sections document `settings/sandbox_doctor.py` (carry) and the carried half of `settings/generator.py`, and `dispatcher delegate-plan` documents a surviving `rewrite` module. Removed: the `org up` / `org adopt` / `org down` and `broker send` sections, and the renga multi-tab plan-field subsection. |
 | `src/claude_org_runtime/__about__.py` | `discard` | `retained` | Content unchanged. Kept deliberately, not by oversight: it is the version SoT `pyproject.toml` reads. Recorded here so its survival is not read as an unfinished purge. |
 | `src/claude_org_runtime/__init__.py` | `discard` | `content stripped, file kept` | Physical deletion would break every carried module under the package, and `pyproject.toml`'s `version = { attr = ... }` resolves through it. The eager re-export of `prompts` / `terminal` and the other subpackages — the discard content — is gone. |
