@@ -65,6 +65,7 @@ written against.
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 
@@ -78,6 +79,7 @@ __all__ = [
     "CHECKPOINT_DELIVERED_BEFORE_ACK",
     "EXACTLY_ONCE_MECHANISMS",
     "UNOWNED_OUTBOX_QUERY",
+    "UNSUPPORTED_MECHANISMS",
     "AckOutcome",
     "ActionHandler",
     "AttemptOutcome",
@@ -101,6 +103,28 @@ EXACTLY_ONCE_MECHANISMS = (
     "transactional_with_record",
     "human_gate",
 )
+
+#: Mechanisms that are part of the vocabulary but that **this** outbox cannot
+#: provide, mapped to why.
+#:
+#: ``'transactional_with_record'`` requires the effect and its durable record to
+#: commit together. :meth:`Outbox.attempt` commits the action row *before*
+#: calling the handler -- deliberately, since that ordering is what makes the
+#: effect recoverable -- and hands the handler no transaction to enlist in. A
+#: handler declaring the mechanism would therefore be admitted while the path it
+#: runs on could not possibly deliver it, which is the undeclared-guarantee
+#: failure the registration check exists to prevent, arriving through the one
+#: branch that looks declared. The mechanism stays in the vocabulary because it
+#: is ``ACCEPTANCE.md``'s and the DDL's; what is refused is *claiming it here*.
+UNSUPPORTED_MECHANISMS = {
+    "transactional_with_record": (
+        "Outbox.attempt commits the action row before calling the handler and "
+        "offers it no transaction to commit an effect inside, so this outbox "
+        "cannot provide the mechanism a handler declaring it would be claiming. "
+        "Use 'destination_idempotency_key' where the destination supports one, "
+        "or 'human_gate' where neither is achievable (D-0004)"
+    ),
+}
 
 #: Named points at which a delivery can be killed. ``ACCEPTANCE.md`` section 2
 #: names the first three by description -- *before the durable write*, *after
@@ -327,7 +351,12 @@ class ActionHandler:
 
         return f"{self.action_kind}:{message.dedup_key}"
 
-    def apply(self, message: OutboxMessage, idempotency_key: str) -> DeliveryReceipt | None:
+    def apply(
+        self,
+        message: OutboxMessage,
+        idempotency_key: str,
+        fencing_token: int | None = None,
+    ) -> DeliveryReceipt | None:
         """Perform the side effect, or recognise it as already performed.
 
         Called with the ``action`` row already durable in status ``'pending'``
@@ -335,6 +364,12 @@ class ActionHandler:
         rather than merely attempted. Returning normally means the effect is
         present at the destination; raising means it is not, and the message
         stays due.
+
+        *fencing_token* is the writer's lease epoch, to be carried to the
+        destination so it can refuse a superseded writer. It is **not** a
+        substitute for the fence on our own writes: those two guard different
+        windows, and only the destination's guards the one where this process
+        was paused past its own lease.
         """
 
         raise NotImplementedError
@@ -373,6 +408,12 @@ class HandlerRegistry:
                 "cannot tell a completed side effect from one that never "
                 "started, so a handler that names nothing is claiming a "
                 "guarantee it has no way to hold"
+            )
+        if mechanism in UNSUPPORTED_MECHANISMS:
+            raise HandlerRejected(
+                f"{type(handler).__name__} declares exactly_once_mechanism "
+                f"{mechanism!r}, which this outbox cannot provide: "
+                f"{UNSUPPORTED_MECHANISMS[mechanism]}"
             )
         if handler.recipient in self._by_recipient:
             raise HandlerRejected(
@@ -448,6 +489,15 @@ class Outbox:
         :data:`UNOWNED_OUTBOX_QUERY` the moment it was committed, which is the
         state the recovery criterion forbids.
 
+        The insert is **fenced**, like every other write here. Enqueueing looks
+        like the one harmless statement -- it only adds a row -- but a stale
+        holder that can enqueue mutates control-plane state after losing its
+        lease, and every row it writes is unowned from the moment it commits.
+        ``ACCEPTANCE.md`` section 2 asks that a stale writer be *rejected, not
+        merged*, without exempting the writes that merely create work; so the
+        lease predicate is inside the ``INSERT`` rather than in front of it, in
+        the same single-statement form as the updates.
+
         A duplicate ``message_id`` is refused by the primary key rather than
         collapsed here. Re-enqueueing the same *dedup key* under a **new**
         message id is legal and expected -- a sender killed after committing a
@@ -456,13 +506,19 @@ class Outbox:
         """
 
         with self._connection:
-            self._connection.execute(
+            cursor = self._connection.execute(
                 """
                 INSERT INTO outbox (message_id, run_id, recipient, payload,
                                     dedup_key, status, retry_count, writer_epoch,
                                     enqueued_at_ms)
-                VALUES (:message_id, :run_id, :recipient, :payload,
-                        :dedup_key, 'pending', 0, :epoch, :now_ms)
+                SELECT :message_id, :run_id, :recipient, :payload,
+                       :dedup_key, 'pending', 0, :epoch, :now_ms
+                 WHERE EXISTS (SELECT 1
+                                 FROM lease
+                                WHERE resource      = :resource
+                                  AND holder        = :holder
+                                  AND epoch         = :epoch
+                                  AND expires_at_ms > :now_ms)
                 """,
                 {
                     "message_id": message_id,
@@ -472,8 +528,29 @@ class Outbox:
                     "dedup_key": dedup_key,
                     "epoch": epoch,
                     "now_ms": now_ms,
+                    "resource": self._resource,
+                    "holder": self._holder,
                 },
             )
+            enqueued = cursor.rowcount == 1
+
+        if not enqueued:
+            reason = (
+                f"refused to enqueue {message_id!r} for {recipient!r}: epoch "
+                f"{epoch} is not a live lease on {self._resource!r} held by "
+                f"{self._holder!r} at {now_ms}"
+            )
+            self._record_bare_refusal(
+                run_id=run_id,
+                kind=f"enqueue:{recipient}",
+                idempotency_key=f"enqueue:{recipient}:{dedup_key}",
+                mechanism="human_gate",
+                reason=reason,
+                now_ms=now_ms,
+                epoch=epoch,
+            )
+            raise StaleWriterRefused(reason)
+
         return self.load(message_id)
 
     # -- reading ----------------------------------------------------------
@@ -581,6 +658,24 @@ class Outbox:
 
         self._checkpoint(CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT)
 
+        # The fence, re-read immediately before the effect. The retry-count
+        # update validated the lease and then committed, and the action row was
+        # written after it: a writer paused across that gap would otherwise
+        # reach the destination having lost its lease in between. Re-reading
+        # narrows the window; it cannot close it, because no statement of ours
+        # runs during the pause. That is why the epoch is also *carried into the
+        # effect* below -- ACCEPTANCE.md section 2: *external destinations must
+        # reject a stale token where they can enforce it*. The two guards cover
+        # different halves and neither is redundant.
+        if not self._fence_is_live(epoch=epoch, now_ms=now_ms):
+            reason = (
+                f"refused to apply the effect for {message_id!r}: epoch {epoch} "
+                f"stopped being a live lease on {self._resource!r} held by "
+                f"{self._holder!r} before the effect was attempted"
+            )
+            self._record_refusal(message, handler, reason, now_ms=now_ms, epoch=epoch)
+            raise StaleWriterRefused(reason)
+
         # (3) the effect itself -- attempted every time, including when our own
         # action row already says 'applied'.
         #
@@ -594,7 +689,7 @@ class Outbox:
         # refuse the duplicate is what at-least-once delivery with an
         # exactly-once effect actually looks like.
         try:
-            receipt = handler.apply(message, idempotency_key)
+            receipt = handler.apply(message, idempotency_key, epoch)
         except DestinationRefusal:
             # The destination will not carry the effect. The action row stays
             # pending and the message stays due; recording it applied here would
@@ -910,8 +1005,40 @@ class Outbox:
 
         A refused row is excluded from ``action_one_effect_per_key``, so a
         writer that keeps returning is recorded every time it is turned away
-        rather than having its first refusal stand in for the rest. The action
-        id carries the epoch and the attempt instant for the same reason.
+        rather than having its first refusal stand in for the rest -- which is
+        why the identity below cannot be derived from the attempt's own values.
+        """
+
+        self._record_bare_refusal(
+            run_id=message.run_id,
+            kind=handler.action_kind,
+            idempotency_key=handler.idempotency_key(message),
+            mechanism=handler.exactly_once_mechanism,
+            reason=reason,
+            now_ms=now_ms,
+            epoch=epoch,
+        )
+
+    def _record_bare_refusal(
+        self,
+        *,
+        run_id: str | None,
+        kind: str,
+        idempotency_key: str,
+        mechanism: str,
+        reason: str,
+        now_ms: int,
+        epoch: int,
+    ) -> None:
+        """Insert one refusal row, for a message that may not exist yet.
+
+        The action id is randomised rather than composed from the message id,
+        the epoch and the instant. Composing it would collide whenever the same
+        stale writer retried twice inside one millisecond, and the collision
+        would surface as an ``IntegrityError`` **instead of** the refusal being
+        recorded -- losing precisely the evidence ``ACCEPTANCE.md`` section 2
+        requires to be durable, in exactly the case where the writer is trying
+        hardest to get in.
         """
 
         with self._connection:
@@ -924,11 +1051,11 @@ class Outbox:
                         :mechanism, 'refused', :reason, :epoch, :now_ms)
                 """,
                 {
-                    "action_id": f"refused-{message.message_id}-{epoch}-{now_ms}",
-                    "run_id": message.run_id,
-                    "kind": handler.action_kind,
-                    "idempotency_key": handler.idempotency_key(message),
-                    "mechanism": handler.exactly_once_mechanism,
+                    "action_id": f"refused-{uuid.uuid4().hex}",
+                    "run_id": run_id,
+                    "kind": kind,
+                    "idempotency_key": idempotency_key,
+                    "mechanism": mechanism,
                     "reason": reason,
                     "epoch": epoch,
                     "now_ms": now_ms,

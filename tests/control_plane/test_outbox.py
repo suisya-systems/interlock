@@ -37,6 +37,7 @@ import claude_org_runtime
 from claude_org_runtime.control_plane.destination import (
     DestinationRefusal,
     KeyedDropbox,
+    StaleTokenRefused,
 )
 from claude_org_runtime.control_plane.handlers import (
     HUMAN_GATED_RECIPIENT,
@@ -59,6 +60,7 @@ from claude_org_runtime.control_plane.outbox import (
     HumanGateRequired,
     Outbox,
     StaleWriterRefused,
+    UNSUPPORTED_MECHANISMS,
 )
 from claude_org_runtime.control_plane.schema import (
     create_control_plane,
@@ -462,7 +464,7 @@ def test_the_retry_count_counts_attempts_not_successes(cp, dropbox):
         action_kind = "notify"
         exactly_once_mechanism = "destination_idempotency_key"
 
-        def apply(self, message, idempotency_key):
+        def apply(self, message, idempotency_key, fencing_token=None):
             raise DestinationRefusal("the recipient is unavailable")
 
     registry = HandlerRegistry()
@@ -868,13 +870,50 @@ def test_the_destination_refuses_a_key_that_is_already_bound_to_another_payload(
     assert outbox.load("msg-2").status == "pending", "and msg-2 was not recorded delivered"
 
 
-def test_a_destination_record_left_incomplete_is_finished_not_deduplicated(tmp_path):
-    """The destination's own crash window, which is not ours to hide.
+def test_an_apply_that_dies_before_publishing_leaves_nothing_behind(tmp_path):
+    """The destination's own crash window, closed by construction.
 
-    A destination that reserved a key and died before completing its record must
-    not turn the next attempt away as a duplicate: the effect never completed,
-    and deduplicating against a promise nobody kept is how a message is lost
-    while every record looks healthy.
+    The record is written complete to a private file and then published with
+    ``os.link``, so a crash mid-apply leaves a staging file and nothing else: no
+    effect, and -- the part that matters -- nothing occupying the key. The
+    reservation design this replaced was wrong in both directions, and the
+    dangerous half was the recovery: a second caller cannot distinguish "the
+    creator died" from "the creator has not written yet", so treating an
+    incomplete file as abandoned means truncating a file another process is
+    actively writing and letting two effects proceed at once.
+    """
+
+    root = tmp_path / "destination"
+    dropbox = KeyedDropbox(root)
+
+    class DiesBeforePublishing(KeyedDropbox):
+        def _fsync_root(self):
+            raise RuntimeError("killed after staging, before the link")
+
+    dying = DiesBeforePublishing(root)
+    with pytest.raises(RuntimeError):
+        # os.link happens before _fsync_root, so this kills the apply after the
+        # key is taken -- the worst instant for the *next* attempt.
+        dying.apply("k", "payload")
+
+    # The link did land, so the key is taken by a complete record. That is the
+    # point: there is no instant at which the key exists and its record does not.
+    assert dropbox.effect_count("k") == 1
+    assert list(root.glob("*.staging")) == [], "the staging file is cleaned up"
+
+    second = dropbox.apply("k", "payload")
+    assert second.deduplicated is True, "and the next attempt is deduplicated"
+    assert dropbox.effect_count("k") == 1
+
+
+def test_a_damaged_published_record_is_refused_rather_than_applied_twice(tmp_path):
+    """A partial record is not evidence, and it is not licence to apply again.
+
+    Publishing is atomic, so a record that does not read back whole is damage
+    rather than a lifecycle state. Applying a second effect over it would be
+    guessing that the first never landed -- exactly the inference
+    ``ACCEPTANCE.md`` section 2 says cannot be made -- so the destination
+    refuses and the message stays due for a human to look at.
     """
 
     dropbox = KeyedDropbox(tmp_path / "destination")
@@ -882,10 +921,9 @@ def test_a_destination_record_left_incomplete_is_finished_not_deduplicated(tmp_p
     (record,) = sorted((tmp_path / "destination").glob("*.effect.json"))
     record.write_text(record.read_text(encoding="utf-8").rstrip("\n"), encoding="utf-8")
 
-    assert dropbox.effect_count("k") == 0, "an unterminated record is not an effect"
-    receipt = dropbox.apply("k", "payload")
-    assert receipt.deduplicated is False, "the next attempt finished it"
-    assert dropbox.effect_count("k") == 1
+    assert dropbox.effect_count("k") == 0, "a partial record is not an effect"
+    with pytest.raises(DestinationRefusal, match="complete record"):
+        dropbox.apply("k", "payload")
 
 
 def test_a_destination_refuses_an_empty_idempotency_key(tmp_path):
@@ -976,6 +1014,177 @@ def test_an_outbox_writer_must_name_its_lease_resource_and_holder(cp, dropbox):
     for resource, holder in (("", HOLDER), (RESOURCE, "")):
         with pytest.raises(ValueError, match="names the lease resource and holder"):
             Outbox(cp, resource=resource, holder=holder, registry=spike_registry(dropbox))
+
+
+# --------------------------------------------------------------------------
+# the fence, continued -- the windows a single fenced UPDATE does not cover
+# --------------------------------------------------------------------------
+
+
+def test_a_stale_writer_cannot_even_enqueue(cp, dropbox):
+    """Enqueueing looks like the one harmless write, and it is not.
+
+    It only adds a row -- but a holder that has lost its lease and can still
+    enqueue mutates control-plane state after being replaced, and every row it
+    writes is unowned from the instant it commits. Section 2 asks that a stale
+    writer be rejected without exempting the writes that merely create work.
+    """
+
+    outbox = make_outbox(cp, dropbox)
+    cp.execute("UPDATE lease SET holder = 'writer-b', epoch = 2 WHERE resource = ?", (RESOURCE,))
+    cp.commit()
+
+    with pytest.raises(StaleWriterRefused, match="refused to enqueue"):
+        enqueue(outbox, message_id="msg-stale", dedup_key="dk-stale")
+
+    assert cp.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0, "no row was written"
+    refusals = actions(cp, status="refused")
+    assert len(refusals) == 1, "and the rejection is durable"
+    assert "refused to enqueue" in refusals[0]["refusal_reason"]
+
+
+def test_an_expired_lease_refuses_the_enqueue_too(cp, dropbox):
+    outbox = make_outbox(cp, dropbox)
+    with pytest.raises(StaleWriterRefused):
+        enqueue(outbox, message_id="msg-late", dedup_key="dk-late", at=T0 + TTL_MS + 1)
+    assert cp.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
+
+
+def test_the_lease_is_re_read_between_the_durable_write_and_the_effect(cp, dropbox):
+    """The gap the retry-count fence does not cover.
+
+    That UPDATE validates the lease and then *commits*; the action row is
+    written after it. A writer paused across that gap would reach the
+    destination having lost its lease in between, and no statement of ours runs
+    during the pause to notice. The re-read narrows the window -- it cannot
+    close it, which is why the epoch is also carried into the effect.
+    """
+
+    def lose_the_lease(name):
+        if name == CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT:
+            cp.execute(
+                "UPDATE lease SET holder = 'writer-b', epoch = 2 WHERE resource = ?",
+                (RESOURCE,),
+            )
+            cp.commit()
+
+    outbox = make_outbox(cp, dropbox, checkpoint=lose_the_lease)
+    message = enqueue(outbox)
+
+    with pytest.raises(StaleWriterRefused, match="before the effect was attempted"):
+        outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
+
+    assert dropbox.effects() == (), "no effect was applied by the superseded writer"
+    assert len(actions(cp, status="refused")) == 1
+
+
+def test_the_destination_refuses_a_superseded_fencing_token(tmp_path):
+    """*External destinations must reject a stale token where they can enforce it.*
+
+    The one refusal available once our own writer has been paused past its
+    lease: SQLite cannot refuse a statement that is never issued, so the
+    counterparty -- the only party still running -- has to.
+    """
+
+    dropbox = KeyedDropbox(tmp_path / "destination")
+    dropbox.apply("k-2", "payload", 2)
+    assert dropbox.honoured_token() == 2
+
+    with pytest.raises(StaleTokenRefused, match="refuses 1"):
+        dropbox.apply("k-1", "payload", 1)
+    assert dropbox.effect_count("k-1") == 0, "the superseded writer applied nothing"
+
+
+def test_a_superseded_writer_is_refused_even_when_its_effect_is_already_present(tmp_path):
+    """A stale token is refused *before* the already-applied shortcut.
+
+    Otherwise a returning stale writer would read a deduplicated success as
+    evidence that it is still the live holder -- the fence telling it the
+    opposite of what it means.
+    """
+
+    dropbox = KeyedDropbox(tmp_path / "destination")
+    dropbox.apply("k", "payload", 1)
+    dropbox.apply("other", "payload", 5)
+
+    with pytest.raises(StaleTokenRefused):
+        dropbox.apply("k", "payload", 1)
+
+
+def test_an_apply_carrying_no_token_is_not_fenced(tmp_path):
+    """A token that was never offered is not checked, and does not raise.
+
+    Pretending to validate one would be the "token accepted without being
+    checked" the protocol warns about, wearing the opposite disguise.
+    """
+
+    dropbox = KeyedDropbox(tmp_path / "destination")
+    assert dropbox.honoured_token() is None
+    receipt = dropbox.apply("k", "payload")
+    assert receipt.deduplicated is False
+    assert dropbox.honoured_token() is None
+
+
+def test_the_fencing_token_reaches_the_destination_from_the_outbox(cp, dropbox):
+    """End to end: the epoch the write was fenced against is what is carried."""
+
+    outbox = make_outbox(cp, dropbox)
+    message = enqueue(outbox)
+    outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
+    assert dropbox.honoured_token() == EPOCH
+
+
+def test_every_refusal_is_recorded_even_within_one_millisecond(cp, dropbox):
+    """A refusal identity composed from the attempt's own values collides.
+
+    Same message, same epoch, same millisecond -- and the collision would
+    surface as an IntegrityError *instead of* the refusal being recorded, losing
+    exactly the evidence section 2 requires to be durable, in the case where the
+    stale writer is trying hardest to get in.
+    """
+
+    outbox = make_outbox(cp, dropbox)
+    message = enqueue(outbox)
+    cp.execute("UPDATE lease SET holder = 'writer-b', epoch = 2 WHERE resource = ?", (RESOURCE,))
+    cp.commit()
+
+    for _ in range(3):
+        with pytest.raises(StaleWriterRefused):
+            outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
+
+    assert len(actions(cp, status="refused")) == 3
+
+
+def test_a_handler_claiming_a_transactional_commit_is_refused(dropbox):
+    """The mechanism is in the vocabulary; claiming it *here* is not honest.
+
+    ``Outbox.attempt`` commits the action row before calling the handler and
+    hands it no transaction to enlist in, so a handler declaring
+    ``transactional_with_record`` would be admitted while the path it runs on
+    could not possibly provide the guarantee -- the same undeclared-guarantee
+    failure the registration check exists to prevent, arriving through the one
+    branch that looks declared.
+    """
+
+    class Transactional(ActionHandler):
+        recipient = "somewhere"
+        action_kind = "something"
+        exactly_once_mechanism = "transactional_with_record"
+
+    with pytest.raises(HandlerRejected, match="cannot provide"):
+        HandlerRegistry().register(Transactional())
+
+
+def test_the_unsupported_mechanism_is_still_part_of_the_vocabulary():
+    """Refusing to claim it is not the same as deleting it.
+
+    The enumeration is ``ACCEPTANCE.md``'s and the DDL's, not this module's, and
+    a mechanism dropped from the vocabulary could not be recorded by a future
+    handler that genuinely implements it.
+    """
+
+    for mechanism in UNSUPPORTED_MECHANISMS:
+        assert mechanism in EXACTLY_ONCE_MECHANISMS
 
 
 # --------------------------------------------------------------------------

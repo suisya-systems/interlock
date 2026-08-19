@@ -47,17 +47,34 @@ code and not our transaction, decides which of two racing applies created the
 key. Nothing else about a real destination is modelled and nothing here should
 be mistaken for a transport.
 
-**Two-phase records, and why the ledger is not just "the file exists".** A
-destination that claimed an effect it had not finished applying would be worse
-than one with no record at all: the next attempt would be deduplicated away and
-the effect would never happen. So a record is written and only then *completed*,
-and completeness is carried in the record itself
-(:data:`_COMPLETION_SENTINEL`). A key file that exists but is incomplete is an
-attempt that died mid-apply; the next attempt **finishes it** rather than being
-turned away by it. Reserving the key and completing the record are separate
-steps here for the same reason the outbox and the action row are separate: it is
-where a process dies, and pretending otherwise is how the ambiguous window gets
-hidden instead of handled.
+**Publishing is one atomic step, because a reservation is a trap.** The obvious
+implementation reserves the key with ``O_EXCL`` and then fills the record in,
+and it is wrong in both directions. A reservation that is *treated as an effect*
+loses the message when its creator dies before writing -- every later attempt is
+deduplicated against a promise nobody kept. A reservation that is *treated as
+abandoned* is worse: a second caller cannot distinguish "the creator died" from
+"the creator has not written yet", so it truncates a file another process is
+actively writing and two effects proceed at once, which is the exclusion this
+class exists to provide failing silently.
+
+So there is no reservation. The record is written **complete** to a private
+temporary file, fsynced, and then published with :func:`os.link`, which fails
+with ``FileExistsError`` if the key is already taken. Link is atomic and
+exclusive, so the key file is complete from the instant it is visible and an
+apply that dies mid-flight leaves nothing but a temporary file -- no effect, and
+nothing blocking the next attempt. :data:`_COMPLETION_SENTINEL` survives as an
+integrity check on *read* rather than as a lifecycle state.
+
+**The fencing token, where the destination can enforce it.**
+``ACCEPTANCE.md`` section 2 does not stop at deduplication: *external
+destinations must reject a stale token where they can enforce it*. The window
+this closes is the one no SQLite statement can -- our writer validates its lease
+inside its own write, then is paused, and by the time it reaches the destination
+the lease belongs to someone else. Nothing on our side can refuse that effect,
+because our side is the thing that was paused. So :meth:`KeyedDropbox.apply`
+takes the writer's lease epoch, records the highest one it has honoured, and
+refuses anything below it: a returning stale writer is turned away by the
+counterparty, which is the only party still running.
 """
 
 from __future__ import annotations
@@ -66,6 +83,7 @@ import errno
 import hashlib
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Sequence, runtime_checkable
@@ -73,10 +91,12 @@ from typing import Protocol, Sequence, runtime_checkable
 __all__ = [
     "ATTEMPT_LOG_NAME",
     "EFFECT_SUFFIX",
+    "FENCE_NAME",
     "DeliveryReceipt",
     "Destination",
     "DestinationRefusal",
     "KeyedDropbox",
+    "StaleTokenRefused",
 ]
 
 #: Suffix of one effect record. One file per idempotency key, and the key is
@@ -94,8 +114,14 @@ EFFECT_SUFFIX = ".effect.json"
 #: that were turned away has not shown deduplication happening.
 ATTEMPT_LOG_NAME = "attempts.log"
 
-#: A record ends with this byte. A file without it is an apply that died between
-#: reserving the key and finishing the record -- resumable, not a duplicate.
+#: Where the highest honoured fencing token is kept. One per destination rather
+#: than one per key: a lease fences a *writer*, not an individual effect, so a
+#: token that has been superseded is stale for everything this writer might send.
+FENCE_NAME = "fence.json"
+
+#: A record ends with this byte. Records are published complete (see the module
+#: docstring), so a file without it is a damaged read rather than a lifecycle
+#: state -- and it is still refused, because a partial record is not evidence.
 _COMPLETION_SENTINEL = "\n"
 
 
@@ -105,6 +131,16 @@ class DestinationRefusal(Exception):
     Distinct from deduplication, which is a *success*: the effect is present and
     the caller may stop. A refusal means the destination will not carry the
     effect at all, and the caller must not record it as applied.
+    """
+
+
+class StaleTokenRefused(DestinationRefusal):
+    """The apply carried a fencing token the destination has already superseded.
+
+    The refusal ``ACCEPTANCE.md`` section 2 asks external destinations to make
+    *"where they can enforce it"*. It is the only rejection available once our
+    own writer has been paused past its lease: SQLite cannot refuse a statement
+    that is never issued, so the counterparty has to.
     """
 
 
@@ -135,6 +171,10 @@ class DeliveryReceipt:
     #: deduplicating a payload the caller did not send before would hide a
     #: dedup-key collision behind an exactly-once guarantee.
     payload_conflict: bool = False
+    #: The fencing token the destination honoured for this apply, if one was
+    #: offered. Recorded so that "the destination accepted this writer" is an
+    #: assertable fact rather than an inference from the effect existing.
+    fencing_token: int | None = None
 
 
 @runtime_checkable
@@ -150,11 +190,22 @@ class Destination(Protocol):
     #: Stable identity, recorded on the receipt.
     name: str
 
-    def apply(self, idempotency_key: str, payload: str) -> DeliveryReceipt:
+    def apply(
+        self,
+        idempotency_key: str,
+        payload: str,
+        fencing_token: int | None = None,
+    ) -> DeliveryReceipt:
         """Apply the effect, or recognise that it is already applied.
 
         Must be safe to call any number of times with the same key: that is the
         entire content of the guarantee the handler is allowed to claim.
+
+        *fencing_token* is the caller's lease epoch. A destination that can
+        enforce it must refuse a token below one it has already honoured
+        (:class:`StaleTokenRefused`); one that cannot must ignore it rather than
+        pretend, since a token accepted without being checked is worse than no
+        token at all.
         """
 
     def effect_count(self, idempotency_key: str) -> int:
@@ -184,7 +235,12 @@ class KeyedDropbox:
 
     # -- the protocol -----------------------------------------------------
 
-    def apply(self, idempotency_key: str, payload: str) -> DeliveryReceipt:
+    def apply(
+        self,
+        idempotency_key: str,
+        payload: str,
+        fencing_token: int | None = None,
+    ) -> DeliveryReceipt:
         if not idempotency_key:
             # An empty key is not a key: every effect would deduplicate against
             # every other one, which is the failure mode that looks most like
@@ -193,7 +249,13 @@ class KeyedDropbox:
 
         path = self._effect_path(idempotency_key)
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-        self._log_attempt(idempotency_key, digest)
+        self._log_attempt(idempotency_key, digest, fencing_token)
+
+        # The fence is checked before anything else is done, and before the
+        # already-applied shortcut: a stale writer must be told it is stale even
+        # when the effect it carries happens to be present, or it would read a
+        # deduplicated success as evidence that it is still the live holder.
+        self._honour_token(fencing_token)
 
         existing = self._read_record(path)
         if existing is not None:
@@ -205,6 +267,7 @@ class KeyedDropbox:
                 destination=self.name,
                 receipt_ref=path.name,
                 payload_conflict=existing.get("payload_sha256") != digest,
+                fencing_token=fencing_token,
             )
 
         record = json.dumps(
@@ -212,43 +275,68 @@ class KeyedDropbox:
                 "idempotency_key": idempotency_key,
                 "payload_sha256": digest,
                 "payload": payload,
+                "fencing_token": fencing_token,
             },
             sort_keys=True,
         )
 
+        # Written complete to a private file, then published by link. There is
+        # deliberately no reservation step: see the module docstring on why a
+        # half-written key file is a trap in both directions.
+        staging = self._root / f".{os.getpid()}.{uuid.uuid4().hex}.staging"
         try:
-            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        except FileExistsError:
-            # Either a concurrent apply won the race and has since completed its
-            # record, or a previous apply reserved the key and died before
-            # completing it. Re-reading tells the two apart, and the incomplete
-            # case is finished in place below rather than reported as a
-            # duplicate -- turning an unfinished effect away as "already done"
-            # is how a message gets lost while every record looks healthy.
-            settled = self._read_record(path)
-            if settled is not None:
+            handle = os.open(staging, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                os.write(handle, (record + _COMPLETION_SENTINEL).encode("utf-8"))
+                os.fsync(handle)
+            finally:
+                os.close(handle)
+
+            try:
+                os.link(staging, path)
+            except FileExistsError:
+                # Another apply published this key first. Link is atomic, so
+                # what is there is complete -- there is no window in which a
+                # concurrent writer is still filling it in.
+                settled = self._read_record(path)
+                if settled is None:
+                    raise DestinationRefusal(
+                        f"{path.name} exists at {self.name!r} but does not read "
+                        "back as a complete record; refusing rather than "
+                        "applying a second effect against a damaged one"
+                    ) from None
                 return DeliveryReceipt(
                     idempotency_key=idempotency_key,
                     deduplicated=True,
                     destination=self.name,
                     receipt_ref=path.name,
                     payload_conflict=settled.get("payload_sha256") != digest,
+                    fencing_token=fencing_token,
                 )
-            handle = os.open(path, os.O_WRONLY | os.O_TRUNC)
-
-        try:
-            os.write(handle, (record + _COMPLETION_SENTINEL).encode("utf-8"))
-            os.fsync(handle)
         finally:
-            os.close(handle)
-        self._fsync_root()
+            # A crash before this leaves a staging file and nothing else: no
+            # effect, and nothing blocking the next attempt.
+            try:
+                os.unlink(staging)
+            except FileNotFoundError:  # pragma: no cover - lost the race to nothing
+                pass
 
+        self._fsync_root()
         return DeliveryReceipt(
             idempotency_key=idempotency_key,
             deduplicated=False,
             destination=self.name,
             receipt_ref=path.name,
+            fencing_token=fencing_token,
         )
+
+    def honoured_token(self) -> int | None:
+        """The highest fencing token this destination has accepted, if any."""
+
+        fence = self._root / FENCE_NAME
+        if not fence.exists():
+            return None
+        return int(json.loads(fence.read_text(encoding="utf-8"))["fencing_token"])
 
     def effect_count(self, idempotency_key: str) -> int:
         return 1 if self._read_record(self._effect_path(idempotency_key)) is not None else 0
@@ -314,9 +402,15 @@ class KeyedDropbox:
         except json.JSONDecodeError:
             return None
 
-    def _log_attempt(self, idempotency_key: str, digest: str) -> None:
+    def _log_attempt(
+        self, idempotency_key: str, digest: str, fencing_token: int | None
+    ) -> None:
         line = json.dumps(
-            {"idempotency_key": idempotency_key, "payload_sha256": digest},
+            {
+                "idempotency_key": idempotency_key,
+                "payload_sha256": digest,
+                "fencing_token": fencing_token,
+            },
             sort_keys=True,
         )
         # Appended before the effect is applied, so an attempt that dies
@@ -329,6 +423,36 @@ class KeyedDropbox:
             os.fsync(handle)
         finally:
             os.close(handle)
+
+    def _honour_token(self, fencing_token: int | None) -> None:
+        """Refuse a token below the highest one already honoured.
+
+        An apply carrying no token is not fenced and is let through unchanged:
+        pretending to check one that was never offered would be the "token
+        accepted without being checked" the protocol warns about. Once a token
+        *is* offered, it is recorded, and every later apply is measured against
+        it -- so the transition from unfenced to fenced is one-way.
+        """
+
+        if fencing_token is None:
+            return
+        highest = self.honoured_token()
+        if highest is not None and fencing_token < highest:
+            raise StaleTokenRefused(
+                f"{self.name!r} has honoured fencing token {highest} and "
+                f"refuses {fencing_token}: the writer offering it was "
+                "superseded while it was away"
+            )
+        if highest is None or fencing_token > highest:
+            fence = self._root / FENCE_NAME
+            staging = self._root / f".{os.getpid()}.{uuid.uuid4().hex}.fence"
+            staging.write_text(
+                json.dumps({"fencing_token": fencing_token}), encoding="utf-8"
+            )
+            # Replace rather than rewrite in place: a torn fence file would read
+            # back as no fence at all, which is the one failure that silently
+            # re-admits every stale writer.
+            os.replace(staging, fence)
 
     def _fsync_root(self) -> None:
         # A record whose file exists only in the directory cache is a durable

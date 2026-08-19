@@ -41,6 +41,18 @@ effect is external and its result was not recorded, and an effect that commits
 with its own record cannot be killed in that window by construction. It would
 pass by not being the case under test.
 
+That reasoning is now enforced rather than merely written down:
+:class:`~claude_org_runtime.control_plane.outbox.HandlerRegistry` **refuses** a
+handler declaring ``'transactional_with_record'`` outright, because
+:class:`~claude_org_runtime.control_plane.outbox.Outbox` commits the action row
+before calling the handler and hands it no transaction to commit an effect
+inside. A handler could declare the mechanism and be admitted while the
+execution path could not possibly provide it -- which is the same undeclared-
+guarantee failure the registration check exists to prevent, arriving through the
+one branch that looks declared. The mechanism stays in the vocabulary, since it
+is ``ACCEPTANCE.md``'s and the DDL's rather than this module's; what is refused
+is claiming it here.
+
 *A human gate* (D-0004) was not chosen because for this action it would be
 false. The gate is for actions where **neither** mechanism is achievable, and
 the honesty the issue asks for cuts both ways: claiming a human gate for an
@@ -120,8 +132,21 @@ class NotifyDestinationHandler(ActionHandler):
     def destination(self) -> Destination:
         return self._destination
 
-    def apply(self, message: OutboxMessage, idempotency_key: str) -> DeliveryReceipt:
-        receipt = self._destination.apply(idempotency_key, message.payload)
+    def apply(
+        self,
+        message: OutboxMessage,
+        idempotency_key: str,
+        fencing_token: int | None = None,
+    ) -> DeliveryReceipt:
+        # The token is handed to the destination rather than checked here.
+        # Checking it on this side would prove nothing: the window it closes is
+        # the one where *this process* was paused past its lease, and a paused
+        # process cannot notice that it was paused. Only the counterparty is
+        # still running (ACCEPTANCE.md section 2: *external destinations must
+        # reject a stale token where they can enforce it*).
+        receipt = self._destination.apply(
+            idempotency_key, message.payload, fencing_token
+        )
         if receipt.payload_conflict:
             # The key is already bound to a different payload. The destination
             # applied nothing, which is right -- an idempotency key names an
@@ -160,7 +185,12 @@ class HumanGatedHandler(ActionHandler):
     action_kind = "human_gated"
     exactly_once_mechanism = "human_gate"
 
-    def apply(self, message: OutboxMessage, idempotency_key: str) -> DeliveryReceipt:
+    def apply(
+        self,
+        message: OutboxMessage,
+        idempotency_key: str,
+        fencing_token: int | None = None,
+    ) -> DeliveryReceipt:
         raise AssertionError(
             "a human-gated action is never applied automatically (D-0004); "
             "Outbox.attempt raises HumanGateRequired before reaching a handler"
