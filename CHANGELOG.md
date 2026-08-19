@@ -9,6 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S5 -- the spike SQLite schema slice** (D-0026 / D-0001 / D-0007, R3, Issue
+  #12). `src/claude_org_runtime/control_plane/spike_schema.sql` is the six-table
+  slice -- `run`, `session`, `lease`, `outbox`, `incident`, `action` -- that gate
+  items 2, 4, 5 and 6 need, and nothing they do not exercise. It is **not** the
+  full `Q-0001` DDL and does not aspire to be one.
+
+  **The marking is in the schema file, at the top, where the acceptance
+  criterion puts it**: this is a spike schema and **no migration path is
+  promised from it**. `schema.py` is the enforcement arm of that sentence rather
+  than a second copy of it -- a database at another `user_version` is *refused*,
+  never migrated, and `load_schema_sql()` refuses DDL whose marking has been
+  edited away. D-0026's failure mode is a spike schema becoming *the* schema by
+  inertia, and inertia is exactly what a working migration path would supply.
+
+  **What the schema deliberately does not encode.** `Q-0001` (per-item writer
+  assignment) and `Q-0002` (incident collapse semantics) stay open: no column,
+  CHECK or index anywhere names a component or a role, `incident.dedup_key` is
+  indexed but **not** unique so the increment-in-place rule is not forced, and a
+  nullable `related_incident_id` keeps the linked-incident rule expressible
+  without meaning "collapsed into". No re-notification window, reconcile
+  interval or time bucket appears in the file at all -- `Q-0003` has to settle
+  tolerable detection latency first. The tests parameterise the collapse rule
+  and run both branches, which is what `ACCEPTANCE.md` section 2 asks of every
+  downstream test until it is decided.
+
+  **`dedup_key` and `retry_count` are required and non-nullable on incidents**
+  (D-0007), and `retry_count` is monotonic on both `incident` and `outbox` by
+  trigger -- "restart-surviving, monotonically increasing" is a property a
+  recovery query has to be able to show, not a convention a handler remembers.
+
+  **State is reconstructable by query from SQLite alone** (D-0001).
+  `RECONSTRUCTION_QUERIES` holds the five recovery reads as data so they can be
+  run by hand against a database recovered from a crash, and `reconstruct()`
+  keeps nothing in the process: the suite proves it by writing state, dropping
+  the interpreter, and comparing what a **fresh subprocess** reads back. Item 2's
+  "exactly one session per run" is a partial unique index rather than a
+  check-then-insert, because a check-then-insert leaves precisely the window
+  item 2 injects into; the lease epoch is a fencing token that cannot go
+  backwards or be deleted away, and a protected write validates it inside the
+  write.
+
+  **Corrupt state is refused, not recovered as empty** (R3). An absent database,
+  a file that is not SQLite, a truncated one, a missing state table, a foreign
+  `application_id`, an unknown revision and a dangling foreign key are each a
+  typed refusal. Verification runs over a **read-only** connection, so a refused
+  database is left byte-identical -- no rollback journal, no recreated table, no
+  silently empty start.
+
+  Throwaway under D-0026, named explicitly by it, and it survives a C2 switch:
+  nothing in it is provider-shaped.
+
 - **S3 -- the stub `SessionProvider` over local child processes** (D-0020 /
   D-0026, Issue #11). `src/claude_org_runtime/session/stub_provider.py`
   implements every S1 verb with the standard library alone: a session is one

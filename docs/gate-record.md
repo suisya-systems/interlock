@@ -62,8 +62,8 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | 1 | Public CLI alone can start / read state / stop / resume | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#6`, `#7` — not yet landed | The spike (phases 1a/1b) |
 | 2 | Unique session↔run re-match across the crash window; no duplicate writer | `failed` on C1; `pending` on C2 | `n/a — failed` (C1); `pending` (C2) | `C1 (Agent View)` → `C2 (claude -p subprocesses)` | D-0027; `investigation/u1-session-id-bg-experiment.md`; `investigation/pre-spawn-fence-search.md`. C2 re-proof: `#18` (provider `#17`) — not yet landed | The spike (phase 6), on C2 |
 | 3 | Per-role permission / sandbox / hooks survive restart and fail closed | `discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#9`; `docs/per-role-fencing.md`; `src/claude_org_runtime/fencing/`; `tests/fencing/`; `investigation/i04-pretooluse-fence-probe.md` (U15, U35, U42). `#8` closed as **moot** under C2, not passed | The spike (phase 2b) |
-| 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `pending` | `pending` | `pending` | `#13`, `#14`, `#16` — not yet landed | The spike (phases 4–5) |
-| 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#13`, `#14`, `#15`, `#16` — not yet landed | The spike (phases 4–5) |
+| 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `pending` | `pending` | `pending` | `#12` (S5, the store the resume reads from) landed 2026-08-19; `#13`, `#14`, `#16` — not yet landed | The spike (phases 4–5) |
+| 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#12` (S5) landed 2026-08-19; `#13`, `#14`, `#15`, `#16` — not yet landed | The spike (phases 4–5) |
 | 6 | `MessageBus` delivers and resends independently of the UI | `pending` | `pending` | `pending` | `#19` — not yet landed | The spike (phase 7) |
 | 7 | Unsaved artifacts protected from the managed worktree lifecycle | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#7` — not yet landed | The spike (phase 1b) |
 | 8 | Secretary window responsiveness under worker load | `pending` rehearsal → **not discharged** | `pending` | `pending` | `#21` (rehearsal) — not yet landed | **Before the canary starts** (D-0022) |
@@ -108,7 +108,11 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
     claimed: anything outside §3.1 is *unsearched*, not *absent*.
   - D-0027 records the verdict, its falsification conditions, and the adoption of C2.
 - **Evidence (C2, pending):** `#18` proves single-writer re-identification across the crash window
-  on C2; `#17` builds the C2 provider it runs against. Neither has landed.
+  on C2; `#17` builds the C2 provider it runs against. Neither has landed. `#12` (S5) landed
+  2026-08-19 and supplies the durable half the proof is read out of — the session↔run binding is a
+  row in `session`, and *at most one active binding per run* is a partial unique index there rather
+  than a check-then-insert, since a check-then-insert leaves exactly the window this item injects
+  into. Landing the store proves nothing about the item: the kill matrix is `#18`'s.
 - **Residual — stated as what it is: the absence of a backstop, not a tolerated violation.**
   Under C2 the provider supplies **no exclusion**:
   - **U27 (negative)** — the `-p` `--session-id` refusal is *not atomic*. Inside an admission window
@@ -216,7 +220,12 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 - **Provider:** `pending` — a control-plane property; re-run for regression against a new provider,
   not redesigned (`ACCEPTANCE.md` §4).
 - **Evidence:** `#13` (lease/fencing token), `#14` (outbox), `#16` (the `ACCEPTANCE.md` §2 matrix as
-  an automated suite). Not yet landed.
+  an automated suite). Not yet landed. `#12` (S5) landed 2026-08-19:
+  `src/claude_org_runtime/control_plane/`, tests `tests/control_plane/`. It is the store this item
+  resumes *from* — the five recovery reads are `RECONSTRUCTION_QUERIES`, and the suite proves the
+  reconstruction is answerable by query alone by dropping the interpreter and re-reading it from a
+  fresh subprocess. Corrupt state is refused rather than recovered as empty (R3), so a damaged
+  database cannot present itself as "nothing was in flight".
 - **Residual:** none recorded yet. The known structural limit is stated in `ACCEPTANCE.md` §2:
   SQLite alone cannot distinguish a completed side effect from one that never started, so each
   action handler must **name** its exactly-once mechanism (destination idempotency key, or effect
@@ -383,7 +392,7 @@ anything.
 | S2 — the C2 `SessionProvider` | throwaway | `#17` |
 | S3 — the stub provider | throwaway | `#11` — landed 2026-08-19: `src/claude_org_runtime/session/stub_provider.py`, tests `tests/session/test_stub_provider.py`. Local child processes only: no Claude CLI, no network. Throwaway under D-0026, but it survives a C2 switch untouched |
 | S4 — the probe harnesses | throwaway | `#6`, `#7` |
-| **S5 — the spike SQLite schema** | **throwaway — named explicitly by D-0026** | `#12`; the file carries its own note that it is a spike schema and that **no migration path is promised from it**. `Q-0001` stays open and is not answered by inertia |
+| **S5 — the spike SQLite schema** | **throwaway — named explicitly by D-0026** | `#12` — landed 2026-08-19: `src/claude_org_runtime/control_plane/spike_schema.sql`, tests `tests/control_plane/`. The file carries its own note, at the top, that it is a spike schema and that **no migration path is promised from it**, and the loader refuses DDL whose marking has been removed. A database at another revision is **refused, never migrated**. `Q-0001` stays open and is not answered by inertia: no column, CHECK or index names a component or a role, and `Q-0002` stays open too — `dedup_key` is indexed but not unique, so neither collapse rule is forced |
 | S6 / S7 — lease and outbox implementations | throwaway (their tests are durable) | `#13`, `#14` |
 | S8 — `MessageBus` MCP endpoint | throwaway (the no-edge assertion is durable) | `#19` |
 | S10 — per-role fencing renderer, `PreToolUse` deny hook, breach-probe battery | throwaway implementation, durable tests | `#9`; implementation `src/claude_org_runtime/fencing/`, tests `tests/fencing/`. Landed 2026-08-18; nothing here is promoted by having discharged item 3 |
