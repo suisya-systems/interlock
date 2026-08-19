@@ -1,12 +1,52 @@
-"""S5 -- the spike SQLite schema slice, and the refusals that guard it.
+"""S5/S6 -- the spike control-plane store, and the exclusion that guards it.
 
 **Spike scaffold, throwaway by default (D-0026).** ``spike_schema.sql`` carries
 the marking in the file itself: it is a spike schema and **no migration path is
 promised from it**. Promotion into the real implementation takes a new ``D-``
 entry; being imported, being depended on by S6/S7, or having survived a gate run
 promotes nothing, and ``Q-0001`` stays open.
+
+:mod:`~claude_org_runtime.control_plane.lease` is S6 on top of it: the lease,
+and the fencing token every protected write validates **atomically as part of
+the write**. After the fence search it is the only exclusion in the system --
+the provider supplies none (U27, U32) -- so nothing here may be softened on the
+strength of a provider refusing a duplicate. See ``docs/lease-fencing.md``.
 """
 
+from .lease import (
+    DESTINATIONS,
+    EXACTLY_ONCE_MECHANISMS,
+    FENCE_SQL,
+    WRITE_HISTORY_QUERY,
+    Authority,
+    Claim,
+    ClockSkewRefused,
+    Destination,
+    DestinationRejectedStaleToken,
+    EpochGuardedDestination,
+    Lease,
+    LeaseHeld,
+    LeaseNotHeld,
+    LeaseRefusal,
+    LeaseUsageError,
+    ProtectedWrite,
+    ProtectedWriteMissed,
+    StaleWriterRefused,
+    UnfencedStatement,
+    acquire,
+    applied_epoch_regressions,
+    authority_timeline,
+    claimed_timeline,
+    epoch_regressions,
+    fenced_insert,
+    fenced_update,
+    overlapping_claims,
+    protected_write,
+    read_lease,
+    release,
+    renew,
+    write_history,
+)
 from .schema import (
     APPLICATION_ID,
     RECONSTRUCTION_QUERIES,
@@ -26,17 +66,49 @@ from .schema import (
 
 __all__ = [
     "APPLICATION_ID",
+    "DESTINATIONS",
+    "EXACTLY_ONCE_MECHANISMS",
+    "FENCE_SQL",
     "RECONSTRUCTION_QUERIES",
     "SCHEMA_REVISION",
     "SPIKE_MARKING",
     "SPIKE_SCHEMA_PATH",
     "STATE_TABLES",
+    "WRITE_HISTORY_QUERY",
+    "Authority",
+    "Claim",
+    "ClockSkewRefused",
     "ControlPlaneRefusal",
     "ControlPlaneState",
     "CorruptStateRefused",
+    "Destination",
+    "DestinationRejectedStaleToken",
+    "EpochGuardedDestination",
+    "Lease",
+    "LeaseHeld",
+    "LeaseNotHeld",
+    "LeaseRefusal",
+    "LeaseUsageError",
     "MissingStateRefused",
+    "ProtectedWrite",
+    "ProtectedWriteMissed",
+    "StaleWriterRefused",
+    "UnfencedStatement",
+    "acquire",
+    "applied_epoch_regressions",
+    "authority_timeline",
+    "claimed_timeline",
     "create_control_plane",
+    "epoch_regressions",
+    "fenced_insert",
+    "fenced_update",
     "load_schema_sql",
     "open_control_plane",
+    "overlapping_claims",
+    "protected_write",
+    "read_lease",
     "reconstruct",
+    "release",
+    "renew",
+    "write_history",
 ]
