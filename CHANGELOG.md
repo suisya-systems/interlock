@@ -24,7 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **The gate is the contract's, not each implementation's.** `start()` is
   concrete: it runs the precondition and then delegates to the abstract
   `_start_session()`, and a subclass that overrides `start()` or
-  `require_spawnable()` is refused at class-definition time. An implementation
+  `require_spawnable()` is refused at class-definition time -- checked against
+  the method the completed MRO resolves, since `class P(StartMixin,
+  SessionProvider)` puts no `start` in `P.__dict__` while the mixin's is the
+  one that runs. An implementation
   that forgot to call the check would have spawned against an unchecked
   provider while passing every happy-path test.
 

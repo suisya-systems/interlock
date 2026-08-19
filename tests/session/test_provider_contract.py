@@ -361,6 +361,15 @@ def test_a_subclass_cannot_override_the_gate_away(gate):
         type("_Ungated", (_Provider,), {gate: lambda self, *a, **k: None})
 
 
+@pytest.mark.parametrize("gate", ["start", "require_spawnable"])
+def test_a_mixin_earlier_in_the_mro_cannot_override_the_gate_away(gate):
+    """The bypass is invisible in cls.__dict__, so the check follows the MRO."""
+
+    mixin = type("_Mixin", (), {gate: lambda self, *a, **k: "ungated"})
+    with pytest.raises(s1.ContractViolation):
+        type("_Bypassing", (mixin, _Provider), {})
+
+
 @pytest.mark.parametrize(
     "bogus",
     [

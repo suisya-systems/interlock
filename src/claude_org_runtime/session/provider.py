@@ -593,14 +593,26 @@ class SessionProvider(ABC):
         rather than caught in review, because the failure is silent at runtime:
         such a provider behaves correctly in every test that does not
         deliberately break the probe.
+
+        The check is on the method the **completed MRO resolves**, not on
+        ``cls.__dict__``. ``class P(StartMixin, SessionProvider)`` puts no
+        ``start`` in ``P.__dict__`` at all, yet the mixin's ``start`` is the one
+        that runs -- so a dict-only check would wave through the very bypass it
+        exists to stop, and this one was found by executing it rather than by
+        reading the code.
         """
 
         super().__init_subclass__(**kwargs)
         for gate in ("start", "require_spawnable"):
-            if gate in cls.__dict__:
+            canonical = SessionProvider.__dict__[gate]
+            resolved = getattr(cls, gate, None)
+            resolved = getattr(resolved, "__func__", resolved)
+            if resolved is not canonical:
                 raise ContractViolation(
-                    f"{cls.__name__} overrides {gate}(), which carries the "
-                    "fail-closed spawn precondition (D-0010). Implement "
+                    f"{cls.__name__} resolves {gate}() to {resolved!r} rather "
+                    "than the one carrying the fail-closed spawn precondition "
+                    "(D-0010) -- whether by overriding it directly or by "
+                    "inheriting an override earlier in the MRO. Implement "
                     "_start_session() instead."
                 )
 
