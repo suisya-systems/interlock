@@ -336,11 +336,20 @@ class SpawnRefused(RuntimeError):
 def check_spawn_precondition(probe: ProviderResult[CapabilityReport] | None) -> CapabilityReport:
     """Refuse a new spawn unless the probe positively says the provider is usable.
 
-    Fail closed means the *absence* of a good answer refuses, so all three of
-    these refuse: never probed (``None``), a probe that failed, and a probe
-    that succeeded but reports something required as missing. Only the fourth
-    case -- a successful probe with nothing missing -- returns, and it returns
-    the report so the caller records which build it committed to.
+    Fail closed means the *absence* of a good answer refuses, so every one of
+    these refuses: never probed (``None``), a probe that failed, a probe whose
+    result is not one of this interface's two result types, one carrying
+    something that is not a :class:`CapabilityReport`, and one that is a report
+    but reports something required as missing. Only the last case -- a real
+    report with nothing missing -- returns, and it returns the report so the
+    caller records which build it committed to.
+
+    The type checks are not belt-and-braces. Annotations are not enforced at
+    runtime, so without them a duck-typed object whose ``compatible`` happens
+    to be true would spawn, and a malformed result would raise
+    ``AttributeError`` -- an exception the caller is not told to expect and may
+    handle as an ordinary error. Both are ways for the one precondition D-0010
+    puts in the way of a spawn to be stepped over silently.
 
     Raises:
         SpawnRefused: in every case except a compatible report.
@@ -355,7 +364,17 @@ def check_spawn_precondition(probe: ProviderResult[CapabilityReport] | None) -> 
         raise SpawnRefused(
             f"capability probe failed ({probe.kind.value}): {probe.detail}"
         )
+    if not isinstance(probe, Ok):
+        raise SpawnRefused(
+            f"capability probe returned {probe!r}, which is neither Ok nor "
+            "Failure; an uninterpretable probe refuses the spawn"
+        )
     report = probe.value
+    if not isinstance(report, CapabilityReport):
+        raise SpawnRefused(
+            f"capability probe returned Ok({report!r}), which is not a "
+            "CapabilityReport; a spawn is refused rather than trusting it"
+        )
     if not report.compatible:
         raise SpawnRefused(
             f"provider {report.provider_version!r} is missing required "
@@ -509,8 +528,11 @@ DELIVERY_ABSENCE_IS_DELIBERATE = (
     "precisely that no such edge exists."
 )
 
-#: D-0009's five verbs, mapped to the method that renders each one. The mapping
-#: is data so that "exactly these five, no more" can be asserted mechanically.
+#: D-0009's five verbs, mapped to the public method that renders each one. The
+#: mapping is data so that "exactly these five, no more" can be asserted
+#: mechanically. ``start`` is public but not abstract: it carries the
+#: fail-closed gate and delegates to the abstract ``_start_session``, which is
+#: the half an implementation writes (see :data:`VERB_IMPLEMENTATION_HOOKS`).
 D0009_VERBS = {
     "start": "start",
     "list": "list_sessions",
@@ -518,6 +540,10 @@ D0009_VERBS = {
     "stop": "stop",
     "resume": "resume",
 }
+
+#: The method a subclass implements for each verb. Identical to
+#: :data:`D0009_VERBS` except for ``start``, whose public half is the gate.
+VERB_IMPLEMENTATION_HOOKS = dict(D0009_VERBS, start="_start_session")
 
 
 # --------------------------------------------------------------------------
@@ -551,6 +577,27 @@ class SessionProvider(ABC):
     def __init__(self) -> None:
         self._workspace_observers = []
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Refuse a subclass that overrides a gate rather than implementing it.
+
+        :meth:`start` carries the fail-closed spawn precondition (D-0010) and
+        :meth:`require_spawnable` carries the check itself; a provider that
+        replaces either has removed the precondition while still presenting as
+        a ``SessionProvider``. Overriding is refused at class-definition time
+        rather than caught in review, because the failure is silent at runtime:
+        such a provider behaves correctly in every test that does not
+        deliberately break the probe.
+        """
+
+        super().__init_subclass__(**kwargs)
+        for gate in ("start", "require_spawnable"):
+            if gate in cls.__dict__:
+                raise ContractViolation(
+                    f"{cls.__name__} overrides {gate}(), which carries the "
+                    "fail-closed spawn precondition (D-0010). Implement "
+                    "_start_session() instead."
+                )
+
     # -- the capability probe and its precondition (D-0010) ----------------
 
     @abstractmethod
@@ -579,15 +626,42 @@ class SessionProvider(ABC):
 
     # -- the five verbs (D-0009) -------------------------------------------
 
-    @abstractmethod
     def start(self, request: StartRequest) -> ProviderResult[SessionReadout]:
-        """Start one top-level worker session.
+        """Start one top-level worker session. **The verb, and the gate.**
 
-        Implementations must gate this on :meth:`require_spawnable` before the
-        provider is asked to create anything (D-0010). A successful start
-        returns the readout the provider gives for the session it just created,
-        which may legitimately be :attr:`Observation.COULD_NOT_OBSERVE` -- a
-        session can exist before it has said anything about itself.
+        This method is deliberately *not* the one implementations write. It
+        runs :meth:`require_spawnable` first and only then delegates to
+        :meth:`_start_session`, so that the provider is never asked to create
+        anything on an unprobed, unreachable or incompatible backend (D-0010).
+
+        Making it a helper an implementation is asked to call would have made
+        fail-closed a property of each implementation's diligence, which is
+        exactly what it must not be: the one implementation that forgets is the
+        one that spawns against a provider nobody has checked, and it would
+        pass every test that only exercises the happy path.
+        :meth:`__init_subclass__` refuses a subclass that overrides this
+        method, so the gate cannot be removed by accident either.
+
+        A successful start returns the readout the provider gives for the
+        session it just created, which may legitimately be
+        :attr:`Observation.COULD_NOT_OBSERVE` -- a session can exist before it
+        has said anything about itself.
+
+        Raises:
+            SpawnRefused: before the provider is asked to create anything.
+        """
+
+        self.require_spawnable()
+        return self._start_session(request)
+
+    @abstractmethod
+    def _start_session(self, request: StartRequest) -> ProviderResult[SessionReadout]:
+        """Create the session. Called by :meth:`start` **after** the gate passes.
+
+        This is the ``start`` verb's implementation half. It may assume the
+        capability probe has just succeeded, and must not be called directly by
+        anything outside this class -- calling it directly is how a caller
+        would spawn past the precondition.
         """
 
     @abstractmethod

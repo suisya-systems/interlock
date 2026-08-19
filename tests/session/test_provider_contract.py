@@ -100,16 +100,22 @@ def test_no_delivery_verb_and_the_absence_is_documented():
     assert "D-0009" in s1.DELIVERY_ABSENCE_IS_DELIBERATE
 
 
-def test_exactly_the_five_d0009_verbs_are_abstract():
-    """Five verbs and no sixth; the probe is a precondition, not a verb."""
+def test_exactly_the_five_d0009_verbs_and_no_sixth():
+    """Five verbs, the probe as a precondition, and nothing else to implement."""
+
+    assert len(s1.D0009_VERBS) == 5
+    for verb, method in s1.D0009_VERBS.items():
+        assert callable(getattr(s1.SessionProvider, method)), verb
+        assert getattr(s1.SessionProvider, method).__doc__, f"{method} has no docstring"
 
     abstract = set(s1.SessionProvider.__abstractmethods__)
-    verbs = set(s1.D0009_VERBS.values())
-    assert len(s1.D0009_VERBS) == 5
-    assert verbs <= abstract
-    assert abstract - verbs == {"probe_capabilities"}
-    for method in verbs | {"probe_capabilities"}:
-        assert getattr(s1.SessionProvider, method).__doc__, f"{method} has no docstring"
+    hooks = set(s1.VERB_IMPLEMENTATION_HOOKS.values())
+    assert hooks <= abstract
+    assert abstract - hooks == {"probe_capabilities"}
+    assert s1.SessionProvider.probe_capabilities.__doc__
+    # start is the one verb whose public half is concrete: it is the gate.
+    assert "start" not in abstract
+    assert s1.VERB_IMPLEMENTATION_HOOKS["start"] == "_start_session"
 
 
 def test_three_capabilities_each_have_a_named_owner():
@@ -245,8 +251,19 @@ class _Provider(s1.SessionProvider):
     def probe_capabilities(self):
         return self._probe_result
 
-    def start(self, request):  # pragma: no cover - not exercised here
-        raise NotImplementedError
+    #: Set by :meth:`_start_session` so a test can tell whether the provider was
+    #: ever asked to create anything.
+    started = False
+
+    def _start_session(self, request):
+        type(self).started = True
+        return s1.Ok(
+            s1.SessionReadout(
+                session_id=request.session_id,
+                observation=s1.Observation.COULD_NOT_OBSERVE,
+                could_not_observe_reason="just created, nothing emitted yet",
+            )
+        )
 
     def list_sessions(self):  # pragma: no cover - not exercised here
         raise NotImplementedError
@@ -313,3 +330,56 @@ def test_a_broken_observer_vetoes_rather_than_letting_the_transition_through(bad
     decision = provider.evaluate_workspace_transition(_transition())
     assert decision.verdict is s1.WorkspaceVerdict.VETO
     assert decision.reason
+
+
+def test_start_is_gated_by_the_base_class_not_by_the_implementation():
+    """The provider is never asked to create anything on an unusable backend."""
+
+    class _Refusing(_Provider):
+        started = False
+
+    provider = _Refusing(s1.Failure(s1.FailureKind.BACKEND_UNREACHABLE, "CLI not found"))
+    with pytest.raises(s1.SpawnRefused):
+        provider.start(s1.StartRequest(session_id="s-1", workspace="/w", role="worker"))
+    assert _Refusing.started is False, "the spawn happened despite a failed probe"
+
+    class _Usable(_Provider):
+        started = False
+
+    result = _Usable(s1.Ok(_report())).start(
+        s1.StartRequest(session_id="s-1", workspace="/w", role="worker")
+    )
+    assert _Usable.started is True
+    assert isinstance(result, s1.Ok)
+
+
+@pytest.mark.parametrize("gate", ["start", "require_spawnable"])
+def test_a_subclass_cannot_override_the_gate_away(gate):
+    """Removing the precondition is refused at class-definition time."""
+
+    with pytest.raises(s1.ContractViolation):
+        type("_Ungated", (_Provider,), {gate: lambda self, *a, **k: None})
+
+
+@pytest.mark.parametrize(
+    "bogus",
+    [
+        "not a result at all",
+        object(),
+    ],
+)
+def test_a_probe_result_that_is_neither_ok_nor_failure_refuses_the_spawn(bogus):
+    with pytest.raises(s1.SpawnRefused):
+        s1.check_spawn_precondition(bogus)
+
+
+def test_an_ok_carrying_something_that_is_not_a_report_refuses_the_spawn():
+    """A duck-typed stand-in must not spawn just because it says it is compatible."""
+
+    class _LooksCompatible:
+        compatible = True
+        missing = frozenset()
+        provider_version = "impostor 1.0"
+
+    with pytest.raises(s1.SpawnRefused):
+        s1.check_spawn_precondition(s1.Ok(_LooksCompatible()))

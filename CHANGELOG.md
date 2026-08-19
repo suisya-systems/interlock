@@ -17,7 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typed result that **cannot be constructed empty** in either direction (R4),
   and a capability / version probe wired to a **fail-closed spawn
   precondition** (D-0010) that refuses on an unprobed provider just as it
-  refuses on an incompatible one.
+  refuses on an incompatible one -- and on a probe result that is not one of
+  this interface's own result types, since a duck-typed stand-in whose
+  `compatible` happens to be true would otherwise spawn.
+
+  **The gate is the contract's, not each implementation's.** `start()` is
+  concrete: it runs the precondition and then delegates to the abstract
+  `_start_session()`, and a subclass that overrides `start()` or
+  `require_spawnable()` is refused at class-definition time. An implementation
+  that forgot to call the check would have spawned against an unchecked
+  provider while passing every happy-path test.
 
   **The file says of itself that it is provisional** (D-0021): it is spike
   scaffold, and promotion to a settled contract requires a later `D-` entry --
