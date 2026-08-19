@@ -107,7 +107,11 @@ CREATE TABLE session (
     CHECK (length(session_id) > 0),
     CHECK (observation IN ('observed', 'unobserved')),
     -- an observed readout carries a state word; an unobserved one carries a
-    -- reason instead. Neither may be constructed empty (R4).
+    -- reason instead. Neither may be constructed empty (R4) -- and an empty
+    -- string is as empty as a NULL: a reason of '' is the v1 collapse of
+    -- "could not observe" into "nothing to say" wearing a different type.
+    CHECK (provider_state IS NULL OR length(provider_state) > 0),
+    CHECK (observation_reason IS NULL OR length(observation_reason) > 0),
     CHECK ((observation = 'observed')   = (provider_state IS NOT NULL)),
     CHECK ((observation = 'unobserved') = (observation_reason IS NOT NULL)),
     CHECK (released_at_ms IS NULL OR released_at_ms >= bound_at_ms)
@@ -231,6 +235,34 @@ BEFORE UPDATE OF retry_count ON outbox
 WHEN NEW.retry_count < OLD.retry_count
 BEGIN
     SELECT RAISE(ABORT, 'outbox retry_count must not decrease');
+END;
+
+-- The status CHECKs constrain the row that results, not the step that got
+-- there, so without these an UPDATE could walk the lifecycle backwards and
+-- erase the delivery evidence items 5 and 6 are read out of.
+CREATE TRIGGER outbox_status_is_forward_only
+BEFORE UPDATE OF status ON outbox
+WHEN (CASE NEW.status WHEN 'pending' THEN 0 WHEN 'delivered' THEN 1 ELSE 2 END)
+   < (CASE OLD.status WHEN 'pending' THEN 0 WHEN 'delivered' THEN 1 ELSE 2 END)
+BEGIN
+    SELECT RAISE(ABORT, 'outbox status walks pending -> delivered -> acked, never back');
+END;
+
+CREATE TRIGGER outbox_delivery_is_set_once
+BEFORE UPDATE ON outbox
+WHEN OLD.delivered_at_ms IS NOT NULL
+ AND (NEW.delivered_at_ms IS NULL OR NEW.delivered_at_ms <> OLD.delivered_at_ms)
+BEGIN
+    SELECT RAISE(ABORT, 'a delivered message is delivered once');
+END;
+
+-- A resend is a new attempt on the same message identity, so the identity a
+-- delivery was deduplicated under may not be rewritten under a live row.
+CREATE TRIGGER outbox_dedup_key_is_frozen
+BEFORE UPDATE OF dedup_key ON outbox
+WHEN NEW.dedup_key <> OLD.dedup_key
+BEGIN
+    SELECT RAISE(ABORT, 'an outbox row keeps the dedup key it was enqueued with');
 END;
 
 CREATE TRIGGER outbox_ack_is_set_once
@@ -369,6 +401,7 @@ CREATE TABLE action (
     )),
     CHECK (status IN ('pending', 'applied', 'refused')),
     CHECK ((status = 'applied') = (applied_at_ms IS NOT NULL)),
+    CHECK (refusal_reason IS NULL OR length(refusal_reason) > 0),
     CHECK ((status = 'refused') = (refusal_reason IS NOT NULL)),
     CHECK (writer_epoch IS NULL OR writer_epoch > 0),
     CHECK (applied_at_ms IS NULL OR applied_at_ms >= created_at_ms)
@@ -380,6 +413,29 @@ CREATE TABLE action (
 -- second effect.
 CREATE UNIQUE INDEX action_one_effect_per_key
     ON action(idempotency_key) WHERE status <> 'refused';
+
+-- Finding the key unique among *current* values is not the same as one effect
+-- per key: rewriting an applied action's key vacates it, and the next writer
+-- takes it as though nothing had happened. The key is frozen for the row's
+-- lifetime, which is what makes the unique index durable evidence rather than
+-- a snapshot.
+CREATE TRIGGER action_idempotency_key_is_frozen
+BEFORE UPDATE OF idempotency_key ON action
+WHEN NEW.idempotency_key <> OLD.idempotency_key
+BEGIN
+    SELECT RAISE(ABORT, 'an action keeps the idempotency key it was recorded with');
+END;
+
+-- A refusal is durable evidence that a writer was rejected (ACCEPTANCE.md
+-- section 2). A refused row that can be moved back to 'pending' is a rejected
+-- attempt that becomes executable again -- and the record of the rejection
+-- disappears in the same statement.
+CREATE TRIGGER action_refusal_is_terminal
+BEFORE UPDATE OF status ON action
+WHEN OLD.status = 'refused' AND NEW.status <> 'refused'
+BEGIN
+    SELECT RAISE(ABORT, 'a refused action stays refused; record a new attempt instead');
+END;
 
 CREATE TRIGGER action_apply_is_set_once
 BEFORE UPDATE ON action

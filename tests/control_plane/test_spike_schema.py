@@ -792,3 +792,130 @@ def test_an_opened_connection_enforces_foreign_keys(cp, db_path):
         assert reopened.execute("PRAGMA foreign_keys").fetchone() == (1,)
     finally:
         reopened.close()
+
+
+# --------------------------------------------------------------------------
+# durable evidence cannot be edited away (round-1 self-review)
+# --------------------------------------------------------------------------
+
+
+def test_an_action_keeps_the_idempotency_key_it_was_recorded_with(cp):
+    # A key unique among *current* values is a snapshot, not evidence: rewriting
+    # an applied action's key vacates it, and the next writer takes the original
+    # key as though the first effect had never happened.
+    add_run(cp)
+    add_action(cp, "act-1", idempotency_key="ik-1", status="applied", applied_at_ms=T0 + 1)
+
+    with pytest.raises(sqlite3.IntegrityError, match="keeps the idempotency key"):
+        cp.execute("UPDATE action SET idempotency_key = 'ik-2' WHERE action_id = 'act-1'")
+    with pytest.raises(sqlite3.IntegrityError):
+        add_action(cp, "act-2", idempotency_key="ik-1")
+
+
+def test_a_refused_action_stays_refused(cp):
+    add_run(cp)
+    add_action(cp, status="refused", refusal_reason="stale fencing token")
+
+    with pytest.raises(sqlite3.IntegrityError, match="stays refused"):
+        cp.execute(
+            "UPDATE action SET status = 'pending', refusal_reason = NULL WHERE action_id = 'act-1'"
+        )
+    assert cp.execute("SELECT status, refusal_reason FROM action").fetchall() == [
+        ("refused", "stale fencing token")
+    ]
+
+
+def test_the_outbox_lifecycle_does_not_walk_backwards(cp):
+    add_run(cp)
+    add_outbox(cp)
+    cp.execute(
+        "UPDATE outbox SET status = 'delivered', delivered_at_ms = ? WHERE message_id = 'msg-1'",
+        (T0 + 1,),
+    )
+
+    # Whichever guard fires first -- the forward-only status trigger or the
+    # set-once delivery instant -- the row does not walk back. A status
+    # regression that leaves delivered_at_ms alone is refused by the CHECK
+    # instead, so every route out of 'delivered' is closed.
+    with pytest.raises(sqlite3.IntegrityError):
+        cp.execute(
+            "UPDATE outbox SET status = 'pending', delivered_at_ms = NULL"
+            " WHERE message_id = 'msg-1'"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        cp.execute("UPDATE outbox SET status = 'pending' WHERE message_id = 'msg-1'")
+    with pytest.raises(sqlite3.IntegrityError, match="delivered once"):
+        cp.execute("UPDATE outbox SET delivered_at_ms = ? WHERE message_id = 'msg-1'", (T0 + 9,))
+    with pytest.raises(sqlite3.IntegrityError, match="keeps the dedup key"):
+        cp.execute("UPDATE outbox SET dedup_key = 'dk-other' WHERE message_id = 'msg-1'")
+
+    assert cp.execute("SELECT status, delivered_at_ms, dedup_key FROM outbox").fetchall() == [
+        ("delivered", T0 + 1, "dk-1")
+    ]
+
+
+def test_an_empty_reason_is_as_empty_as_a_missing_one(cp):
+    # R4 is about the *distinction* surviving, and '' erases it exactly as NULL
+    # would -- with the added harm that a CHECK written against NULL says it did
+    # not.
+    add_run(cp)
+    with pytest.raises(sqlite3.IntegrityError):
+        add_session(cp, "sess-1", observation="unobserved", provider_state=None,
+                    observation_reason="")
+    with pytest.raises(sqlite3.IntegrityError):
+        add_session(cp, "sess-2", observation="observed", provider_state="")
+    with pytest.raises(sqlite3.IntegrityError):
+        add_action(cp, status="refused", refusal_reason="")
+
+
+# --------------------------------------------------------------------------
+# the shape of the schema is verified, not just the names (round-1 self-review)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "DROP INDEX session_one_active_binding_per_run",
+        "DROP INDEX action_one_effect_per_key",
+        "DROP TRIGGER lease_epoch_is_monotonic",
+        "DROP TRIGGER outbox_ack_is_set_once",
+    ],
+)
+def test_a_database_that_lost_a_constraint_is_refused(cp, db_path, damage):
+    # integrity_check answers "are the pages readable", not "is this the schema
+    # you wrote". A database missing an index or a trigger passes it and then
+    # permits exactly what the lost constraint forbade -- silently, and only at
+    # the moment it matters.
+    cp.commit()
+    cp.execute(damage)
+    cp.commit()
+    cp.close()
+
+    with pytest.raises(CorruptStateRefused, match="schema"):
+        open_control_plane(db_path)
+
+
+def test_the_expected_fingerprint_is_derived_from_the_ddl_not_pinned_beside_it(cp):
+    assert s5._schema_fingerprint(cp) == s5.expected_schema_fingerprint()
+
+
+def test_a_creation_that_loses_a_race_does_not_delete_the_winners_database(cp, db_path, monkeypatch):
+    # Two processes creating the same absent path both pass an exists() check;
+    # the loser's CREATE TABLE then fails against the winner's database, and a
+    # cleanup that trusts "I was creating it" deletes a live database. The claim
+    # is atomic instead, so the loser never reaches the cleanup.
+    add_run(cp)
+    cp.commit()
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+
+    with pytest.raises(ControlPlaneRefusal, match="already exists"):
+        create_control_plane(db_path)
+
+    monkeypatch.undo()
+    assert db_path.exists()
+    survivor = open_control_plane(db_path)
+    try:
+        assert survivor.execute("SELECT count(*) FROM run").fetchone() == (1,)
+    finally:
+        survivor.close()

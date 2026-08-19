@@ -57,6 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database is left byte-identical -- no rollback journal, no recreated table, no
   silently empty start.
 
+  **Durable evidence cannot be edited away, and the schema's own shape is
+  verified.** An action's `idempotency_key` is frozen for the row's lifetime (a
+  key unique among *current* values is a snapshot, not evidence: rewriting it
+  vacates the key for the next writer), a refused action stays refused, and the
+  outbox lifecycle walks `pending -> delivered -> acked` and never back. On
+  open, the stored DDL of every table, index, trigger and CHECK is compared
+  against a database freshly built from the current schema file --
+  `integrity_check` passes on a database that has lost a constraint, and a lost
+  constraint is only noticed at the moment it would have mattered. An empty
+  string is treated as empty as a NULL wherever R4's distinction depends on it.
+  Creation claims its path with `O_EXCL`, so a process that loses a creation
+  race cannot delete the winner's database.
+
   Throwaway under D-0026, named explicitly by it, and it survives a C2 switch:
   nothing in it is provider-shaped.
 

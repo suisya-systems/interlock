@@ -36,6 +36,8 @@ from a crash.
 
 from __future__ import annotations
 
+import hashlib
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +55,7 @@ __all__ = [
     "CorruptStateRefused",
     "MissingStateRefused",
     "create_control_plane",
+    "expected_schema_fingerprint",
     "load_schema_sql",
     "open_control_plane",
     "reconstruct",
@@ -211,13 +214,22 @@ def create_control_plane(path: str | Path) -> sqlite3.Connection:
     """
 
     target = Path(path)
-    if target.exists():
+    sql = load_schema_sql()
+
+    # Claim the path with O_EXCL rather than by asking whether it exists: two
+    # processes racing to create the same database would both pass an exists()
+    # check, and the loser -- whose CREATE TABLE fails against the winner's
+    # database -- would then unlink a database that was already in use. With
+    # the claim atomic, only the process that actually created the file can
+    # reach the cleanup below.
+    try:
+        os.close(os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError as error:
         raise ControlPlaneRefusal(
             f"{target} already exists; refusing to create over it "
             "(open_control_plane opens an existing database)"
-        )
+        ) from error
 
-    sql = load_schema_sql()
     connection = sqlite3.connect(target)
     try:
         connection.executescript(sql)
@@ -343,12 +355,58 @@ def _verify(target: Path, connection: sqlite3.Connection) -> None:
             "that lost a table is corrupt, not empty (R3)"
         )
 
+    fingerprint = _schema_fingerprint(connection)
+    if fingerprint != expected_schema_fingerprint():
+        raise CorruptStateRefused(
+            f"{target} does not carry this build's schema: a table, column, "
+            "index, trigger or CHECK differs. integrity_check passes on a "
+            "database that has lost a constraint, so the shape is compared "
+            "outright -- and D-0026 promises no migration path, so the answer "
+            "is refusal rather than repair"
+        )
+
     violations = connection.execute("PRAGMA foreign_key_check").fetchall()
     if violations:
         raise CorruptStateRefused(
             f"{target} has {len(violations)} dangling foreign key reference(s); "
             "refusing rather than reading partial state"
         )
+
+
+def expected_schema_fingerprint() -> str:
+    """The fingerprint of a database freshly built from the current DDL.
+
+    Derived by building the schema in memory rather than by keeping a constant
+    beside the file, so the two cannot drift: a schema edit changes the expected
+    fingerprint by construction, and every existing database is refused the
+    moment the DDL changes shape -- which is what "no migration path" means in
+    practice (D-0026).
+    """
+
+    scratch = sqlite3.connect(":memory:")
+    try:
+        scratch.executescript(load_schema_sql())
+        return _schema_fingerprint(scratch)
+    finally:
+        scratch.close()
+
+
+def _schema_fingerprint(connection: sqlite3.Connection) -> str:
+    """A digest over every schema object's own DDL text.
+
+    ``PRAGMA integrity_check`` answers "are the pages readable?", not "is this
+    the schema you wrote?" -- a database that has lost an index, a trigger or a
+    CHECK passes it and then quietly permits what the lost constraint forbade.
+    Names alone are not enough for the same reason, so the comparison is over
+    the stored DDL of every object.
+    """
+
+    rows = connection.execute(
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+    ).fetchall()
+    payload = "\n".join(f"{kind}\t{name}\t{sql or ''}" for kind, name, sql in rows)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _configure(connection: sqlite3.Connection) -> None:
