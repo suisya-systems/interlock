@@ -321,3 +321,65 @@ def test_the_announce_delay_is_passed_to_the_child_by_environment(tmp_path: Path
     )
     readout = _wait_until_observed(provider, "s-1")
     assert readout.provider_state == "7"
+
+
+# -- the state files the readout depends on ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "session_id", ["../escape", "/absolute", "nested/id", "..", r"back\slash"]
+)
+def test_a_session_id_that_is_not_one_file_name_is_refused(
+    tmp_path: Path, provider, session_id: str
+):
+    """The id names a state file, so it may not pick a file outside the root."""
+
+    victim = tmp_path / "escape.state"
+    victim.write_text("do not touch", encoding="utf-8")
+
+    result = provider.start(_request(tmp_path, session_id))
+    assert isinstance(result, s1.Failure)
+    assert result.kind is s1.FailureKind.REFUSED_BY_PROVIDER
+    assert victim.read_text(encoding="utf-8") == "do not touch"
+    assert provider.list_sessions().value == ()
+
+
+def test_a_relative_state_root_still_observes_its_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The child runs with the workspace as cwd, so the root must be absolute."""
+
+    monkeypatch.chdir(tmp_path)
+    instance = LocalProcessSessionProvider("state")
+    try:
+        assert isinstance(instance.start(_request(tmp_path)), s1.Ok)
+        assert _wait_until_observed(instance, "s-1").provider_state == DEFAULT_CHILD_STATE
+    finally:
+        instance.stop("s-1")
+
+
+def test_an_unusable_state_root_is_a_failure_not_an_exception(tmp_path: Path):
+    """Ordinary provider-side trouble is returned, never raised at the caller."""
+
+    blocked = tmp_path / "state"
+    blocked.write_text("not a directory", encoding="utf-8")
+    instance = LocalProcessSessionProvider(blocked)
+
+    result = instance.start(_request(tmp_path))
+    assert isinstance(result, s1.Failure)
+    assert result.kind is s1.FailureKind.REFUSED_BY_PROVIDER
+    assert instance.list_sessions().value == ()
+
+
+def test_reading_an_exited_session_releases_its_child_pipe(tmp_path: Path, provider):
+    """A child that exits on its own is never handed to stop()."""
+
+    provider.start(_request(tmp_path, command=[sys.executable, "-c", "pass"]))
+    deadline = time.monotonic() + 10.0
+    while provider.read_state("s-1").value.observation is s1.Observation.COULD_NOT_OBSERVE:
+        assert time.monotonic() < deadline, "child never exited"
+        time.sleep(0.02)
+
+    readout = provider.read_state("s-1").value
+    assert readout.provider_state == "exited-0"
+    assert provider._sessions["s-1"].process.stdin.closed

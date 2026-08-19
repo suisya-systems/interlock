@@ -96,6 +96,21 @@ _DEFAULT_CHILD_PROGRAM = (
 CREATE_WORKSPACE = "create-workspace"
 
 
+def _is_one_path_component(session_id: str) -> bool:
+    """True when the id names a file and cannot reach out of a directory.
+
+    A session id is the caller's to choose (S1), and this provider turns it
+    into a file name, so an id carrying a separator or a parent reference would
+    let a caller pick which file the provider deletes and rewrites. Checked
+    against both platforms' separators rather than the running one, so a
+    traversal an id would perform on Windows is refused on Linux too.
+    """
+
+    return bool(session_id) and session_id not in {".", ".."} and not any(
+        character in session_id for character in ("/", "\\", os.sep, os.altsep or "/")
+    )
+
+
 @dataclass
 class _Session:
     """One started session: the request that asked for it, and its child."""
@@ -130,7 +145,11 @@ class LocalProcessSessionProvider(SessionProvider):
         stop_timeout: float = 5.0,
     ) -> None:
         super().__init__()
-        self._state_root = Path(state_root)
+        # Resolved, because the child is started with its workspace as cwd:
+        # a relative root would name one directory to this process and a
+        # different one to the child, and every session would then look
+        # permanently unobservable for a reason nothing reports.
+        self._state_root = Path(state_root).resolve()
         self._python = python_executable
         self._stop_timeout = stop_timeout
         self._sessions: dict[str, _Session] = {}
@@ -194,6 +213,13 @@ class LocalProcessSessionProvider(SessionProvider):
     def _start_session(self, request: StartRequest) -> ProviderResult[SessionReadout]:
         """Spawn one child. Called by ``start`` only after the gate passes."""
 
+        if not _is_one_path_component(request.session_id):
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"session id {request.session_id!r} is not usable as a single "
+                "file name; this provider names a state file after the session "
+                "and will not let an id reach outside its state root",
+            )
         if request.session_id in self._sessions:
             return Failure(
                 FailureKind.REFUSED_BY_PROVIDER,
@@ -207,11 +233,19 @@ class LocalProcessSessionProvider(SessionProvider):
             if refusal is not None:
                 return refusal
 
-        self._state_root.mkdir(parents=True, exist_ok=True)
         state_file = self._state_file(request.session_id)
-        # A stale file from an earlier session of the same name would be read
-        # as this child's word.
-        state_file.unlink(missing_ok=True)
+        try:
+            self._state_root.mkdir(parents=True, exist_ok=True)
+            # A stale file from an earlier session of the same name would be
+            # read as this child's word.
+            state_file.unlink(missing_ok=True)
+        except OSError as exc:
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"the state file for session {request.session_id!r} could not "
+                f"be prepared under {self._state_root}: {exc}",
+                {"errno": exc.errno},
+            )
 
         environment = dict(os.environ)
         environment[STATE_FILE_ENV] = str(state_file)
@@ -386,6 +420,11 @@ class LocalProcessSessionProvider(SessionProvider):
         session_id = session.request.session_id
         returncode = session.process.poll()
         if returncode is not None:
+            # An exited session stays in the table -- read_state on it is a
+            # legitimate question -- so the pipe held open for its child is
+            # released here rather than only in stop(), which a child that
+            # exited on its own is never asked for.
+            self._close_child_input(session)
             return SessionReadout(
                 session_id=session_id,
                 observation=Observation.OBSERVED,
