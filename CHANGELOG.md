@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory nor a session behind -- an announced transition nothing acts on
   would give the suite a veto to test that has no effect.
 
+  **Unusable input is answered, never raised.** `settings` is opaque and a
+  session id is the caller's to choose, so the stub refuses -- with a reason --
+  a session id that is not one safe file name (it names a state file after the
+  id, and an id that escaped the state root would pick which file the provider
+  deletes), a workspace or child command that is not a usable path or argument
+  list, and a state root it cannot write. A child that writes bytes that are
+  not UTF-8 is could-not-observe, not a decoding error out of `read_state()`.
+
   **Deliberately trivial** is a requirement of the issue, not a caveat: no
   retry, no reconnection, no cached probe, and no verb that writes to a child
   -- delivery is `MessageBus`'s (D-0009, S8), and a stub that grew a delivery
