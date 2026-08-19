@@ -113,6 +113,28 @@ def test_journal_round_trip_validates_against_schema() -> None:
         jsonschema.validate(obj, schema)
 
 
+def test_org_state_markdown_migration_rewrites_header_columns() -> None:
+    """The raw-markdown half -- depends only on ``migrate/v1_to_v2.py``.
+
+    Split out of ``test_org_state_markdown_migration_preserves_rows`` by
+    interlock#39 so that the surviving ``rewrite`` module keeps executing
+    coverage even though the parser oracle it was checked against
+    (``schema.org_state``) is quarantined (PORTING_LEDGER.md Q-0023).
+    """
+    src = (FIXTURES / "org_state_v1_sample.md").read_text(encoding="utf-8")
+    migrated = migrate_org_state_markdown(src)
+
+    # legacy columns still present in the raw markdown
+    assert "| worker " in migrated
+    assert "| dir " in migrated
+    assert "| task_id " in migrated
+    assert "| worker_dir " in migrated
+    # canonical pane_id / pane_name columns inserted alongside legacy pane
+    assert "| pane " in migrated
+    assert "| pane_id " in migrated
+    assert "| pane_name " in migrated
+
+
 def test_org_state_markdown_migration_preserves_rows() -> None:
     parse_worker_directory_registry = _org_state_parser()
     src = (FIXTURES / "org_state_v1_sample.md").read_text(encoding="utf-8")

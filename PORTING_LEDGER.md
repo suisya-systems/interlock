@@ -309,6 +309,20 @@ Four purge actions are used, and only these four:
 | `retained` | The file survives unchanged despite its `discard` class, because a kept test or build step depends on it. |
 | `quarantined` | Nothing is cut. The assertions stay verbatim at their ledgered path but do not run, because the mechanism they drive was deleted — the `Q-0023` case. |
 
+**What `quarantined` costs.** "Nothing is cut" is a claim about *assertions*, not about *coverage*.
+Quarantining the four `tests/broker/` modules leaves `broker/store.py` — the row this ledger calls
+the most directly reusable thing in the tree — together with `sidecar.py`, `rpc.py`, `notify.py`
+and `channel_sidecar.py`, with **no executing test**. `tests/broker/test_residents.py` is the only
+broker test that still runs. Until those invariants are re-targeted (`Q-0023`), a green suite is
+not evidence that the delivery core is correct.
+
+**Knowingly stale, and out of scope.** `README.md` still documents `org up` / `org down` as the
+front door, the tmux / wezterm / herdr terminal adapter, and a `claude_org_runtime.prompts` import
+that now raises `ModuleNotFoundError`. It is left untouched because this ledger's
+[Scope of this scan](#scope-of-this-scan) puts repository-root files outside the classification
+entirely and files the question as `Q-0018`; correcting it here would smuggle unclassified-surface
+work into a `discard` purge. It needs its own change.
+
 | Path | Class | Purge action | Note |
 |---|---|---|---|
 | `docs/broker-bootstrap-folder-trust-approval.md` | `discard` | `deleted` |  |
@@ -368,18 +382,23 @@ Four purge actions are used, and only these four:
 | `tests/transport/__init__.py` | `discard` | `deleted` |  |
 | `tests/transport/test_descriptor.py` | `discard` | `deleted` |  |
 | `docs/cli.md` | `discard` | `content stripped, file kept` | Trimmed rather than deleted (D-0015): the `settings generate` / `settings show` / `sandbox doctor` sections document `settings/sandbox_doctor.py` (carry) and the carried half of `settings/generator.py`, and `dispatcher delegate-plan` documents a surviving `rewrite` module. Removed: the `org up` / `org adopt` / `org down` and `broker send` sections, and the renga multi-tab plan-field subsection. |
-| `src/claude_org_runtime/__about__.py` | `discard` | `content stripped, file kept` | Content unchanged. Kept deliberately, not by oversight: it is the version SoT `pyproject.toml` reads. Recorded here so its survival is not read as an unfinished purge. |
+| `src/claude_org_runtime/__about__.py` | `discard` | `retained` | Content unchanged. Kept deliberately, not by oversight: it is the version SoT `pyproject.toml` reads. Recorded here so its survival is not read as an unfinished purge. |
 | `src/claude_org_runtime/__init__.py` | `discard` | `content stripped, file kept` | Physical deletion would break every carried module under the package, and `pyproject.toml`'s `version = { attr = ... }` resolves through it. The eager re-export of `prompts` / `terminal` and the other subpackages — the discard content — is gone. |
 | `src/claude_org_runtime/broker/__init__.py` | `discard` | `content stripped, file kept` | Re-exported only discard symbols (`placement.choose_pane_split`, `server.Broker`, `surface.*`, `tokens.AgentBind`) and asserted a one-way `broker -> terminal` dependency. Now re-exports nothing; the package still holds `store` / `sidecar` / `residents` / `rpc` / `notify` / `channel_sidecar`. |
 | `src/claude_org_runtime/dispatcher/__init__.py` | `discard` | `content stripped, file kept` | The lazy `__getattr__` re-export bridge was the discard content. `runner.py` is a `rewrite` row and still lives in the package. |
 | `src/claude_org_runtime/schema/__init__.py` | `rewrite` | `content stripped, file kept` | Re-exported `.org_state` and `.json_schema`, both deleted. `.enums` and `.journal_event` remain. |
+| `src/claude_org_runtime/attention/notify.py` | `rewrite` | `content stripped, file kept` | Gained a seam, not a strip: the `Backend` alias and `bell()` are inlined from the deleted `attention/platform.py`. **A capability is lost, deliberately**: `detect_backend()` now returns `"stdout"` unconditionally, so an operator who does not pass `backend=` explicitly gets no desktop toast. Reinstating one is a new decision (`Q-0017`), not a port. |
+| `src/claude_org_runtime/broker/rpc.py` | `rewrite` | `content stripped, file kept` | One protocol-version tuple inlined from the deleted `broker/surface.py`; nothing else of that surface is carried. |
+| `src/claude_org_runtime/broker/store.py` | `carry (invariant) / rewrite (mechanism)` | `content stripped, file kept` | Only the `TYPE_CHECKING` import of `AgentBind` changed, into a six-attribute `Protocol`. The pane-coupling declarations (`_detach_owner_panes_locked` / `_reattach_owner_panes_locked`, `AdoptRollback.detached_panes`, the `pane_gone` computation) are left byte-for-byte: they cost nothing at runtime and record the entanglement D-0009 must separate. |
+| `src/claude_org_runtime/dispatcher/runner.py` | `rewrite` | `content stripped, file kept` | The unused `prompts` re-export is gone and the transport precedence it took from the deleted `transport/descriptor.py` is inlined as `_resolve_transport` (two string constants; the descriptor's per-role tables are not carried). The module's own pane / renga vocabulary is untouched -- it is a `rewrite` row, not a discard path. |
+| `src/claude_org_runtime/cli.py` | `rewrite` | `content stripped, file kept` | **Two user-facing subcommand groups are gone**: `broker` and `org up` / `org adopt` / `org down`, whose backing modules are deleted. Five groups survive: `dispatcher`, `settings`, `sandbox`, `attention`, `migrate`. |
 | `src/claude_org_runtime/settings/generator.py` | `carry (invariant) / rewrite (mechanism)` | `content stripped, file kept` | Only the dead `transport_allowlist()` wrapper and its `transport.descriptor` import were removed. It was never called from `src/`; the MCP allow entries that reach `settings.local.json` come from `settings/role_configs_schema.json`'s `required_allow`, so **generated output is byte-identical** (D-0015). |
 | `src/claude_org_runtime/transport/__init__.py` | `rewrite` | `content stripped, file kept` | Re-exported the descriptor API. Stripped to a docstring; the package is empty until the replacement transport contract is authored. |
 | `tests/test_settings_generator.py` | `carry (invariant) / rewrite (mechanism)` | `content stripped, file kept` | Only the six `transport_allowlist` cases were removed, with the `transport/descriptor.py` mechanism they drive — which this row's own rationale pre-authorises. Every fencing, sandbox and `sandbox_by_pattern` case is untouched (D-0015). |
-| `tests/__init__.py` | `discard` | `retained` | `tests/scrub/test_scrub.py` imports `tests.scrub` absolutely; these markers are what put the repo root on `sys.path` under pytest's default prepend import mode. |
-| `tests/attention/__init__.py` | `discard` | `retained` | The kept `tests/attention` tests use `from .conftest import ...`. |
-| `tests/broker/__init__.py` | `discard` | `retained` | Duplicate test basenames (`test_notify.py` exists under both `tests/attention/` and `tests/broker/`) need the package marker under prepend import mode. |
-| `tests/scrub/__init__.py` | `discard` | `retained` | Same as `tests/__init__.py`. |
+| `tests/__init__.py` | `discard` | `retained` | **Measured, not assumed**: removing it alone leaves the suite green today. Retained anyway because collection then depends on rootdir and import-mode details rather than on an explicit package layout, and the file is zero bytes. |
+| `tests/attention/__init__.py` | `discard` | `retained` | **Load-bearing, verified**: removing it collapses the run to `5 skipped, 2 errors` -- the kept `tests/attention` tests use `from .conftest import ...`. |
+| `tests/broker/__init__.py` | `discard` | `retained` | Removing it alone leaves the suite green, because `tests/attention/__init__.py` already disambiguates the duplicate `test_notify.py` basename. Retained so the two halves of that pair are not asymmetric -- deleting `tests/attention/__init__.py` later would then collide. |
+| `tests/scrub/__init__.py` | `discard` | `retained` | Same as `tests/__init__.py`: removing it alone leaves the suite green; retained as zero-byte layout, not because a dependency was proven. |
 | `tests/attention/test_broker_journal_contract.py` | `carry (invariant) / rewrite (mechanism)` | `quarantined` | Module-level `pytest.importorskip("claude_org_runtime.broker.server")` inserted; every assertion kept verbatim at its ledgered path. The file drives `broker/server.py`, which this purge deletes, so no runnable subset exists — see `Q-0023`. It self-heals the day a `broker.server` replacement lands. |
 | `tests/broker/test_control_plane.py` | `carry (invariant) / rewrite (mechanism)` | `quarantined` | Module-level `pytest.importorskip("claude_org_runtime.broker.server")` inserted; every assertion kept verbatim at its ledgered path. The file drives `broker/server.py`, which this purge deletes, so no runnable subset exists — see `Q-0023`. It self-heals the day a `broker.server` replacement lands. |
 | `tests/broker/test_delivery.py` | `carry (invariant) / rewrite (mechanism)` | `quarantined` | Module-level `pytest.importorskip("claude_org_runtime.broker.server")` inserted; every assertion kept verbatim at its ledgered path. The file drives `broker/server.py`, which this purge deletes, so no runnable subset exists — see `Q-0023`. It self-heals the day a `broker.server` replacement lands. |
