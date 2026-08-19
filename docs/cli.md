@@ -94,8 +94,7 @@ The runtime ships English-only worker instruction copy
 language can override the locale either programmatically:
 
 ```python
-from claude_org_runtime.dispatcher import LocaleConfig
-from claude_org_runtime.dispatcher.runner import build_plan
+from claude_org_runtime.dispatcher.runner import LocaleConfig, build_plan
 
 ja = LocaleConfig(
     constraints_default="(なし)",
