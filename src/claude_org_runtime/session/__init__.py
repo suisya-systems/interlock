@@ -1,8 +1,12 @@
-"""Session management contracts. Currently S1 alone, and S1 is provisional.
+"""Session management contracts, and the stub that implements them.
 
 ``SessionProvider`` (D-0009) lives here; ``MessageBus`` deliberately does not
 -- delivery is a separate contract built as S8, and the separation is the
 point (see ``provider.DELIVERY_ABSENCE_IS_DELIBERATE``).
+
+``LocalProcessSessionProvider`` (S3) is the deliberately trivial implementation
+over local child processes; the contract it implements stays provisional
+(D-0021) whether or not something implements it.
 """
 
 from .provider import (
@@ -34,6 +38,7 @@ from .provider import (
     WorkspaceVerdict,
     check_spawn_precondition,
 )
+from .stub_provider import LocalProcessSessionProvider
 
 __all__ = [
     "CAPABILITY_ASSIGNMENTS",
@@ -51,6 +56,7 @@ __all__ = [
     "ContractViolation",
     "Failure",
     "FailureKind",
+    "LocalProcessSessionProvider",
     "Observation",
     "Ok",
     "ProviderResult",

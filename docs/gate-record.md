@@ -69,7 +69,7 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | 8 | Secretary window responsiveness under worker load | `pending` rehearsal → **not discharged** | `pending` | `pending` | `#21` (rehearsal) — not yet landed | **Before the canary starts** (D-0022) |
 | 9 | Curator output cannot reach a skill without human approval | `discharged` | `proven on the spike slice` | `provider-independent` | `#22`, PR `#27`; `docs/curator-promotion-gate.md`; `tests/curator/`; `investigation/u8-skill-hot-reload-probe.md` (U8) | **Discharged 2026-08-18**, independently of the spike |
 | 10 | One-worker canary and run-boundary rollback | `pending` rehearsal → **not discharged** | `pending` | `pending` | `#23` (rehearsal) — not yet landed | **At the canary itself** (D-0022) |
-| 11 | Only the `SessionProvider` need be swapped | `pending` | `pending` | `provider-independent` | `#10` (S1), `#11` (S3), `#20` — not yet landed | The spike (phase 8) |
+| 11 | Only the `SessionProvider` need be swapped | `pending` | `pending` | `provider-independent` | `#10` (S1) and `#11` (S3) landed 2026-08-19; `#20` — not yet landed | The spike (phase 8) |
 
 All eleven items are present. None is omitted and none is merged into another.
 
@@ -338,7 +338,8 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   provider detail in the control plane.
 - **Evidence:** `#10` (S1, the provisional `SessionProvider` interface), `#11` (S3, the stub
   provider over local child processes), `#20` (re-run the control-plane suite unchanged against S3).
-  Not yet landed.
+  `#10` and `#11` landed 2026-08-19; `#20` — the half that actually measures the item — has not.
+  Both halves are needed: a stub that exists proves nothing until an unmodified suite runs against it.
 - **Residual:** none recorded yet. Any test that has to be **modified** to run against S3 marks a
   leak of session-backend detail into the control plane and must be fixed before the item passes.
 - **Notes:** D-0020's B+ ordering — S3 written before S2 — exists so that item 11 measures a
@@ -380,7 +381,7 @@ anything.
 | S1 — the provisional `SessionProvider` interface | **durable (contract)** | `#10` — marked provisional in the file itself (D-0021); promoted to a settled contract only by a later `D-` entry. Landed 2026-08-19: `src/claude_org_runtime/session/provider.py`, tests `tests/session/`. Being written does not promote it |
 | Tests — fault injection, recovery, accident-derived fixtures, the control-plane suite | **durable (tests)** | `#15`, `#16`, `#18`, `#19`, `#20`, `tests/curator/`, `tests/fencing/` |
 | S2 — the C2 `SessionProvider` | throwaway | `#17` |
-| S3 — the stub provider | throwaway | `#11` |
+| S3 — the stub provider | throwaway | `#11` — landed 2026-08-19: `src/claude_org_runtime/session/stub_provider.py`, tests `tests/session/test_stub_provider.py`. Local child processes only: no Claude CLI, no network. Throwaway under D-0026, but it survives a C2 switch untouched |
 | S4 — the probe harnesses | throwaway | `#6`, `#7` |
 | **S5 — the spike SQLite schema** | **throwaway — named explicitly by D-0026** | `#12`; the file carries its own note that it is a spike schema and that **no migration path is promised from it**. `Q-0001` stays open and is not answered by inertia |
 | S6 / S7 — lease and outbox implementations | throwaway (their tests are durable) | `#13`, `#14` |
