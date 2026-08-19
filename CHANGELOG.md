@@ -9,6 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S6 -- the lease, and the fencing token validated atomically as part of each
+  protected write** (`ACCEPTANCE.md` §2, D-0024 / D-0026, Issue #13).
+  `src/claude_org_runtime/control_plane/lease.py` implements acquisition,
+  expiry, renewal and release over S5's `lease` table, plus the protected-write
+  path every fenced effect goes through. `docs/lease-fencing.md` is the written
+  record; `tests/control_plane/test_lease.py` is the durable half (D-0026).
+
+  **Check-then-write is not offered at all.** `ACCEPTANCE.md` §2 names it as the
+  wrong answer -- the lease can expire between the check and the write -- so
+  there is no `is_held()` to consult, `Lease.looks_live_at()` says in its own
+  docstring that it must never gate a write, and `protected_write()` accepts
+  **only** a `FencedStatement` that `fenced_update()` / `fenced_insert()`
+  issued -- a substring check over SQL text would pass a statement carrying the
+  fence inside a `SET` expression while its `WHERE` gates nothing. The suite writes the
+  unfenced shape out by hand, shows it admitting a writer whose lease was taken
+  over inside the window, and shows the atomic shape refusing the same token.
+
+  **The exclusion is the epoch's, never the clock's.** Time is the caller's
+  throughout, and under skew a fast-clocked claimant really can take over a
+  lease its holder still believes it holds. The rows cannot even show that --
+  each claimant stamps its acquisition in its own frame -- so the fence
+  validates the *epoch* inside the write. Every takeover raises the epoch,
+  including a re-acquisition by the same holder, so a returning paused holder
+  comes back with a token that matches nothing. Forward and backward skew across
+  the expiry boundary are each tested: a slow claimant declines to take a lease
+  it sees as live, a backward-skewed renewal shortens rather than extends, one
+  landing at or before its own acquisition is refused rather than surfacing as a
+  CHECK violation, and a release with a clock behind the acquisition stays legal.
+
+  **Refusals are recorded, never dropped.** A stale-token write becomes an
+  `action` row in status `refused` carrying the reason, the epoch refused and the
+  lease row as it stood, committed in the same transaction as the refused
+  attempt. That record is written **unfenced** on purpose: a refusal only a live
+  holder could record is a refusal that vanishes exactly when it matters. A write
+  whose own `WHERE` matched nothing is a *different* refusal
+  (`ProtectedWriteMissed`) and records nothing, so a rejection that never
+  happened cannot enter the evidence gate item 5 is read out of. The transaction
+  is `BEGIN IMMEDIATE`, which is what makes those two outcomes distinguishable
+  without another connection moving the lease in between.
+
+  **One holder per resource, over a timeline rather than at sampled points.**
+  `authority_timeline()` orders by epoch and is contiguous and half-open;
+  `claimed_timeline()` / `overlapping_claims()` check the recorded windows over
+  every pair; and the durable half is `write_history()` over `action`, where
+  every fenced attempt is stamped with the epoch it was written under and
+  `applied_epoch_regressions()` reads the single-writer property back by query
+  from SQLite alone (D-0001). A statement that does not assign
+  `writer_epoch = :fence_epoch` is refused at build time, because that history
+  is what makes the property provable afterwards. Since `action` has no resource
+  column (`Q-0001`), `effect_kind(resource, effect)` encodes the resource in
+  `action.kind` and the regression check refuses a history that mixes kinds --
+  two resources' epochs are independent and comparing them means nothing.
+  Releasing a lease only ever shortens it: a late release may not push an
+  expired lease's expiry forward and revive the releasing holder's own token.
+  The history is ordered by the database's own insertion order rather than by
+  the caller's (skewable) clock, and it reads `action` only -- a protected write
+  to another table stamps `writer_epoch` on its own row, and `docs/lease-fencing.md`
+  §5 says so rather than leaving the scope implied. The builders pick the table
+  from a closed set, blank quoted literals before the structural scan of a
+  fragment, refuse to assign the columns a row is attributed by, and carry
+  `applied_at_ms IS NULL` on an `action` update, so finished evidence is added to
+  and never replaced. Merged with S7 (#14): the register entry type is
+  `DestinationFencing`, named for the property rather than the place so it does
+  not shadow S7's `Destination` (a delivery target), and the package re-exports
+  neither `StaleWriterRefused` -- both modules define one and they mean the same
+  thing, so shadowing either would make `except` miss half the refusals.
+  Reconciling them to one class is follow-up work.
+
+  **Where a destination can enforce a stale token it does, and where it cannot
+  that is written down.** `DESTINATIONS` refuses to register a destination that
+  cannot enforce without a residual, `EpochGuardedDestination` demonstrates the
+  enforcing case against **its own** effect record (SQLite alone cannot certify
+  an external effect), and the suite asserts the register and the doc's table
+  agree name for name so a residual cannot drift out of the code.
+
+  **Nothing here leans on the provider refusing a duplicate.** U27 measured an
+  admission window in which two writers both exited 0 and both wrote, and U32
+  found no exclusion at all on the `--resume` path, so this lease is the only
+  exclusion in the system. Asserted structurally: neither the module nor the
+  suite may import anything under `claude_org_runtime.session`.
+
 - **S7 -- the outbox: resend, ack, dedup, and one handler that names its
   exactly-once mechanism** (`ACCEPTANCE.md` §2, D-0004 / D-0026, Issue #14).
   `src/claude_org_runtime/control_plane/outbox.py` drives the S5 `outbox` and
