@@ -10,6 +10,18 @@ injection, and the single-flight (no double-injection) guard.
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip(
+    "claude_org_runtime.broker.server",
+    reason=(
+        "Quarantined by interlock#39: the carried invariants in this file are "
+        "kept verbatim, but they drive broker/server.py, which "
+        "PORTING_LEDGER.md classes discard. Re-target onto the MessageBus "
+        "rewrite (Q-0023)."
+    ),
+)
+
 import threading
 import time
 

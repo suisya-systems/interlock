@@ -22,7 +22,10 @@ import json
 import urllib.error
 import urllib.request
 
-from . import surface
+# MCP protocol versions this client negotiates, newest first. Inlined from
+# the removed broker.surface (PORTING_LEDGER.md D-0014); the client only
+# ever needs the newest to open a session.
+PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 # admin HTTP RPC 1 回あたりの上限。dead port への connect が refuse されず timeout
 # まで張り付く環境 (一部 Windows) でも呼び元が無限待ちしないための上限。
@@ -103,7 +106,7 @@ class _McpClient:
         return self._post(payload)
 
     def initialize(self) -> dict:
-        return self._rpc("initialize", {"protocolVersion": surface.PROTOCOL_VERSIONS[0]})
+        return self._rpc("initialize", {"protocolVersion": PROTOCOL_VERSIONS[0]})
 
     def tools_list(self) -> list[dict]:
         res = self._rpc("tools/list")

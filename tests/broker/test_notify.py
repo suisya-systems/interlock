@@ -15,6 +15,18 @@ helper は走行中 daemon への薄い橋渡し (sidecar 発見 -> admin mint -
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip(
+    "claude_org_runtime.broker.server",
+    reason=(
+        "Quarantined by interlock#39: the carried invariants in this file are "
+        "kept verbatim, but they drive broker/server.py, which "
+        "PORTING_LEDGER.md classes discard. Re-target onto the MessageBus "
+        "rewrite (Q-0023)."
+    ),
+)
+
 import argparse
 import json
 import os

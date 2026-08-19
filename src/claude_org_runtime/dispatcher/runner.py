@@ -64,6 +64,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import re
 import sys
 import time
@@ -72,7 +73,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence, Union
 
 # Re-export for documentation / downstream importers (Step B + C symbols).
-from claude_org_runtime import prompts as _prompts  # noqa: F401
+# ``prompts`` was dropped here with the discarded prompt-prose package (D-0014).
 from claude_org_runtime import schema as _schema  # noqa: F401
 
 # Matches renga's name/role validation (see `set_pane_identity` docs).
@@ -275,14 +276,32 @@ DEFAULT_WORKER_MODEL = "opus"
 # "0 => broker, positive => renga" heuristic would break the moment a worker is
 # live (design-review Blocker).
 
-# Values accepted for the ``transport`` selector. Mirrors
-# ``claude_org_runtime.transport.descriptor.TRANSPORTS`` but is duplicated here
-# as a bare literal to avoid a runner -> descriptor -> broker.surface ->
-# broker/__init__ -> placement -> runner import cycle (the descriptor layer
-# imports the broker surface, whose package init pulls placement, which imports
-# this module). The CLI resolves the env-default transport via
-# ``descriptor.resolve_transport`` in a lazy import instead.
+# Values accepted for the ``transport`` selector. These three literals plus the
+# precedence in :func:`_resolve_transport` were the entire contract this module
+# took from ``transport.descriptor``, which the purge removed together with the
+# broker MCP surface it derived its tables from (PORTING_LEDGER.md D-0014). The
+# descriptor's substance -- the per-role tool tables -- is not carried here.
 TRANSPORTS = ("renga", "broker")
+ORG_TRANSPORT_ENV = "ORG_TRANSPORT"
+DEFAULT_TRANSPORT = "broker"
+
+
+def _resolve_transport(explicit: str | None = None) -> str:
+    """Explicit ``--transport`` > ``ORG_TRANSPORT`` env > ``DEFAULT_TRANSPORT``.
+
+    Unknown or empty values raise :class:`ValueError`.
+    """
+    if explicit is not None:
+        candidate = explicit
+    else:
+        candidate = os.environ.get(ORG_TRANSPORT_ENV) or DEFAULT_TRANSPORT
+    candidate = candidate.strip()
+    if candidate not in TRANSPORTS:
+        raise ValueError(
+            f"unknown transport flag: {candidate!r}. valid: {list(TRANSPORTS)} "
+            f"(set via {ORG_TRANSPORT_ENV} env; default {DEFAULT_TRANSPORT!r})"
+        )
+    return candidate
 
 # Default concurrent-worker ceiling for the broker path. Finite by default so a
 # misconfigured or missing policy cannot spawn an unbounded worker fleet; a
@@ -3252,12 +3271,10 @@ def cmd_delegate_plan(args: argparse.Namespace) -> int:
     locale = _load_locale(args.locale_json)
 
     # Resolve the transport the same way the rest of the org does: explicit
-    # --transport wins, else ORG_TRANSPORT env, else the descriptor default
-    # (broker). Imported lazily to avoid a module-load import cycle
-    # (descriptor -> broker.surface -> broker/__init__ -> placement -> runner).
-    from ..transport.descriptor import resolve_transport
+    # --transport wins, else ORG_TRANSPORT env, else the module default
+    # (broker). See :func:`_resolve_transport`.
     try:
-        transport = resolve_transport(args.transport)
+        transport = _resolve_transport(args.transport)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -3440,7 +3457,7 @@ def add_subparsers(sub: "argparse._SubParsersAction[argparse.ArgumentParser]") -
         help=(
             "capacity backend: 'renga' uses the rect-based balanced split; "
             "'broker' uses the explicit --max-concurrent-workers ceiling. "
-            "Default: resolved from ORG_TRANSPORT env, else the descriptor "
+            "Default: resolved from ORG_TRANSPORT env, else the module "
             "default (broker)"
         ),
     )

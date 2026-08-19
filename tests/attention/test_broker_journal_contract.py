@@ -16,6 +16,18 @@ exactly that state; the unit tests on either side would stay green.
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip(
+    "claude_org_runtime.broker.server",
+    reason=(
+        "Quarantined by interlock#39: the carried invariants in this file are "
+        "kept verbatim, but they drive broker/server.py, which "
+        "PORTING_LEDGER.md classes discard. Re-target onto the MessageBus "
+        "rewrite (Q-0023)."
+    ),
+)
+
 import time
 from pathlib import Path
 

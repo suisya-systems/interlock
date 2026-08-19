@@ -25,11 +25,43 @@ import string
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from .classifier import AttentionEvent
 from .config import ALLOWED_PLACEHOLDERS, AttentionConfig
-from .platform import Backend, bell, detect_backend
+# Backend vocabulary and the two helpers this module needs, inlined from the
+# removed ``attention.platform`` (PORTING_LEDGER.md D-0014). What is
+# deliberately NOT carried is that module's OS probe (osascript / notify-send
+# / wsl-notify-send / PowerShell + the WSL detection), which is the
+# old-platform observation mechanism the Discard bucket names.
+Backend = Literal[
+    "macos", "linux", "windows", "wsl", "wsl-notify-send", "stdout",
+]
+
+
+def detect_backend(**_kwargs: Any) -> Backend:
+    """Always ``"stdout"``: there is no decided desktop channel yet.
+
+    The OS backend probe was discarded with ``attention.platform`` and
+    Q-0017 ("what replaces the discarded desktop human-notification path")
+    is still open, so this resolves to the stdout log line rather than
+    inventing a delivery channel the source does not decide. Callers that
+    know their backend still pass ``notify(..., backend=...)`` explicitly.
+    """
+    return "stdout"
+
+
+def bell(stream: Any = None) -> None:
+    """Emit a BEL (``\a``) - defaults to stderr to keep stdout clean."""
+    if stream is None:
+        stream = sys.stderr
+    try:
+        stream.write("\a")
+        stream.flush()
+    except (OSError, ValueError):
+        # Closed pipes / non-tty streams must not crash the watcher.
+        pass
+
 
 _SUBPROCESS_TIMEOUT_SEC: float = 5.0
 

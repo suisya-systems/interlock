@@ -7,8 +7,6 @@ Subcommands:
 - ``sandbox doctor ...`` -> :mod:`claude_org_runtime.settings.sandbox_doctor`
 - ``migrate ...`` -> :mod:`claude_org_runtime.migrate.v1_to_v2`
 - ``attention scan|watch ...`` -> :mod:`claude_org_runtime.attention.cli`
-- ``broker serve ...`` -> :mod:`claude_org_runtime.broker.cli`
-- ``org up|down ...`` -> :mod:`claude_org_runtime.broker.launcher`
 
 The subcommands re-use the same parser builders the per-module CLIs
 expose, so flags stay in lock-step.
@@ -22,8 +20,6 @@ from typing import Optional
 
 from . import __version__
 from .attention import cli as attention_cli
-from .broker import cli as broker_cli
-from .broker import launcher as broker_launcher
 from .dispatcher import runner as dispatcher_runner
 from .migrate import v1_to_v2 as migrate_v1_to_v2
 from .settings import generator as settings_generator
@@ -121,30 +117,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     attention_sub = attention_p.add_subparsers(dest="cmd", required=True)
     attention_cli.add_subparsers(attention_sub)
-
-    # broker
-    broker_p = sub.add_parser(
-        "broker",
-        help=(
-            "org-broker daemon (localhost MCP server + queue store + nudge "
-            "delivery). Default transport since Epic #586 Phase 2; set "
-            "ORG_TRANSPORT=renga to fall back to renga."
-        ),
-    )
-    broker_sub = broker_p.add_subparsers(dest="cmd", required=True)
-    broker_cli.add_subparsers(broker_sub)
-
-    # org (up / adopt / down launcher — thin wrapper over the broker control plane)
-    org_p = sub.add_parser(
-        "org",
-        help=(
-            "org session launcher: 'up' ensures a broker daemon and launches the "
-            "secretary TUI; 'adopt' hands an owner's delivery ownership to a new "
-            "session; 'down' stops the daemon (signal-free) and verifies it."
-        ),
-    )
-    org_sub = org_p.add_subparsers(dest="cmd", required=True)
-    broker_launcher.add_subparsers(org_sub)
 
     # migrate
     migrate_p = sub.add_parser(

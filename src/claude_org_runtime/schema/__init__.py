@@ -7,30 +7,19 @@ Public surface:
   claude-org-ja journals.
 - :mod:`.journal_event` -- frozen dataclass mirror of a single
   ``journal.jsonl`` line, with forward-compatible ``extra`` bucket.
-- :mod:`.org_state` -- parser for the ``org-state.md`` Worker Directory
-  Registry table.
-- :mod:`.json_schema` -- bundled JSON Schema (Draft 2020-12) files for
-  ``JournalEvent``, ``WorkerDirEntry`` and the ``.state/broker/`` queue
-  journal (``BrokerQueueEvent``).
+
+``.org_state`` (the ``org-state.md`` Worker Directory Registry parser) and
+``.json_schema`` (the bundled JSONL wire schemas) were removed by the
+Discard-bucket purge -- the SQLite state tables replace that surface outright
+(PORTING_LEDGER.md D-0001 / D-0014).
 """
 
 from .enums import AnomalyKind, JournalEventType, WorkerStatus
 from .journal_event import JournalEvent
-from .json_schema import (
-    broker_queue_event_schema,
-    journal_event_schema,
-    worker_dir_entry_schema,
-)
-from .org_state import WorkerDirEntry, parse_worker_directory_registry
 
 __all__ = [
     "AnomalyKind",
     "JournalEvent",
     "JournalEventType",
-    "WorkerDirEntry",
     "WorkerStatus",
-    "broker_queue_event_schema",
-    "journal_event_schema",
-    "parse_worker_directory_registry",
-    "worker_dir_entry_schema",
 ]

@@ -71,9 +71,7 @@ import sys
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Callable, Mapping
-
-from ..transport import descriptor as transport_descriptor
+from typing import Any, Callable
 
 # Keys under worker_roles[<role>] / roles[<role>] that are *not* part of the
 # emitted settings.local.json content. ``sandbox_by_pattern`` (Phase 1
@@ -117,49 +115,6 @@ def load_schema(path: Path | None = None) -> dict:
     target = path if path is not None else _bundled_schema_path()
     with Path(target).open(encoding="utf-8") as fh:
         return json.load(fh)
-
-
-# ---------------------------------------------------------------------------
-# transport-aware MCP allowlist (descriptor-driven, §5.2 (i) / §5.3)
-# ---------------------------------------------------------------------------
-#
-# The MCP transport tool allowlist is *not* hardcoded here — it is projected
-# from the single SoT :mod:`claude_org_runtime.transport.descriptor`, so the
-# runtime generator and the ja-side generators
-# (``tools/gen_delegate_payload.py`` / worker_brief) never drift. The
-# transport is flag-aware: ``ORG_TRANSPORT`` selects ``broker`` (default
-# since Epic #586 Phase 2, ``mcp__org-broker__*``, role-tier
-# differentiated) or ``renga`` (opt-in fallback via ``ORG_TRANSPORT=renga``,
-# bit-equivalent with the current ``mcp__renga-peers__*`` surface).
-
-
-def transport_allowlist(
-    role: str,
-    *,
-    transport: str | None = None,
-    env: Mapping[str, str] | None = None,
-) -> list[str]:
-    """Return the ``mcp__<server>__<tool>`` allow entries for ``role``.
-
-    Reads the transport surface descriptor (the single SoT). ``transport``
-    is resolved as: explicit arg > ``ORG_TRANSPORT`` env > default
-    ``broker`` (§5.1; promoted from ``renga`` in Epic #586 Phase 2). With
-    the default ``broker`` flag the returned entries are the
-    tier-appropriate ``mcp__org-broker__*`` set derived structurally from
-    :mod:`claude_org_runtime.broker.surface`; with ``renga``
-    (``ORG_TRANSPORT=renga`` opt-in fallback) they are bit-equivalent with
-    the current shared ``mcp__renga-peers__*`` surface (§5.3).
-
-    ``role`` is a runtime role name (``secretary`` / ``dispatcher`` /
-    ``curator`` / ``worker`` / ``user_common``). Under ``renga`` every role
-    sees the same required-15 surface; under ``broker`` the role maps to a
-    broker auth tier.
-    """
-    return list(
-        transport_descriptor.allow_entries_for_role(
-            role, flag=transport, env=env
-        )
-    )
 
 
 def _substitute(value: Any, mapping: dict[str, str]) -> Any:
