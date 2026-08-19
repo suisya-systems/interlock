@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S1 -- the provisional `SessionProvider` interface** (D-0009 / D-0010 /
+  D-0021, R4, Issue #10). `src/claude_org_runtime/session/provider.py` renders
+  the settled design into a contract file: D-0009's five verbs and no sixth, a
+  provider-neutral lifecycle / availability readout carrying the backend's own
+  state word uninterpreted plus an explicit **"could not observe"** case, a
+  typed result that **cannot be constructed empty** in either direction (R4),
+  and a capability / version probe wired to a **fail-closed spawn
+  precondition** (D-0010) that refuses on an unprobed provider just as it
+  refuses on an incompatible one.
+
+  **The file says of itself that it is provisional** (D-0021): it is spike
+  scaffold, and promotion to a settled contract requires a later `D-` entry --
+  not use by an implementation, and not having survived a gate run.
+
+  **Both prohibitions are mechanically asserted, not trusted to review.** No
+  fact-state vocabulary appears anywhere in S1, and the forbidden set is
+  *parsed out of `DECISIONS.md`* rather than copied into the test, so a seventh
+  state added by a future `D-` entry is covered the day it is written. No
+  delivery verb appears either: delivery stays with `MessageBus` (S8) per
+  D-0009, and what S1 records is the **absence**, which is the property gate
+  items 6 and 11 exist to check.
+
+  **The three previously-unassigned capabilities each have a named owner**, and
+  owning one is not the same as putting it in S1: message delivery ->
+  `MessageBus`/S8 (absent here by design); effective permission / sandbox /
+  hook readback -> **neither contract**, written down as unowned because no
+  public surface returns it and D-0010 forbids manufacturing one, with S10's
+  partial readback plus breach battery recorded as the human-accepted
+  weakening; observing or vetoing a workspace lifecycle transition -> S1, as a
+  veto surface rather than a sixth verb, fail-closed so that a broken observer
+  vetoes instead of letting a transition through.
+
+  Unblocks gate item 11, which had nothing to substitute against while this
+  file did not exist.
+
 - **Per-role fencing: the renderer, the fail-closed spawn precondition, the
   `PreToolUse` deny hook and the breach-probe battery** (gate item 3, I-04/S10,
   Issue #9). `src/claude_org_runtime/fencing/` carries the per-role
