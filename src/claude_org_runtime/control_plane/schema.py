@@ -90,6 +90,17 @@ STATE_TABLES = ("run", "session", "lease", "outbox", "incident", "action")
 #: The recovery reads, as data. Each answers one question a process asks after a
 #: mid-flight kill, and each is answerable from SQLite alone (D-0001).
 RECONSTRUCTION_QUERIES: Mapping[str, str] = {
+    # D-0001 names `run` as source-of-truth state, and a run may exist before any
+    # session, outbox row or incident does -- so a reconstruction that reached
+    # runs only through their children would lose exactly the run that was killed
+    # at its riskiest moment. Every run is returned, unfiltered: which statuses
+    # count as finished is part of the vocabulary Q-0001 leaves open, and a WHERE
+    # clause here would pick one.
+    "runs": """
+        SELECT run_id, status, created_at_ms, updated_at_ms
+          FROM run
+         ORDER BY created_at_ms, run_id
+    """,
     # Item 2: exactly one live session per run, re-identified after the crash
     # window. The uniqueness is the database's (see
     # ``session_one_active_binding_per_run``); this query is how a recovering
@@ -177,6 +188,7 @@ class ControlPlaneState:
     it from becoming a domain model by inertia.
     """
 
+    runs: Sequence[Mapping[str, Any]]
     active_sessions: Sequence[Mapping[str, Any]]
     held_leases: Sequence[Mapping[str, Any]]
     unfinished_outbox: Sequence[Mapping[str, Any]]
@@ -230,7 +242,15 @@ def create_control_plane(path: str | Path) -> sqlite3.Connection:
             "(open_control_plane opens an existing database)"
         ) from error
 
-    connection = sqlite3.connect(target)
+    try:
+        connection = sqlite3.connect(target)
+    except BaseException:
+        # The claim above created the file, so a connect that never returns one
+        # would otherwise leave an empty file that refuses both creation (it
+        # exists) and opening (it is not a database).
+        target.unlink(missing_ok=True)
+        raise
+
     try:
         connection.executescript(sql)
         connection.execute(f"PRAGMA application_id = {APPLICATION_ID}")
@@ -291,6 +311,7 @@ def reconstruct(connection: sqlite3.Connection, now_ms: int) -> ControlPlaneStat
             cursor.close()
 
     return ControlPlaneState(
+        runs=rows("runs"),
         active_sessions=rows("active_sessions"),
         held_leases=rows("held_leases", now_ms=now_ms),
         unfinished_outbox=rows("unfinished_outbox"),

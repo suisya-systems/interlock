@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recovery query has to be able to show, not a convention a handler remembers.
 
   **State is reconstructable by query from SQLite alone** (D-0001).
-  `RECONSTRUCTION_QUERIES` holds the five recovery reads as data so they can be
+  `RECONSTRUCTION_QUERIES` holds the six recovery reads as data so they can be
   run by hand against a database recovered from a crash, and `reconstruct()`
   keeps nothing in the process: the suite proves it by writing state, dropping
   the interpreter, and comparing what a **fresh subprocess** reads back. Item 2's
@@ -72,7 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a token could be reused: a change of holder must raise the epoch (a
   handover written without naming it would hand the replacement the previous
   holder's token), and a resource is never renamed (renaming vacates it, and
-  the next acquisition would restart at epoch 1).
+  the next acquisition would restart at epoch 1). Neither `outbox` nor `action`
+  rows are deletable: freezing a value protects it only while its row exists,
+  and deleting an applied action vacates its idempotency key. Retention of
+  evidence is `Q-0006`, and a DELETE would be answering it.
 
   Throwaway under D-0026, named explicitly by it, and it survives a C2 switch:
   nothing in it is provider-shaped.

@@ -256,8 +256,6 @@ def test_every_table_is_reachable_from_a_reconstruction_query():
     # D-0001: nothing is stored that no recovery query can read back.
     sql = " ".join(s5.RECONSTRUCTION_QUERIES.values())
     for table in STATE_TABLES:
-        if table == "run":
-            continue  # runs are reached through their sessions, outbox and incidents
         assert re.search(rf"\bFROM {table}\b", sql), table
 
 
@@ -650,6 +648,7 @@ def test_reconstruction_reads_only_what_is_still_in_flight(cp):
     _write_in_flight_state(cp)
     state = reconstruct(cp, now_ms=T0 + 1_000)
 
+    assert [row["run_id"] for row in state.runs] == ["run-1", "run-2"]
     assert [row["session_id"] for row in state.active_sessions] == ["sess-1"]
     assert [row["resource"] for row in state.held_leases] == ["run-1"]
     assert [row["message_id"] for row in state.unfinished_outbox] == ["msg-1"]
@@ -720,6 +719,7 @@ def test_state_survives_the_process_that_wrote_it(cp, db_path, tmp_path):
     assert recovered["pending_actions"] == [dict(row) for row in in_process.pending_actions]
     assert recovered["unfinished_outbox"] == [dict(row) for row in in_process.unfinished_outbox]
     assert recovered["held_leases"] == [dict(row) for row in in_process.held_leases]
+    assert recovered["runs"] == [dict(row) for row in in_process.runs]
 
 
 # --------------------------------------------------------------------------
@@ -968,3 +968,52 @@ def test_a_creation_that_loses_a_race_does_not_delete_the_winners_database(cp, d
         assert survivor.execute("SELECT count(*) FROM run").fetchone() == (1,)
     finally:
         survivor.close()
+
+
+def test_a_run_with_nothing_hanging_off_it_still_reconstructs(cp):
+    # The riskiest moment for a run is before anything references it: a
+    # reconstruction that reached runs only through their sessions, outbox rows
+    # or incidents would lose exactly the run that was killed there.
+    add_run(cp, "run-lonely", status="starting")
+    state = reconstruct(cp, now_ms=T0)
+
+    assert [(row["run_id"], row["status"]) for row in state.runs] == [("run-lonely", "starting")]
+    assert state.active_sessions == ()
+
+
+def test_exactly_once_evidence_cannot_be_deleted_out_of_the_way(cp):
+    # Freezing a value protects it only while the row exists. Deleting an applied
+    # action vacates its idempotency key, and the same effect can then be applied
+    # a second time -- the one thing item 4 asks this table to make impossible.
+    add_run(cp)
+    add_action(cp, "act-1", idempotency_key="ik-1", status="applied", applied_at_ms=T0 + 1)
+    add_outbox(cp, "msg-1", status="acked", delivered_at_ms=T0 + 1, acked_at_ms=T0 + 2)
+
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        cp.execute("DELETE FROM action WHERE action_id = 'act-1'")
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        cp.execute("DELETE FROM outbox WHERE message_id = 'msg-1'")
+
+    # And a refusal is evidence too, so it is not deletable either.
+    add_action(cp, "act-2", idempotency_key="ik-2", status="refused", refusal_reason="stale token")
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        cp.execute("DELETE FROM action WHERE action_id = 'act-2'")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        add_action(cp, "act-3", idempotency_key="ik-1")
+
+
+def test_a_creation_that_cannot_connect_leaves_no_file_behind(db_path, monkeypatch):
+    # The O_EXCL claim creates the file before SQLite is involved, so a connect
+    # that never returns a connection would otherwise leave an empty file that
+    # refuses creation (it exists) and refuses opening (it is not a database).
+    def unavailable(*args, **kwargs):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(s5.sqlite3, "connect", unavailable)
+    with pytest.raises(sqlite3.OperationalError):
+        create_control_plane(db_path)
+
+    monkeypatch.undo()
+    assert not db_path.exists()
+    create_control_plane(db_path).close()

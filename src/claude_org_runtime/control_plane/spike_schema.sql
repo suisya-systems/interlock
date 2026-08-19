@@ -309,6 +309,17 @@ BEGIN
     SELECT RAISE(ABORT, 'an acked message is acked once');
 END;
 
+-- Freezing the identity protects it only while the row exists: deleting an
+-- acked row vacates its message_id, and the same identity can then be enqueued
+-- and delivered a second time. Retention of evidence is Q-0006 and open, so the
+-- spike keeps everything -- a schema that discarded delivery evidence on a
+-- DELETE would be answering it.
+CREATE TRIGGER outbox_rows_are_never_deleted
+BEFORE DELETE ON outbox
+BEGIN
+    SELECT RAISE(ABORT, 'outbox rows are delivery evidence and are never deleted');
+END;
+
 -- Recovery's first question after a kill: what is enqueued and unfinished?
 CREATE INDEX outbox_undelivered ON outbox(enqueued_at_ms) WHERE status <> 'acked';
 
@@ -479,6 +490,18 @@ WHEN OLD.applied_at_ms IS NOT NULL
  AND (NEW.applied_at_ms IS NULL OR NEW.applied_at_ms <> OLD.applied_at_ms)
 BEGIN
     SELECT RAISE(ABORT, 'an applied action is applied once');
+END;
+
+-- The unique index constrains the rows that exist, so deleting an applied
+-- action vacates its idempotency key and the same effect can be applied again --
+-- the one thing item 4 asks this table to make impossible. A refused row is
+-- evidence too (ACCEPTANCE.md section 2 requires the rejection to be durable),
+-- so nothing here is deletable; Q-0006 (retention of evidence references) is
+-- open and is not answered by a DELETE.
+CREATE TRIGGER action_rows_are_never_deleted
+BEFORE DELETE ON action
+BEGIN
+    SELECT RAISE(ABORT, 'action rows are exactly-once evidence and are never deleted');
 END;
 
 CREATE INDEX action_unapplied ON action(created_at_ms) WHERE status = 'pending';
