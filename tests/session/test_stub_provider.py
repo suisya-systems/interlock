@@ -9,6 +9,7 @@ item 11's re-run leans on and the ones a happy-path-only suite would let rot.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -390,13 +391,126 @@ def test_reading_an_exited_session_releases_its_child_pipe(tmp_path: Path, provi
 def test_an_unusable_child_command_is_a_failure_not_an_exception(
     tmp_path: Path, provider
 ):
-    """Popen rejects these before the operating system sees them."""
+    """Unusable caller settings are refused, on every platform.
+
+    The original version of this test asserted the same thing but rested on a
+    POSIX-only premise -- that ``Popen`` rejects these before the operating
+    system sees them. It does on POSIX, where an empty argv is an ``IndexError``
+    and a NUL is a ``ValueError``. On Windows an empty argv reaches
+    ``CreateProcess``, comes back as ``OSError`` (``WinError 87``), and was
+    classified ``BACKEND_UNREACHABLE`` -- so the same request got two different
+    answers depending on where it ran, and the wrong one told the caller to
+    retry something no retry can fix.
+    """
 
     for command in ([], [sys.executable, "-c", "pass\x00"]):
         result = provider.start(_request(tmp_path, "s-1", command=command))
         assert isinstance(result, s1.Failure), command
-        assert result.kind is s1.FailureKind.REFUSED_BY_PROVIDER
+        assert result.kind is s1.FailureKind.REFUSED_BY_PROVIDER, command
     assert provider.list_sessions().value == ()
+
+
+def test_an_unusable_command_never_reaches_a_spawn(tmp_path: Path, provider, monkeypatch):
+    """The classification must not depend on which layer does the rejecting.
+
+    This is the assertion the platform-specific version could not make. Whether
+    an empty argv raises in Python or in ``CreateProcess`` differs by platform,
+    so a test that only checks the resulting ``kind`` passes on the platform it
+    was written on and says nothing about the other. Pinning that the caller's
+    command never reaches ``Popen`` states the property itself -- the verdict is
+    a fact about the request rather than about the operating system underneath
+    -- and fails everywhere if the check moves back behind the spawn.
+
+    Note that ``Popen`` *is* called during a refused start: the provider runs
+    its own version probe (D-0010) first. So "``Popen`` was never called" is the
+    wrong assertion, and the right one is that **the caller's argv** was never
+    the thing spawned.
+    """
+
+    spawned: list[object] = []
+    real_popen = subprocess.Popen
+
+    def record(*args, **kwargs):
+        spawned.append(args[0] if isinstance(args[0], str) else list(args[0]))
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", record)
+
+    unusable = ([], [sys.executable, "-c", "pass\x00"], "a-bare-string")
+    for command in unusable:
+        result = provider.start(_request(tmp_path, "s-1", command=command))
+        assert isinstance(result, s1.Failure), command
+        assert result.kind is s1.FailureKind.REFUSED_BY_PROVIDER, command
+
+    for command in unusable:
+        assert command not in spawned, f"{command!r} was handed to Popen"
+    # A bare string must not be taken apart either: iterating it would spawn
+    # its first character, which is what the shape check exists to prevent.
+    assert list("a-bare-string") not in spawned
+    assert provider.list_sessions().value == ()
+
+
+def test_the_windows_spawn_failure_no_longer_changes_the_answer(
+    tmp_path: Path, provider, monkeypatch
+):
+    """The reported CI failure, reproduced on any platform.
+
+    On Windows an empty argv reached ``CreateProcess`` and came back as
+    ``OSError(EINVAL)`` -- ``[WinError 87] The parameter is incorrect`` -- which
+    is indistinguishable at the call site from a genuine spawn failure and was
+    therefore classified ``BACKEND_UNREACHABLE``. The behaviour is injected here
+    so the regression is provable without a Windows runner: if the check ever
+    moves back behind the spawn, this fails on Linux and macOS too.
+    """
+
+    real_popen = subprocess.Popen
+
+    def spawn_like_windows(*args, **kwargs):
+        # Only the *child* spawn behaves like Windows. The provider runs its own
+        # version probe through Popen first, and failing that instead would trip
+        # the fail-closed spawn precondition and never reach the case under test.
+        if not args[0]:
+            raise OSError(22, "[WinError 87] The parameter is incorrect")
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", spawn_like_windows)
+
+    result = provider.start(_request(tmp_path, "s-1", command=[]))
+    assert isinstance(result, s1.Failure)
+    assert result.kind is s1.FailureKind.REFUSED_BY_PROVIDER, (
+        "an empty argv is unusable caller settings on every platform; letting "
+        "the operating system's errno decide makes the same request get two "
+        "different answers depending on where it runs"
+    )
+
+
+def test_a_well_formed_command_that_cannot_be_spawned_is_still_unreachable(
+    tmp_path: Path, provider
+):
+    """The refusal must not over-reach and swallow real spawn failures.
+
+    A command that is *well formed* but names something that will not start is a
+    different answer -- the backend could not be reached -- and moving the
+    unusability check earlier must not collapse the two. If it did, a genuinely
+    broken environment would be reported as a configuration mistake.
+    """
+
+    missing = str(tmp_path / "no-such-executable-anywhere")
+    result = provider.start(_request(tmp_path, "s-1", command=[missing]))
+
+    assert isinstance(result, s1.Failure)
+    assert result.kind is s1.FailureKind.BACKEND_UNREACHABLE
+    assert provider.list_sessions().value == ()
+
+
+def test_the_refused_command_is_reported_back_with_the_refusal(
+    tmp_path: Path, provider
+):
+    """The caller has to be able to see *which* setting was unusable."""
+
+    result = provider.start(_request(tmp_path, "s-1", command=[]))
+    assert result.provider_detail == {"command": []}
+    assert "at least one argument" in result.detail
 
 
 def test_a_state_word_that_is_not_utf8_is_could_not_observe(tmp_path: Path, provider):
