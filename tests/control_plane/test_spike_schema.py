@@ -12,6 +12,7 @@ itself rather than described in prose.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -705,10 +706,26 @@ def test_state_survives_the_process_that_wrote_it(cp, db_path, tmp_path):
         "state = reconstruct(connection, now_ms=int(sys.argv[2]))\n"
         "print(json.dumps(dataclasses.asdict(state)))\n"
     )
+    # Inherit the environment and add src to it, rather than handing the child a
+    # hand-built one: on Windows an interpreter started without SystemRoot and
+    # without the PATH its DLLs are found on does not reach main() at all, so a
+    # replaced environment fails the test for a reason that has nothing to do
+    # with what it is testing.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(src), env["PYTHONPATH"]]) if env.get(
+        "PYTHONPATH"
+    ) else str(src)
+
     result = subprocess.run(
         [sys.executable, "-c", program, str(db_path), str(T0 + 1_000)],
-        capture_output=True, text=True, env={"PYTHONPATH": str(src), "PATH": "/usr/bin:/bin"},
-        check=True,
+        capture_output=True, text=True, env=env,
+    )
+    # Report the child's own words. check=True raises a CalledProcessError that
+    # carries the exit status and nothing else, which is a failure nobody can
+    # diagnose from a CI log.
+    assert result.returncode == 0, (
+        f"the recovering process exited {result.returncode}\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
     recovered = json.loads(result.stdout)
