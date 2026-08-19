@@ -86,6 +86,7 @@ __all__ = [
     "LeaseRefusal",
     "LeaseUsageError",
     "ProtectedWrite",
+    "PROTECTED_TABLES",
     "ProtectedWriteMissed",
     "StaleWriterRefused",
     "UnfencedStatement",
@@ -627,14 +628,28 @@ def fenced_update(
     unprovable after the fact rather than false.
     """
 
-    _require_identifier("table", table)
+    _require_table(table)
     _require_fragment("set_clause", set_clause)
     _require_fragment("where", where)
     _require_stamp(table, set_clause, stamps_writer_epoch)
+    assigned = _assigned_columns(set_clause)
+    forbidden = sorted(assigned & set(_EVIDENCE_COLUMNS))
+    if forbidden:
+        raise UnfencedStatement(
+            f"a protected write may not assign {forbidden} on {table}: those columns "
+            "are what a row in the history is attributed by, and a write that "
+            "rewrites them replaces evidence rather than adding to it"
+        )
+    # An applied action row is finished evidence. Without this an update could
+    # land on one and restamp its epoch under a later lease, which would rewrite
+    # the very attribution write_history() reads the single-writer property out
+    # of. Composed here rather than asked of the caller: a guard the caller has
+    # to remember is not a guard.
+    guard = " AND applied_at_ms IS NULL" if table == "action" else ""
     return FencedStatement(
         f"UPDATE {table}\n"
         f"   SET {set_clause}\n"
-        f" WHERE ({where})\n"
+        f" WHERE ({where}){guard}\n"
         f"   AND {FENCE_SQL}",
         issued_by=_BUILDER,
     )
@@ -657,7 +672,7 @@ def fenced_insert(
     expression is exactly ``:fence_epoch`` -- see :func:`fenced_update`.
     """
 
-    _require_identifier("table", table)
+    _require_table(table)
     if len(columns) != len(values):
         raise LeaseUsageError(
             f"{len(columns)} column(s) but {len(values)} value expression(s)"
@@ -673,6 +688,47 @@ def fenced_insert(
         f" WHERE {FENCE_SQL}",
         issued_by=_BUILDER,
     )
+
+
+#: The tables a protected write may target: S5's six, and nothing else. The
+#: table name is interpolated into the statement, and a name is not a fragment
+#: the caller gets to compose -- ``"action (x) SELECT 1 WHERE 1 /*"`` would
+#: comment out the builder's own columns, values and fence, leaving a statement
+#: that inserts under a stale token. A closed set is the check that cannot be
+#: walked past by a cleverer string.
+PROTECTED_TABLES = ("run", "session", "lease", "outbox", "incident", "action")
+
+#: What a row is *identified and attributed by*. A protected write may not assign
+#: any of them: rewriting the kind of a row already in the history replaces the
+#: attribution :func:`write_history` is read out of, and the identity columns are
+#: frozen by the schema's own triggers for the same reason -- refused here too,
+#: where the message says which rule was broken rather than which trigger fired.
+#:
+#: Lifecycle columns are deliberately absent. ``status``, ``delivered_at_ms`` and
+#: ``applied_at_ms`` are what a protected write is usually *for*; the schema
+#: keeps those forward-only and set-once, which is a different question from
+#: whether a row may be re-attributed.
+_EVIDENCE_COLUMNS = ("action_id", "kind", "idempotency_key", "message_id", "dedup_key")
+
+
+def _require_table(table: str) -> str:
+    if table not in PROTECTED_TABLES:
+        raise UnfencedStatement(
+            f"{table!r} is not one of the protected tables {PROTECTED_TABLES}. The "
+            "table name is interpolated into the statement, so it is chosen from a "
+            "closed set rather than validated as text -- a name carrying its own "
+            "SQL can comment the builder's fence out of the statement entirely"
+        )
+    return table
+
+
+def _assigned_columns(set_clause: str) -> set[str]:
+    """The column names *set_clause* assigns to, read off its structure."""
+
+    return {
+        match.group(1)
+        for match in re.finditer(r"(?:^|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", _outside_literals(set_clause))
+    }
 
 
 def _require_stamp(table: str, assignments: str, stamps_writer_epoch: bool) -> None:
@@ -694,31 +750,82 @@ def _require_stamp(table: str, assignments: str, stamps_writer_epoch: bool) -> N
         )
 
 
+def _outside_literals(fragment: str) -> str:
+    """*fragment* with every quoted literal replaced by a blank of equal length.
+
+    A parenthesis inside ``'('`` is text, not structure, and a scan that cannot
+    tell the two apart is a scan that can be walked past: ``'(' = '(') OR 1 = 1
+    AND ')' = ')'`` balances character for character while genuinely closing the
+    wrapper the fence is ANDed onto. So the literals come out first, by SQLite's
+    own rules -- ``'...'`` for strings with ``''`` as the escape, ``"..."`` and
+    ``[...]`` for identifiers -- and the structural check then runs on what is
+    left, which is all and only structure.
+
+    :raises UnfencedStatement: if a quote is never closed, which would swallow
+        the fence into a string literal.
+    """
+
+    closers = {"'": "'", '"': '"', "[": "]"}
+    out = []
+    quote: str | None = None
+    index = 0
+    while index < len(fragment):
+        character = fragment[index]
+        if quote is None:
+            if character in closers:
+                quote = closers[character]
+                out.append(" ")
+            else:
+                out.append(character)
+            index += 1
+            continue
+        if character == quote:
+            # Doubling is SQLite's escape inside a quoted token, so a pair is
+            # content and a single one ends it.
+            if quote != "]" and fragment[index + 1 : index + 2] == quote:
+                out.append("  ")
+                index += 2
+                continue
+            quote = None
+        out.append(" ")
+        index += 1
+    if quote is not None:
+        raise UnfencedStatement(
+            f"a quoted token is never closed; the rest of the statement -- the "
+            f"fence included -- would be swallowed into it"
+        )
+    return "".join(out)
+
+
 def _require_fragment(field: str, fragment: str) -> None:
     """Refuse a SQL fragment that could reach outside the shape it is placed in.
 
-    The builders compose the fence into the statement by text, so a fragment
-    that closes a parenthesis it did not open, or opens a comment, can put the
-    fence somewhere it no longer gates the write: ``where="id = :id) OR 1 = 1
-    --"`` renders as ``WHERE (id = :id) OR 1 = 1 --) AND <fence>``, and every row
+    The builders compose the fence into the statement by text, so a fragment that
+    closes a parenthesis it did not open, or opens a comment, can put the fence
+    somewhere it no longer gates the write: ``where="id = :id) OR 1 = 1 --"``
+    renders as ``WHERE (id = :id) OR 1 = 1 --) AND <fence>``, and every row
     matching ``1 = 1`` changes under a stale token. Nothing about that is
     hypothetical once the fence is claimed to be structural rather than
-    conventional, so the structural characters are refused outright: a protected
-    write's predicate is a predicate, not an opportunity to restructure the
-    statement.
+    conventional, so the structural characters are refused outright -- after the
+    quoted literals have been taken out, so that neither a comment nor a
+    parenthesis can hide inside a string.
+
+    A protected write's predicate is a predicate, not an opportunity to
+    restructure the statement.
     """
 
     if not isinstance(fragment, str) or not fragment.strip():
         raise LeaseUsageError(f"{field} must be a non-empty SQL fragment")
+    structure = _outside_literals(fragment)
     for token in ("--", "/*", "*/", ";"):
-        if token in fragment:
+        if token in structure:
             raise UnfencedStatement(
                 f"{field} contains {token!r}. A comment or statement separator in a "
                 "fragment the fence is composed into can move the fence out of the "
                 "write's predicate, so it is refused rather than rendered"
             )
     depth = 0
-    for character in fragment:
+    for character in structure:
         depth += (character == "(") - (character == ")")
         if depth < 0:
             raise UnfencedStatement(

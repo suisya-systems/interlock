@@ -41,6 +41,7 @@ from claude_org_runtime.control_plane.lease import (
     LeaseHeld,
     LeaseNotHeld,
     LeaseUsageError,
+    PROTECTED_TABLES,
     ProtectedWrite,
     ProtectedWriteMissed,
     StaleWriterRefused,
@@ -433,6 +434,91 @@ def test_a_fenced_statement_that_forgets_the_epoch_is_refused():
     fenced_update(
         "run", set_clause="status = 'done'", where="run_id = :r", stamps_writer_epoch=False
     )
+
+
+def test_a_fragment_cannot_hide_its_structure_inside_a_string_literal(cp):
+    """The parenthesis inside `'('` is text; the one that closes the wrapper is not.
+
+    This predicate balances character for character while genuinely closing the
+    parentheses the fence is ANDed onto and putting a true `OR` branch in front
+    of it. The literals are taken out before the structural scan, by SQLite's
+    own quoting rules, so what is scanned is all and only structure.
+    """
+
+    with pytest.raises(UnfencedStatement):
+        fenced_update(
+            "action",
+            set_clause="writer_epoch = :fence_epoch",
+            where="'(' = '(') OR (1 = 1 AND ')' = ')'",
+        )
+    with pytest.raises(UnfencedStatement):  # a comment hidden the same way
+        fenced_update(
+            "action", set_clause="writer_epoch = :fence_epoch", where="x = 'a' AND y = 'b'--'"
+        )
+    # ...and an honest literal containing those characters is still accepted.
+    fenced_update(
+        "outbox",
+        set_clause="recipient = 'a(b', writer_epoch = :fence_epoch",
+        where="payload = '--'",
+    )
+
+
+def test_the_table_is_chosen_from_a_closed_set_not_composed(cp):
+    """A table name carrying its own SQL can comment the fence away entirely.
+
+    ``action (x) SELECT 1 WHERE 1 /*`` leaves SQLite reading an unterminated
+    block comment to end of input, so the builder's columns, values and fence
+    are never part of the statement at all. A name is not a fragment, so it is
+    picked from the closed set rather than validated as text.
+    """
+
+    assert set(PROTECTED_TABLES) == {"run", "session", "lease", "outbox", "incident", "action"}
+    with pytest.raises(UnfencedStatement):
+        fenced_insert(
+            "action (action_id) SELECT 'x' WHERE 1 /*",
+            columns=["action_id", "writer_epoch"],
+            values=[":a", ":fence_epoch"],
+        )
+    with pytest.raises(UnfencedStatement):
+        fenced_update("sqlite_master", set_clause="writer_epoch = :fence_epoch", where="1 = 1")
+
+
+def test_a_protected_write_cannot_rewrite_an_applied_rows_attribution(cp):
+    """Finished evidence is added to, never replaced.
+
+    Two rules, and both are the builder's rather than the caller's memory: the
+    columns a row is attributed by cannot be assigned at all, and an update to
+    `action` carries `applied_at_ms IS NULL` so it cannot land on a row that is
+    already in the history and restamp its epoch under a later lease.
+    """
+
+    for column in ("kind", "idempotency_key", "action_id"):
+        with pytest.raises(UnfencedStatement):
+            fenced_update(
+                "action",
+                set_clause=f"{column} = :x, writer_epoch = :fence_epoch",
+                where="action_id = :a",
+            )
+
+    alpha = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
+    protected_write(cp, alpha, effect("a1", now_ms=T0 + 1), now_ms=T0 + 1)
+    beta = acquire(cp, resource=RESOURCE, holder="beta", now_ms=T0 + TTL + 1, ttl_ms=TTL)
+
+    restamp = ProtectedWrite(
+        kind=EFFECT_KIND,
+        idempotency_key="a1",
+        statement=fenced_update(
+            "action", set_clause="writer_epoch = :fence_epoch", where="action_id = :action_id"
+        ),
+        exactly_once_mechanism="transactional_with_record",
+        params={"action_id": "a1"},
+    )
+    # beta holds a perfectly live token -- and still cannot touch alpha's row.
+    with pytest.raises(ProtectedWriteMissed):
+        protected_write(cp, beta, restamp, now_ms=T0 + TTL + 2)
+
+    (row,) = write_history(cp, resource=RESOURCE)
+    assert row["writer_epoch"] == alpha.epoch
 
 
 def test_a_caller_cannot_rebind_the_fences_own_parameters():

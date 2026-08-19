@@ -29,8 +29,13 @@ UPDATE outbox
 ```
 
 `protected_write()` accepts only a `FencedStatement`, which `fenced_update()` / `fenced_insert()`
-alone can issue (and those builders refuse a fragment carrying a comment, a statement separator, or
-an unbalanced parenthesis, since any of the three can move the fence out of the write's predicate) — a substring check over SQL text is not enough, because a statement can carry
+alone can issue. Those builders pick the table from a closed set (a name is interpolated, and one
+carrying its own SQL can comment the fence out of the statement entirely), and they refuse a fragment
+carrying a comment, a statement separator, or an unbalanced parenthesis — checked after the quoted
+literals have been blanked out by SQLite's own quoting rules, so neither a comment nor a parenthesis
+can hide inside a string. They also refuse to assign the columns a row is attributed by, and an
+update to `action` carries `applied_at_ms IS NULL`, so finished evidence is added to and never
+replaced — a substring check over SQL text is not enough, because a statement can carry
 `FENCE_SQL` verbatim inside a `SET` expression while its `WHERE` gates nothing, change its row under
 a stale token, and report a positive `rowcount`. The builders put the fence in the write's own
 predicate and nowhere else, and they also require `writer_epoch = :fence_epoch` among the
@@ -148,6 +153,19 @@ name for name. A residual that drifts out of the code is a residual nobody is ho
 - **A protected write must own its transaction.** A lease operation nested inside somebody else's
   open transaction would commit on their schedule, and a recorded refusal would be exactly as durable
   as whatever they decide to do next; the module refuses rather than inheriting a transaction.
+- **The fence is composed into caller-supplied SQL fragments by text.** The builders make that safe
+  structurally — closed table set, literals blanked before the structural scan, the fence ANDed onto
+  the caller's parenthesised predicate — but the fully structural answer is a typed predicate builder
+  that never takes raw SQL from a caller at all. That is a larger API change than S6 needs and is
+  recorded here rather than started; the fragments come from the developer writing the call, not from
+  untrusted input.
+- **The applied-evidence guard is this module's, not the schema's.** A protected write cannot restamp
+  an applied `action` row, but a direct `UPDATE` outside this module still can: the schema freezes the
+  idempotency key, the applied instant and the refusal, and not `writer_epoch` or `kind`. Making it a
+  trigger means editing `spike_schema.sql`, which changes the schema fingerprint and therefore
+  **refuses every existing database** (D-0026 promises no migration) — a decision that belongs with
+  the schema and with S7, which is being built against it in parallel, rather than being slipped in
+  from here.
 - **SQLite cannot tell a completed side effect from one that never started** (`ACCEPTANCE.md` §2).
   The fence orders writes; it does not close that window. Every protected write names its
   exactly-once mechanism, and where neither mechanism is achievable the action is a human gate
