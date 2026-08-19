@@ -62,8 +62,8 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | 1 | Public CLI alone can start / read state / stop / resume | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#6`, `#7` — not yet landed | The spike (phases 1a/1b) |
 | 2 | Unique session↔run re-match across the crash window; no duplicate writer | `failed` on C1; `pending` on C2 | `n/a — failed` (C1); `pending` (C2) | `C1 (Agent View)` → `C2 (claude -p subprocesses)` | D-0027; `investigation/u1-session-id-bg-experiment.md`; `investigation/pre-spawn-fence-search.md`. C2 re-proof: `#18` (provider `#17`) — not yet landed | The spike (phase 6), on C2 |
 | 3 | Per-role permission / sandbox / hooks survive restart and fail closed | `discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#9`; `docs/per-role-fencing.md`; `src/claude_org_runtime/fencing/`; `tests/fencing/`; `investigation/i04-pretooluse-fence-probe.md` (U15, U35, U42). `#8` closed as **moot** under C2, not passed | The spike (phase 2b) |
-| 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `pending` | `pending` | `pending` | `#12` (S5, the store the resume reads from) landed 2026-08-19; `#13`, `#14`, `#16` — not yet landed | The spike (phases 4–5) |
-| 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#12` (S5) landed 2026-08-19; `#13`, `#14`, `#15`, `#16` — not yet landed | The spike (phases 4–5) |
+| 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `pending` | `pending` | `pending` | `#12` (S5) landed 2026-08-19; `#14` (S7 outbox + one declared handler) landed 2026-08-19; `#13`, `#16` — not yet landed | The spike (phases 4–5) |
+| 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#12` (S5) landed 2026-08-19; `#14` (S7) landed 2026-08-19; `#13`, `#15`, `#16` — not yet landed | The spike (phases 4–5) |
 | 6 | `MessageBus` delivers and resends independently of the UI | `pending` | `pending` | `pending` | `#19` — not yet landed | The spike (phase 7) |
 | 7 | Unsaved artifacts protected from the managed worktree lifecycle | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#7` — not yet landed | The spike (phase 1b) |
 | 8 | Secretary window responsiveness under worker load | `pending` rehearsal → **not discharged** | `pending` | `pending` | `#21` (rehearsal) — not yet landed | **Before the canary starts** (D-0022) |
@@ -219,8 +219,14 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 - **D-0022 label:** `pending`
 - **Provider:** `pending` — a control-plane property; re-run for regression against a new provider,
   not redesigned (`ACCEPTANCE.md` §4).
-- **Evidence:** `#13` (lease/fencing token), `#14` (outbox), `#16` (the `ACCEPTANCE.md` §2 matrix as
-  an automated suite). Not yet landed. `#12` (S5) landed 2026-08-19:
+- **Evidence:** `#13` (lease/fencing token) and `#16` (the `ACCEPTANCE.md` §2 matrix as an
+  automated suite) have not landed. `#14` (S7 — outbox, one handler) landed 2026-08-19:
+  `src/claude_org_runtime/control_plane/{outbox,handlers,destination}.py`, tests
+  `tests/control_plane/test_outbox.py`. It supplies the *no double execution* half of this item at
+  the message level: one effect per dedup key, with the effect record deduplicated by
+  `action_one_effect_per_key` on our side **and** by the destination's own idempotency ledger on the
+  other. Landing it proves nothing about the item as a whole — the three-component kill matrix is
+  `#15`'s and `#16`'s. `#12` (S5) landed 2026-08-19:
   `src/claude_org_runtime/control_plane/`, tests `tests/control_plane/`. It is the store this item
   resumes *from* — the five recovery reads are `RECONSTRUCTION_QUERIES`, and the suite proves the
   reconstruction is answerable by query alone by dropping the interpreter and re-reading it from a
@@ -229,17 +235,34 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 - **Residual:** none recorded yet. The known structural limit is stated in `ACCEPTANCE.md` §2:
   SQLite alone cannot distinguish a completed side effect from one that never started, so each
   action handler must **name** its exactly-once mechanism (destination idempotency key, or effect
-  transactional with its record) or route to a human gate (D-0004).
+  transactional with its record) or route to a human gate (D-0004). `#14` discharges the naming
+  obligation *mechanically* rather than by convention: `HandlerRegistry` refuses a handler that does
+  not declare a mechanism from the enumeration `action.exactly_once_mechanism` already carries, and
+  the suite re-checks every shipped handler class so that one bypassing the registry still fails.
+  The limit itself is unchanged and is not claimed to be closed.
 
 ### Item 5 — lease, outbox resend, ack, dedup, single-writer confirmed by fault injection
 
 - **Verdict:** `pending`
 - **D-0022 label:** `pending`
 - **Provider:** `pending` — control-plane property, as item 4.
-- **Evidence:** `#13`, `#14`, `#15` (deterministic kill points), `#16`. Not yet landed.
+- **Evidence:** `#13`, `#15` (deterministic kill points) and `#16` have not landed. `#14` (S7)
+  landed 2026-08-19 and carries the **outbox resend, ack and dedup** rows of `ACCEPTANCE.md` §2:
+  a lost ack resends without losing the message; a duplicate or late ack changes nothing and the
+  row shows exactly one acked state; `retry_count` counts *attempts* rather than successes and is
+  proven monotonic across a real process restart (a fresh interpreter, not a second connection);
+  and no unfinished row is left without a live owner after recovery — exported as
+  `UNOWNED_OUTBOX_QUERY` so the criterion can be run by hand against a recovered database. The
+  single-writer row is fenced but its lease half is `#13`'s.
 - **Residual:** none recorded yet. Per `ACCEPTANCE.md` §2, a case certifying exactly-once for an
   **external** effect from our own rows alone does not count, and every case must be automated and
-  reproducible — no manual one-shot demonstrations.
+  reproducible — no manual one-shot demonstrations. `#14` is written to that rule: its exactly-once
+  assertions read the **destination's** effect count, and the strongest of them deletes the
+  control-plane database before asking, so no row of ours can be what makes it pass. The standing
+  caveat is that the destination is a **spike stand-in** (`KeyedDropbox`, an `O_EXCL` keyed
+  dropbox) rather than a production counterparty; it models the property the item turns on — that
+  the *destination* refuses the duplicate — and re-proving the item against a real destination is
+  `#16`'s and the canary's, not this issue's.
 - **Notes:** D-0027 moves the fencing token and its tests from "belt and braces" to **the only
   exclusion in the system**. Item 5's single-writer cases are therefore where item 2's residual is
   actually carried.
@@ -393,7 +416,7 @@ anything.
 | S3 — the stub provider | throwaway | `#11` — landed 2026-08-19: `src/claude_org_runtime/session/stub_provider.py`, tests `tests/session/test_stub_provider.py`. Local child processes only: no Claude CLI, no network. Throwaway under D-0026, but it survives a C2 switch untouched |
 | S4 — the probe harnesses | throwaway | `#6`, `#7` |
 | **S5 — the spike SQLite schema** | **throwaway — named explicitly by D-0026** | `#12` — landed 2026-08-19: `src/claude_org_runtime/control_plane/spike_schema.sql`, tests `tests/control_plane/`. The file carries its own note, at the top, that it is a spike schema and that **no migration path is promised from it**, and the loader refuses DDL whose marking has been removed. A database at another revision is **refused, never migrated**. `Q-0001` stays open and is not answered by inertia: no column, CHECK or index names a component or a role, and `Q-0002` stays open too — `dedup_key` is indexed but not unique, so neither collapse rule is forced |
-| S6 / S7 — lease and outbox implementations | throwaway (their tests are durable) | `#13`, `#14` |
+| S6 / S7 — lease and outbox implementations | throwaway (their tests are durable) | `#13`; `#14` landed 2026-08-19 — `src/claude_org_runtime/control_plane/{outbox,handlers,destination}.py` is throwaway, `tests/control_plane/test_outbox.py` is the durable half |
 | S8 — `MessageBus` MCP endpoint | throwaway (the no-edge assertion is durable) | `#19` |
 | S10 — per-role fencing renderer, `PreToolUse` deny hook, breach-probe battery | throwaway implementation, durable tests | `#9`; implementation `src/claude_org_runtime/fencing/`, tests `tests/fencing/`. Landed 2026-08-18; nothing here is promoted by having discharged item 3 |
 | Curator promotion gate implementation | throwaway | PR `#27`, `src/claude_org_runtime/curator/` |
