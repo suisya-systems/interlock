@@ -19,8 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Check-then-write is not offered at all.** `ACCEPTANCE.md` §2 names it as the
   wrong answer -- the lease can expire between the check and the write -- so
   there is no `is_held()` to consult, `Lease.looks_live_at()` says in its own
-  docstring that it must never gate a write, and `protected_write()` **refuses**
-  any statement that does not carry `FENCE_SQL` verbatim. The suite writes the
+  docstring that it must never gate a write, and `protected_write()` accepts
+  **only** a `FencedStatement` that `fenced_update()` / `fenced_insert()`
+  issued -- a substring check over SQL text would pass a statement carrying the
+  fence inside a `SET` expression while its `WHERE` gates nothing. The suite writes the
   unfenced shape out by hand, shows it admitting a writer whose lease was taken
   over inside the window, and shows the atomic shape refusing the same token.
 
@@ -53,9 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every pair; and the durable half is `write_history()` over `action`, where
   every fenced attempt is stamped with the epoch it was written under and
   `applied_epoch_regressions()` reads the single-writer property back by query
-  from SQLite alone (D-0001). A fenced statement that does not stamp
-  `writer_epoch` is refused, because that history is what makes the property
-  provable afterwards.
+  from SQLite alone (D-0001). A statement that does not assign
+  `writer_epoch = :fence_epoch` is refused at build time, because that history
+  is what makes the property provable afterwards. Since `action` has no resource
+  column (`Q-0001`), `effect_kind(resource, effect)` encodes the resource in
+  `action.kind` and the regression check refuses a history that mixes kinds --
+  two resources' epochs are independent and comparing them means nothing.
+  Releasing a lease only ever shortens it: a late release may not push an
+  expired lease's expiry forward and revive the releasing holder's own token.
 
   **Where a destination can enforce a stale token it does, and where it cannot
   that is written down.** `DESTINATIONS` refuses to register a destination that

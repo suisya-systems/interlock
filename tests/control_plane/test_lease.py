@@ -36,6 +36,7 @@ from claude_org_runtime.control_plane.lease import (
     Destination,
     DestinationRejectedStaleToken,
     EpochGuardedDestination,
+    FencedStatement,
     Lease,
     LeaseHeld,
     LeaseNotHeld,
@@ -48,6 +49,7 @@ from claude_org_runtime.control_plane.lease import (
     applied_epoch_regressions,
     authority_timeline,
     claimed_timeline,
+    effect_kind,
     epoch_regressions,
     fenced_insert,
     fenced_update,
@@ -93,7 +95,7 @@ def cp(db_path: Path):
 # visible as a row rather than as a suspicion.
 # --------------------------------------------------------------------------
 
-EFFECT_KIND = "deliver_task"
+EFFECT_KIND = effect_kind(RESOURCE, "deliver_task")
 
 APPLY_EFFECT = fenced_insert(
     "action",
@@ -379,27 +381,51 @@ def test_an_unfenced_statement_cannot_be_run_through_this_module():
             statement="UPDATE action SET status = 'applied' WHERE action_id = :a",
             exactly_once_mechanism="transactional_with_record",
         )
-    assert "check" in str(refused.value)
+    assert "fenced_update" in str(refused.value)
+
+
+def test_a_statement_that_mentions_the_fence_without_obeying_it_is_refused(cp):
+    """The shape a substring check would have waved through.
+
+    This statement carries ``FENCE_SQL`` verbatim -- in a ``SET`` expression,
+    where it decides a *value* rather than whether the row changes. Under a
+    stale token it still updates its row and still reports a positive rowcount:
+    a protected write that silently is not one. Only the builders can issue a
+    statement, so this cannot be handed to :func:`protected_write` at all.
+    """
+
+    smuggled = (
+        "UPDATE action\n"
+        f"   SET writer_epoch = CASE WHEN {FENCE_SQL} THEN :fence_epoch ELSE 0 END\n"
+        " WHERE action_id = :action_id"
+    )
+    with pytest.raises(UnfencedStatement):
+        ProtectedWrite(
+            kind=EFFECT_KIND,
+            idempotency_key="k",
+            statement=smuggled,
+            exactly_once_mechanism="transactional_with_record",
+        )
+    # ...and it cannot be laundered into one either.
+    with pytest.raises(UnfencedStatement):
+        FencedStatement(smuggled)
 
 
 def test_a_fenced_statement_that_forgets_the_epoch_is_refused():
     """The history is only readable if every fenced write stamps its epoch."""
 
-    statement = fenced_update("action", set_clause="status = 'applied'", where="action_id = :a")
     with pytest.raises(UnfencedStatement):
-        ProtectedWrite(
-            kind=EFFECT_KIND,
-            idempotency_key="k",
-            statement=statement,
-            exactly_once_mechanism="transactional_with_record",
-        )
+        fenced_update("action", set_clause="status = 'applied'", where="action_id = :a")
+    # Mentioning the column is not stamping it: a predicate that names
+    # writer_epoch, or a constant assigned to it, leaves a row whose epoch means
+    # nothing, and write_history() would then be reading a number it cannot trust.
+    with pytest.raises(UnfencedStatement):
+        fenced_update("action", set_clause="writer_epoch = 1", where="action_id = :a")
+    with pytest.raises(UnfencedStatement):
+        fenced_insert("action", columns=["action_id", "writer_epoch"], values=[":a", "1"])
     # ...and the opt-out is explicit, for a target that genuinely has no such column.
-    ProtectedWrite(
-        kind=EFFECT_KIND,
-        idempotency_key="k",
-        statement=statement,
-        exactly_once_mechanism="transactional_with_record",
-        stamps_writer_epoch=False,
+    fenced_update(
+        "run", set_clause="status = 'done'", where="run_id = :r", stamps_writer_epoch=False
     )
 
 
@@ -558,6 +584,41 @@ def test_the_write_history_shows_no_interleaving_from_the_rejected_writer(cp):
     assert not applied_epoch_regressions(history)
     assert [row["writer_epoch"] for row in history if row["status"] == "applied"] == [1, 2, 2]
     assert [row["writer_epoch"] for row in history if row["status"] == "refused"] == [1]
+
+
+def test_two_resources_epochs_are_not_compared_with_each_other(cp):
+    """Epochs belong to a resource, and the spike rows cannot say which.
+
+    ``action`` has no resource column (``Q-0001``), so a history that mixes
+    kinds is several independent sequences shuffled together: a valid epoch 2
+    for one resource followed by a valid epoch 1 for another would read as a
+    violation, and a real interleaving would hide in the same noise. The check
+    refuses rather than answering a question the rows cannot support, and
+    :func:`effect_kind` is how a kind carries its resource.
+    """
+
+    first = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
+    acquire(cp, resource=RESOURCE, holder="beta", now_ms=T0 + TTL + 1, ttl_ms=TTL)
+    promoted = acquire(cp, resource=RESOURCE, holder="gamma", now_ms=T0 + 2 * TTL + 2, ttl_ms=TTL)
+    other = acquire(cp, resource="run/r2", holder="alpha", now_ms=T0 + 2 * TTL + 2, ttl_ms=TTL)
+    other_kind = effect_kind("run/r2", "deliver_task")
+
+    protected_write(cp, promoted, effect("a1", now_ms=T0 + 2 * TTL + 3), now_ms=T0 + 2 * TTL + 3)
+    protected_write(
+        cp,
+        other,
+        effect("b1", now_ms=T0 + 2 * TTL + 4, kind=other_kind),
+        now_ms=T0 + 2 * TTL + 4,
+    )
+
+    assert first.epoch < promoted.epoch and other.epoch == 1  # epoch 3 then epoch 1
+    with pytest.raises(LeaseUsageError) as refused:
+        applied_epoch_regressions(write_history(cp))
+    assert "effect_kind" in str(refused.value)
+
+    # Scoped to one resource, each history is a clean sequence of its own.
+    assert not applied_epoch_regressions(write_history(cp, kind=EFFECT_KIND))
+    assert not applied_epoch_regressions(write_history(cp, kind=other_kind))
 
 
 def test_write_history_is_answerable_by_query_after_the_process_is_gone(cp, db_path):
@@ -742,6 +803,30 @@ def test_releasing_with_a_clock_behind_the_acquisition_stays_legal(cp):
     assert not released.looks_live_at(T0 + 1)
 
 
+def test_releasing_late_never_pushes_an_expiry_forward(cp):
+    """Giving a lease up may not be the thing that extends it.
+
+    The lease expired at ``T0 + TTL`` and nobody took it. Releasing it an hour
+    later must not move the expiry to the hour mark: that would make the
+    releasing holder's own token read live again over the interval it had
+    already lost, and would withhold the resource from a claimant whose clock
+    falls inside it.
+    """
+
+    lease = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
+
+    released = release(cp, lease, now_ms=T0 + 3_600_000)
+
+    assert released.expires_at_ms == lease.expires_at_ms
+    # The token stayed dead throughout the interval a forward-moved expiry would
+    # have revived it over.
+    for now in (T0 + TTL + 1, T0 + TTL + 1000, T0 + 3_600_000 - 1):
+        with pytest.raises(StaleWriterRefused):
+            protected_write(cp, lease, effect(f"a-{now}", now_ms=now), now_ms=now)
+    # And the resource was takeable at every one of those instants.
+    assert acquire(cp, resource=RESOURCE, holder="beta", now_ms=T0 + TTL + 1, ttl_ms=TTL).epoch == 2
+
+
 def test_the_database_never_supplies_a_clock_of_its_own(cp):
     """Every timestamp is the caller's -- there is no DEFAULT to inherit."""
 
@@ -898,7 +983,11 @@ def test_the_only_exclusion_is_the_lease_and_the_module_says_so():
 
 
 def test_fenced_statements_carry_the_fence_verbatim():
-    update = fenced_update("outbox", set_clause="status = 'delivered', writer_epoch = :fence_epoch", where="message_id = :m")
+    update = fenced_update(
+        "outbox",
+        set_clause="status = 'delivered', writer_epoch = :fence_epoch",
+        where="message_id = :m",
+    )
     insert = fenced_insert("action", columns=["action_id", "writer_epoch"], values=[":a", ":fence_epoch"])
 
     assert FENCE_SQL in update and FENCE_SQL in insert

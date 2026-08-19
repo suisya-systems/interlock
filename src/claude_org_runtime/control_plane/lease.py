@@ -60,6 +60,7 @@ holder is a refusal that vanishes exactly when it matters.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -78,6 +79,7 @@ __all__ = [
     "Destination",
     "DestinationRejectedStaleToken",
     "EpochGuardedDestination",
+    "FencedStatement",
     "Lease",
     "LeaseHeld",
     "LeaseNotHeld",
@@ -91,6 +93,7 @@ __all__ = [
     "applied_epoch_regressions",
     "authority_timeline",
     "claimed_timeline",
+    "effect_kind",
     "epoch_regressions",
     "fenced_insert",
     "fenced_update",
@@ -134,7 +137,8 @@ EXACTLY_ONCE_MECHANISMS = (
 #: The write history, as data, so it can be run by hand against a database
 #: recovered from a crash (D-0001). ``action`` has no resource column -- which
 #: component owns which state item is ``Q-0001`` and open -- so the caller names
-#: the effect *kind* it wants the history of.
+#: the effect *kind* it wants the history of, and :func:`effect_kind` is how a
+#: kind carries the resource whose epochs its rows were written under.
 WRITE_HISTORY_QUERY = """
     SELECT action_id, kind, status, writer_epoch, refusal_reason,
            created_at_ms, applied_at_ms
@@ -420,12 +424,19 @@ def release(connection: sqlite3.Connection, lease: Lease, *, now_ms: int) -> Lea
     that validates; the schema blocks the DELETE outright and this is the
     supported way to end a lease early.
 
-    Releasing an already-expired lease is allowed as long as nobody has taken it
-    over -- it is the same token, and the row only moves further into the past.
-    The new expiry is ``MAX(acquired_at_ms + 1, now_ms)`` so that a clock skewed
-    behind the acquisition cannot violate the row's own
-    ``expires_at_ms > acquired_at_ms`` CHECK. That leaves at most a
-    one-millisecond window in which the released lease still reads as live,
+    **A release only ever shortens.** The new expiry is
+    ``MIN(expires_at_ms, MAX(acquired_at_ms + 1, now_ms))``. Both clamps earn
+    their place: the inner one keeps a clock skewed behind the acquisition from
+    violating the row's own ``expires_at_ms > acquired_at_ms`` CHECK, and the
+    outer one keeps a *late* release from pushing the expiry of an
+    already-expired lease **forward** -- which would make the releasing holder's
+    own token read live again over the interval it had already lost, and would
+    withhold the resource from a claimant whose clock falls inside it. Giving a
+    lease up may never be the thing that extends it.
+
+    Releasing an already-expired lease is therefore allowed and is a no-op on
+    the row, as long as nobody has taken it over. The inner clamp still leaves at
+    most a one-millisecond window in which a just-released lease reads as live,
     which is the safe direction: it withholds the resource rather than handing
     it to a second claimant.
 
@@ -437,7 +448,8 @@ def release(connection: sqlite3.Connection, lease: Lease, *, now_ms: int) -> Lea
         cursor = connection.execute(
             """
             UPDATE lease
-               SET expires_at_ms = MAX(lease.acquired_at_ms + 1, :now_ms)
+               SET expires_at_ms = MIN(lease.expires_at_ms,
+                                       MAX(lease.acquired_at_ms + 1, :now_ms))
              WHERE resource = :resource
                AND holder = :holder
                AND epoch = :epoch
@@ -486,33 +498,63 @@ def read_lease(connection: sqlite3.Connection, resource: str) -> Lease | None:
 # --------------------------------------------------------------------------
 
 
+class FencedStatement(str):
+    """SQL that :func:`fenced_update` or :func:`fenced_insert` produced.
+
+    A type, and not a substring check, because a substring check cannot tell a
+    fence that **gates** the write from one parked somewhere harmless. ``UPDATE
+    t SET x = CASE WHEN <fence> THEN 1 ELSE 2 END WHERE id = :id`` contains
+    :data:`FENCE_SQL` verbatim, changes its row under a stale token, and reports
+    a positive ``rowcount`` -- a protected write that silently is not one.
+
+    Only the builders can produce an instance; constructing one directly is
+    refused. That leaves the shape of every protected statement decided in one
+    place, where the fence is appended to the write's own predicate and nowhere
+    else.
+    """
+
+    __slots__ = ()
+
+    def __new__(cls, sql: str, *, issued_by: object = None) -> "FencedStatement":
+        if issued_by is not _BUILDER:
+            raise UnfencedStatement(
+                "a FencedStatement is issued by fenced_update() or "
+                "fenced_insert(), never constructed from SQL text. The builders "
+                "put the fence in the write's own predicate; a hand-written "
+                "statement can carry FENCE_SQL somewhere that does not gate the "
+                "write at all, and no check over the text can tell the two apart"
+            )
+        return super().__new__(cls, sql)
+
+
 @dataclass(frozen=True)
 class ProtectedWrite:
     """One fenced write, and the record its refusal would be kept as.
 
-    *statement* must carry :data:`FENCE_SQL` verbatim -- build it with
-    :func:`fenced_update` or :func:`fenced_insert` rather than by hand.
+    *statement* must be a :class:`FencedStatement` from :func:`fenced_update` or
+    :func:`fenced_insert`. Those builders are also where the ``writer_epoch``
+    stamp is checked: both protected tables in the spike schema carry the
+    column, and a write that does not stamp it from ``:fence_epoch`` leaves a
+    history nobody can read the single-writer property out of afterwards.
 
     *kind* and *idempotency_key* identify the effect, and they are what a
     refusal is recorded under, so they must be meaningful for an attempt that
-    never landed. *exactly_once_mechanism* is the answer ``ACCEPTANCE.md``
-    section 2 requires every handler to give; there is no default, because "the
-    handler did not say" is the case the requirement exists to catch.
+    never landed. Because the spike ``action`` table has no resource column
+    (``Q-0001``), *kind* is also what scopes the write history to one leased
+    resource -- build it with :func:`effect_kind` rather than by hand.
 
-    *stamps_writer_epoch* is on by default: both protected tables in the spike
-    schema carry ``writer_epoch``, and a write that does not stamp it leaves a
-    history nobody can read the single-writer property out of afterwards. Turn
-    it off only for a target that has no such column, and expect to say why.
+    *exactly_once_mechanism* is the answer ``ACCEPTANCE.md`` section 2 requires
+    every handler to give; there is no default, because "the handler did not
+    say" is the case the requirement exists to catch.
     """
 
     kind: str
     idempotency_key: str
-    statement: str
+    statement: FencedStatement
     exactly_once_mechanism: str
     params: Mapping[str, Any] = MappingProxyType({})
     run_id: str | None = None
     incident_id: str | None = None
-    stamps_writer_epoch: bool = True
 
     def __post_init__(self) -> None:
         _require_identifier("kind", self.kind)
@@ -524,21 +566,14 @@ class ProtectedWrite:
                 "every handler to name its mechanism, and an unnamed one is a human "
                 "gate (D-0004) rather than an automatic retry"
             )
-        if FENCE_SQL not in self.statement:
+        if not isinstance(self.statement, FencedStatement):
             raise UnfencedStatement(
-                f"the statement for {self.kind!r} does not carry FENCE_SQL verbatim. "
-                "A protected write validates the fencing token as part of the write; "
-                "checking the lease first and writing afterwards leaves exactly the "
-                "race ACCEPTANCE.md section 2 rules out. Build the statement with "
-                "fenced_update() or fenced_insert()"
-            )
-        if self.stamps_writer_epoch and "writer_epoch" not in self.statement:
-            raise UnfencedStatement(
-                f"the statement for {self.kind!r} does not record writer_epoch. The "
-                "single-writer property is read back out of the epoch each row was "
-                "written under; a fenced write that leaves the column NULL is "
-                "refused here rather than found unprovable later. Pass "
-                "stamps_writer_epoch=False if the target genuinely has no such column"
+                f"the statement for {self.kind!r} was not issued by fenced_update() "
+                "or fenced_insert(). A protected write validates the fencing token "
+                "as part of the write; checking the lease first and writing "
+                "afterwards leaves exactly the race ACCEPTANCE.md section 2 rules "
+                "out -- and so does a statement that mentions the fence without "
+                "letting it decide whether the row changes"
             )
         collisions = sorted(set(dict(self.params)) & set(FENCE_PARAMS))
         if collisions:
@@ -549,24 +584,59 @@ class ProtectedWrite:
             )
 
 
-def fenced_update(table: str, *, set_clause: str, where: str) -> str:
-    """An UPDATE whose WHERE ends in the fence. See :data:`FENCE_SQL`."""
+#: The key that makes :class:`FencedStatement` constructible from here and
+#: nowhere else.
+_BUILDER = object()
+
+#: What "stamps the writer epoch" has to look like: the column assigned the
+#: fence's own epoch parameter. Merely *mentioning* ``writer_epoch`` -- in a
+#: predicate, or assigned a constant -- leaves a row whose epoch nothing
+#: guarantees, and :func:`write_history` would then be reading a number that
+#: does not mean what it says.
+_STAMP = re.compile(r"\bwriter_epoch\s*=\s*:fence_epoch\b")
+
+
+def fenced_update(
+    table: str, *, set_clause: str, where: str, stamps_writer_epoch: bool = True
+) -> FencedStatement:
+    """An UPDATE whose own WHERE ends in the fence. See :data:`FENCE_SQL`.
+
+    The caller's *where* is parenthesised and ANDed with the fence, so the fence
+    decides whether the row changes -- it is not merely present in the text.
+
+    *stamps_writer_epoch* requires ``writer_epoch = :fence_epoch`` in
+    *set_clause*. Turn it off only for a target that genuinely has no such
+    column, and expect to say why: without the stamp the row leaves no trace of
+    the epoch it was written under, and the single-writer property becomes
+    unprovable after the fact rather than false.
+    """
 
     _require_identifier("table", table)
-    return (
+    _require_stamp(table, set_clause, stamps_writer_epoch)
+    return FencedStatement(
         f"UPDATE {table}\n"
         f"   SET {set_clause}\n"
         f" WHERE ({where})\n"
-        f"   AND {FENCE_SQL}"
+        f"   AND {FENCE_SQL}",
+        issued_by=_BUILDER,
     )
 
 
-def fenced_insert(table: str, *, columns: Sequence[str], values: Sequence[str]) -> str:
+def fenced_insert(
+    table: str,
+    *,
+    columns: Sequence[str],
+    values: Sequence[str],
+    stamps_writer_epoch: bool = True,
+) -> FencedStatement:
     """An INSERT ... SELECT whose WHERE is the fence. See :data:`FENCE_SQL`.
 
     ``INSERT ... VALUES`` cannot carry a WHERE clause, so a fenced insert is an
     ``INSERT ... SELECT``: the row is produced only if the token is live, in the
     same statement that inserts it.
+
+    *stamps_writer_epoch* requires a ``writer_epoch`` column whose value
+    expression is exactly ``:fence_epoch`` -- see :func:`fenced_update`.
     """
 
     _require_identifier("table", table)
@@ -574,11 +644,53 @@ def fenced_insert(table: str, *, columns: Sequence[str], values: Sequence[str]) 
         raise LeaseUsageError(
             f"{len(columns)} column(s) but {len(values)} value expression(s)"
         )
-    return (
+    pairs = [f"{column.strip()} = {value.strip()}" for column, value in zip(columns, values)]
+    _require_stamp(table, ", ".join(pairs), stamps_writer_epoch)
+    return FencedStatement(
         f"INSERT INTO {table} ({', '.join(columns)})\n"
         f"SELECT {', '.join(values)}\n"
-        f" WHERE {FENCE_SQL}"
+        f" WHERE {FENCE_SQL}",
+        issued_by=_BUILDER,
     )
+
+
+def _require_stamp(table: str, assignments: str, stamps_writer_epoch: bool) -> None:
+    if not stamps_writer_epoch:
+        return
+    if not _STAMP.search(assignments):
+        raise UnfencedStatement(
+            f"a protected write to {table} must assign writer_epoch = :fence_epoch. "
+            "The single-writer property is read back out of the epoch each row was "
+            "written under, so a row that carries no epoch -- or one a caller chose "
+            "-- is refused here rather than found unprovable later. Pass "
+            "stamps_writer_epoch=False if the target genuinely has no such column"
+        )
+
+
+def effect_kind(resource: str, effect: str) -> str:
+    """The ``action.kind`` for *effect* performed under the lease on *resource*.
+
+    The spike ``action`` table has **no resource column** -- which component owns
+    which state item is ``Q-0001`` and open -- so nothing in a row says which
+    lease its ``writer_epoch`` was allocated by. Two resources' histories share a
+    table and their epochs are independent, which would make any comparison
+    across them meaningless.
+
+    Encoding the resource in ``kind`` is the spike's way out, and it is a
+    workaround rather than a design: a real schema would carry the resource as a
+    column. :func:`write_history` filters on the composed kind, and
+    :func:`applied_epoch_regressions` refuses a history that mixes kinds at all.
+    """
+
+    _require_identifier("resource", resource)
+    _require_identifier("effect", effect)
+    if "@" in effect:
+        raise LeaseUsageError(
+            f"effect {effect!r} may not contain '@'; it is the separator this kind "
+            "is composed with, and an effect that used it would make the resource "
+            "unrecoverable from the row"
+        )
+    return f"{effect}@{resource}"
 
 
 def protected_write(
@@ -858,7 +970,12 @@ def write_history(
     only the current row, but every attempt that reached a protected table is
     stamped with the epoch it was written under, and a refused one is stamped
     with the epoch that was refused. :func:`applied_epoch_regressions` reads the
-    single-writer property out of it (D-0001: by query, from SQLite alone).
+    single-writer property out of it by query (D-0001: from SQLite alone).
+
+    Pass the *kind* :func:`effect_kind` composed. Epochs belong to a resource
+    and two resources allocate theirs independently, so an unfiltered history is
+    several sequences shuffled together and no ordering claim over it means
+    anything; that is why the regression check refuses a mixed history outright.
     """
 
     cursor = connection.execute(WRITE_HISTORY_QUERY, {"kind": kind})
@@ -879,7 +996,23 @@ def applied_epoch_regressions(
     interleaving ``ACCEPTANCE.md`` section 2 asks the history not to contain.
     Refused rows are ignored -- they are the record that the writer was kept
     out, so their epochs are expected to be lower than what surrounds them.
+
+    :raises LeaseUsageError: if *history* mixes kinds. Epochs are allocated per
+        resource and two resources' sequences are unrelated, so comparing them
+        would report a valid epoch 2 for one resource followed by a valid epoch
+        1 for another as a violation -- and would hide real interleavings behind
+        the noise. Since the spike ``action`` table has no resource column
+        (``Q-0001``), one kind is as far as a row can identify its lease, so the
+        check refuses rather than answering a question the rows cannot support.
     """
+
+    kinds = {row["kind"] for row in history}
+    if len(kinds) > 1:
+        raise LeaseUsageError(
+            f"this history mixes kinds {sorted(kinds)}, whose epochs were allocated "
+            "under different leases and are not comparable. Filter with the kind "
+            "effect_kind(resource, effect) composed -- one resource at a time"
+        )
 
     applied = [row for row in history if row["status"] == "applied"]
     return tuple(

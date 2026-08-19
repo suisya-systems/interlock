@@ -28,9 +28,13 @@ UPDATE outbox
                   AND epoch = :fence_epoch AND expires_at_ms > :fence_now_ms)
 ```
 
-`protected_write()` refuses a statement that does not carry `FENCE_SQL` verbatim, and refuses one
-that does not stamp `writer_epoch`, so neither the unfenced shape nor an unreadable history reaches
-the database through this module. The transaction is `BEGIN IMMEDIATE`: the write lock is held from
+`protected_write()` accepts only a `FencedStatement`, which `fenced_update()` / `fenced_insert()`
+alone can issue — a substring check over SQL text is not enough, because a statement can carry
+`FENCE_SQL` verbatim inside a `SET` expression while its `WHERE` gates nothing, change its row under
+a stale token, and report a positive `rowcount`. The builders put the fence in the write's own
+predicate and nowhere else, and they also require `writer_epoch = :fence_epoch` among the
+assignments (mentioning the column is not stamping it). So neither the unfenced shape nor an
+unreadable history reaches the database through this module. The transaction is `BEGIN IMMEDIATE`: the write lock is held from
 before the statement until after its outcome has been classified, which is what makes "the token was
 stale" distinguishable from "the caller's own `WHERE` matched nothing" without a second connection
 changing the lease in between.
@@ -114,13 +118,21 @@ name for name. A residual that drifts out of the code is a residual nobody is ho
   therefore reconstructs the timeline from the row states the caller observed, while the durable,
   query-answerable evidence is `write_history()` over `action`. Which table records lease history is
   `Q-0001` and open; adding one here would answer it by inertia.
-- **`action` has no resource column**, for the same reason, so `write_history()` is filtered by effect
-  `kind` and the caller names it.
-- **Releasing sets the expiry to `MAX(acquired_at_ms + 1, now_ms)`**, never a DELETE (the schema
-  blocks the DELETE outright, since a deleted row would let the next acquisition restart the epoch at
-  1). With a clock skewed behind the acquisition that leaves at most a one-millisecond window in
-  which the released lease still reads as live. It withholds the resource rather than handing it to a
-  second claimant, which is the safe direction.
+- **`action` has no resource column**, for the same reason, so nothing in a row says which lease
+  allocated its `writer_epoch`. Two resources' epochs are independent, so comparing them would report
+  a valid epoch 2 for one and a valid epoch 1 for another as a violation while hiding a real
+  interleaving in the same noise. The spike's way out is `effect_kind(resource, effect)`, which
+  encodes the resource in `action.kind`; `write_history()` filters on it and
+  `applied_epoch_regressions()` refuses a history that mixes kinds at all. This is a workaround, not
+  a design — a real schema carries the resource as a column.
+- **Releasing only ever shortens**, and is never a DELETE (the schema blocks the DELETE outright,
+  since a deleted row would let the next acquisition restart the epoch at 1). The new expiry is
+  `MIN(expires_at_ms, MAX(acquired_at_ms + 1, now_ms))`: the inner clamp keeps a clock skewed behind
+  the acquisition from violating the row's `expires_at_ms > acquired_at_ms` CHECK, and the outer one
+  keeps a late release from pushing an already-expired lease's expiry *forward*, which would revive
+  the releasing holder's own token over an interval it had already lost. The inner clamp still leaves
+  at most a one-millisecond window in which a just-released lease reads as live; it withholds the
+  resource rather than handing it to a second claimant, which is the safe direction.
 - **A protected write must own its transaction.** A lease operation nested inside somebody else's
   open transaction would commit on their schedule, and a recorded refusal would be exactly as durable
   as whatever they decide to do next; the module refuses rather than inheriting a transaction.
