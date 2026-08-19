@@ -1,9 +1,14 @@
 # claude-org-runtime CLI
 
-`claude-org-runtime` exposes a single console entry point with two
-subcommand groups -- `dispatcher` and `settings` -- plus the existing
-`migrate` module. Each group can also be invoked directly via
-`python -m`.
+`claude-org-runtime` exposes a single console entry point with the
+subcommand groups `dispatcher`, `settings`, `sandbox` and `attention`,
+plus the existing `migrate` module. Each group can also be invoked
+directly via `python -m`.
+
+The `org up` / `org adopt` / `org down` and `broker send` groups that this
+page used to document are gone: they were built on the terminal-adapter and
+pane-control machinery the Discard bucket removes (PORTING_LEDGER.md
+D-0014). The sections below cover only what the CLI still exposes.
 
 ```sh
 pip install claude-org-runtime
@@ -44,7 +49,7 @@ python -m claude_org_runtime.dispatcher.runner delegate-plan \
 | `--server-capability TOKEN` | renga protocol capability the server advertises (`caller_scope`, `cross_tab_peers`, `spawn_tab`). Repeatable. Asserted by the caller, never probed -- the renga MCP surface does not report its own capability list. Omitted -> every tab feature fails closed. |
 | `--tab SELECTOR` | Place the worker in a specific renga tab: `pane_id:N` (stable anchor, preferred), `index:N` (0-based, shifts when a tab closes), `name:LABEL` (exact match), `new`, or `new:LABEL`. Requires `--server-capability spawn_tab`. Ignored under `--transport broker`. |
 | `--overflow-to-new-tab` | Under `--transport renga`, when no balanced-split candidate is left, plan a spawn into a fresh background tab instead of escalating. Requires `--server-capability spawn_tab` **and** `--peers-json`: overflow removes the rect ceiling and the fleet ceiling that replaces it is counted from the peer census, which cannot see workers this flag placed in other tabs unless the census is supplied. Each overflow mints a new tab; it never reuses one. Ignored under `--transport broker`. |
-| `--transport {renga,broker}` | Capacity backend: `renga` uses the rect-based balanced split; `broker` uses the explicit `--max-concurrent-workers` ceiling. Default: resolved from `ORG_TRANSPORT`, else the descriptor default (`broker`). |
+| `--transport {renga,broker}` | Capacity backend: `renga` uses the rect-based balanced split; `broker` uses the explicit `--max-concurrent-workers` ceiling. Default: resolved from `ORG_TRANSPORT`, else the module default (`broker`). |
 | `--max-concurrent-workers N\|unlimited` | Worker ceiling: a non-negative int (`0` disables spawning) or `unlimited` (explicit opt-in). Default when omitted: `8`. Ignored under `--transport renga` **unless** `--overflow-to-new-tab` is set -- that mode removes the rect ceiling, so the fleet ceiling becomes the only bound. In that mode the ceiling counts the observed census **plus outstanding reservations** (see below). |
 
 #### Overflow reservations
@@ -89,8 +94,7 @@ The runtime ships English-only worker instruction copy
 language can override the locale either programmatically:
 
 ```python
-from claude_org_runtime.dispatcher import LocaleConfig
-from claude_org_runtime.dispatcher.runner import build_plan
+from claude_org_runtime.dispatcher.runner import LocaleConfig, build_plan
 
 ja = LocaleConfig(
     constraints_default="(なし)",
@@ -139,25 +143,6 @@ byte as a literal prefix, so `MIN_PANE` / `max_concurrent_workers` matching
 still discriminates the two capacity reasons -- but anything that renders the
 message into a fixed-width surface, or matches it in full, should be
 re-checked.
-
-### Plan fields added for multi-tab capacity
-
-Three additive fields carry the renga 2.0 facts. All three are `null` on
-every invocation that passes none of the flags above, with one exception:
-`layout` is populated on the renga `split_capacity_exceeded` path, because
-that escalation is precisely where an operator needs the measurement.
-
-| Field | Set when | Contents |
-|-------|----------|----------|
-| `population` | `--peers-json` was given | Worker census with provenance: `active_workers` (union of worker panes and worker peers, deduped on `name`), `source`, `scope`, `panes_only` / `peers_only` / `both` / `anonymous`, `names`, and a per-tab `by_tab` breakdown. |
-| `layout` | renga, and either the status is `split_capacity_exceeded` or a tab flag was used | The **measured** pane area (`pane_area`, `left_panels_columns`, `reclaim_hint`), `panes_in_tab` / `max_panes`, `tabs_seen` (a lower bound) / `max_tabs`, the advisory `new_tab_estimate`, and the resolved `tab_placement`. |
-| `on_spawn_error` | the plan emitted `spawn.tab` | Recovery table keyed by renga error code, each with `meaning` / `action` / `remove_state_writes` / `next`. When `remove_state_writes` is true, delete `plan.state_writes` before re-planning -- otherwise the pre-existing state files block the retry. |
-
-The sidebar is **measured**, never subtracted. renga carves the org sidebar
-and file tree off the frame *before* laying out panes, so every rect in
-`list_panes` is already net of them; `left_panels_columns` is recovered as
-the pane area's own `x` offset. Nothing in the split arithmetic takes a
-sidebar width as an operand.
 
 ## `settings generate`
 
@@ -378,207 +363,6 @@ adding those exclusions would make those workers fail outright rather
 than silently lose isolation. `sandbox doctor` is the non-breaking half
 of the answer: it makes the loss of isolation visible without changing
 what happens when a command cannot be sandboxed.
-
-## `org up` / `org adopt` / `org down`
-
-A thin session launcher over the broker control plane (the `daemon.json`
-sidecar + admin RPC). It does **not** re-implement any control-plane
-logic; it orchestrates the existing primitives.
-
-```sh
-claude-org-runtime org up               # reuse-or-start the daemon, launch secretary TUI
-claude-org-runtime org adopt --owner W  # hand W's delivery ownership to a new session
-claude-org-runtime org down             # stop the daemon (signal-free) and verify
-```
-
-`org up`:
-
-1. Reads the `daemon.json` sidecar under `--state-dir` and judges health
-   by **reachability** (not PID liveness): it mints a `secretary`-tier
-   root token via the admin RPC and confirms an MCP `initialize` ->
-   `tools/list` round-trip. Reachable -> reuse; unreachable (stale
-   sidecar) -> start a fresh daemon in the background and discover its
-   port from the newly published sidecar.
-2. A *live* daemon with a different `--backend` than requested is a
-   conflict (run `org down` first); an already-registered `secretary` on a
-   live daemon makes `org up` a no-op ("already up").
-3. Writes the minted secretary's `--mcp-config` to
-   `<state-dir>/secretary-mcp.json` (mode `0600`).
-4. Launches the interactive `claude` TUI. The argv is built only through
-   the billing-neutral builder, so headless flags can never leak in. POSIX
-   `exec`s; Windows launches a subprocess (falling back to printing the
-   command if `claude` is not found).
-
-`org down` discovers the daemon from its sidecar, closes residual broker
-panes, requests a signal-free `shutdown`, and verifies `broker_stopped`
-appears exactly once in this run's `journal_offset` slice before cleaning
-up the sidecar. The pane-close scope follows the daemon's backend: on an
-isolated backend (tmux) all broker-owned panes are closed (including
-generic `spawn_pane` panes like the attention watcher); on a global-mux
-backend (wezterm) only `claude` / `codex` agent children are closed to
-avoid killing unrelated panes. With no sidecar it is a no-op.
-
-### Resident pre-flight (Issue #142)
-
-Both commands run a **pre-flight** over the broker-*unmanaged* resident
-registry at `<state-dir>/residents/*.json` -- processes that live outside
-the daemon's lifecycle (e.g. a queue / attention watcher) and can be left
-behind by a crashed generation. `org up` sweeps **only on a cold start**
-(never on a healthy-daemon reuse, so it cannot terminate a running org's own
-live residents); `org down` sweeps **after** teardown and never changes its
-own return code. The default is **announce-only**: it prints what it found
-and leaves everything in place. `--reap` (opt-in) terminates residents whose
-ownership *and* identity both verify and removes stale registrations; it
-never touches records owned by a different org instance, and never kills on
-an unknown schema version or an unverifiable identity. On Windows a matched
-resident is stopped with a graceful `taskkill` and, if it survives, manual
-`taskkill /F` guidance is printed rather than an auto hard-kill. An
-absent/empty registry prints nothing. The registry schema, ownership /
-identity model, and full decision matrix are the contract in
-[`docs/broker-residents-registry-contract.md`](broker-residents-registry-contract.md).
-
-### `org up` flags
-
-| Flag | Description |
-|------|-------------|
-| `--state-dir PATH` | Daemon state dir (sidecar / queue). Default: `.state/broker`. |
-| `--backend NAME` | Terminal backend for the daemon: `tmux`, `wezterm`, or `herdr` (default: OS auto - POSIX=tmux / Windows=wezterm). `herdr` is an opt-in **POSIX / WSL-only** backend and is not supported on native Windows (see note below). Must match a running daemon when reusing. |
-| `--root-cwd PATH` | cwd given to the secretary bind = anchor for relative-`cwd` spawns (Issue #61). Default: the directory `org up` runs in. |
-| `--name NAME` | secretary agent id/name to mint. Default: `secretary`. |
-| `--model VALUE` | Forwarded to the secretary TUI as `--model <value>`. |
-| `--permission-mode VALUE` | Forwarded to the secretary TUI as `--permission-mode <value>`. |
-| `--claude-arg ARG` | Extra interactive `claude` flag appended after the structured fields (repeatable). Reserved / headless flags are rejected by the builder. |
-| `--reap` | Terminate broker-unmanaged residents whose ownership **and** identity both verify, and remove stale registrations (default: announce only). Cold start only. See resident pre-flight above. |
-
-#### Backend support
-
-`tmux` (POSIX) and `wezterm` (POSIX / Windows) are the general-purpose
-backends. `herdr` is an **opt-in POSIX / WSL-only** backend: it talks to the
-`herdr` daemon over a Unix domain socket, which native Windows does not provide,
-so `--backend herdr` is unsupported when running on native Windows (`os.name ==
-"nt"`). There `org up` fails fast with an actionable error before spawning the
-daemon (rather than the daemon dying and timing out); use `--backend wezterm`
-on native Windows or run under WSL. To drive a remote `herdr` session from
-Windows, use the renga transport instead.
-
-## `org adopt` (Issue #166)
-
-Hands one owner's **delivery ownership** to a new session. Use it when the
-session that was receiving an owner's pushed messages is gone, was superseded,
-or was started by hand and so never held the observer secret.
-
-```sh
-claude-org-runtime org adopt --owner worker-a --resume 4f3c…   # take over, keep the conversation
-claude-org-runtime org adopt --owner worker-a --status         # report only; rotates nothing
-```
-
-Adopt is a **launcher**, not a message to a running session. The observer
-secret is non-replayable precisely because it rides in process env, which
-fork/resume does not inherit, and a running process's env cannot be rewritten
-from outside — so the only way to hand an owner to a session is to *start* that
-session with the secret. `--resume` / `--continue` carry the conversation
-across.
-
-What one `org adopt` does, in order:
-
-1. Resolves the running daemon from its sidecar. **It never starts one** — no
-   daemon means there is no delivery ownership to adopt, which is an error.
-2. Calls the admin RPC `adopt_delivery`. In a single lock scope the daemon
-   verifies the owner exists and holds a delivery credential, rotates the
-   observer lease (new secret, adoption id, finite arming deadline), **bumps
-   the generation and clears the registered instance**, and applies the
-   in-flight row policy. From this point the previous session is fenced and
-   nobody delivers until the adopting sidecar registers.
-3. Re-checks that its adoption is still the current one (a concurrent `--force`
-   adopt may have superseded it) and refuses to launch a session that could
-   never deliver.
-4. Launches `claude` with the new secret in its process env.
-
-If the adopting session never registers before the arming deadline, the daemon
-**restores the previous generation and instance** and journals
-`delivery_adopt_expired`, which the attention watcher reports as `urgent`.
-Issuing the secret is deliberately not treated as success: adopt fences first,
-and a fenced sidecar never re-registers, so an unreported failure would leave
-the owner permanently mute.
-
-### `org adopt` flags
-
-| Flag | Description |
-|------|-------------|
-| `--state-dir PATH` | Daemon state dir to discover the sidecar. Default: `.state/broker`. |
-| `--owner ID` | Agent id whose delivery ownership is being adopted. Default: `secretary`. |
-| `--resume SESSION_ID` | Resume this claude session in the adopting process. Mutually exclusive with `--continue`. |
-| `--continue` | Continue the most recent claude session. Mutually exclusive with `--resume`. |
-| `--in-flight {requeue,drop}` | What to do with rows the previous session claimed but never confirmed. `requeue` (default) re-delivers them — the previous host may already have emitted them, so the agent can see a duplicate. `drop` marks them delivered and accepts losing the tail instead. The count and policy land in the response and the journal. |
-| `--force` | Supersede an adoption already in flight for this owner. Without it a concurrent adopt is rejected with `[adopt_in_flight]` rather than silently invalidating the earlier one. |
-| `--status` | Report the owner's delivery/adoption state and exit. Rotates nothing, launches nothing. |
-| `--root-cwd PATH` | cwd for the adopting process. Default: the directory `org adopt` runs in. |
-| `--model` / `--permission-mode` | Passed through to the adopting TUI. |
-| `--claude-arg ARG` | Extra interactive claude flag (repeatable). `--resume` is **reserved** here — use the structured flag. |
-
-### `org down` flags
-
-| Flag | Description |
-|------|-------------|
-| `--state-dir PATH` | Daemon state dir to discover the sidecar. Default: `.state/broker`. |
-| `--reap` | Terminate broker-unmanaged residents whose ownership **and** identity both verify, and remove stale registrations (default: announce only). See resident pre-flight above. |
-| `--root-cwd PATH` | Repo root used to match resident ownership. Default: read from the daemon sidecar, else the directory `org down` runs in. |
-
-### Exit codes
-
-| Code | Meaning |
-|------|---------|
-| `0` | up: launched (or already up); adopt: launched, or `--status` reported; down: `broker_stopped` verified (or no sidecar). |
-| `1` | down: shutdown requested but `broker_stopped` not observed / daemon unreachable. |
-| `2` | up: unknown backend, a backend unsupported on this platform (e.g. `herdr` on native Windows), backend conflict with a live daemon, or admin mint / MCP surface unhealthy. adopt: no daemon / no admin token, the daemon rejected the adopt, or the adoption was superseded before launch. |
-
-## `broker send`
-
-Enqueue one message to another agent through a running broker daemon. This is a
-thin, **best-effort** bridge for plain CLI subprocesses (e.g. a pane's
-`pr-watch` or `claude-org-ja`'s `tools/peer_notify.py`) that cannot call the
-`mcp__org-broker__send_message` MCP tool directly.
-
-```
-claude-org-runtime broker send --to <agent_id> --message <text> [--state-dir PATH]
-```
-
-### Flags
-
-| Flag | Description |
-|------|-------------|
-| `--to AGENT_ID` | Recipient agent id or name (resolved by the broker queue). Required. |
-| `--message TEXT` | Message text to enqueue. Required. |
-| `--state-dir PATH` | Daemon state dir used to discover the sidecar. Optional; see resolution order below. |
-
-### State-dir resolution order
-
-The daemon's state dir is resolved with the precedence:
-
-1. the `--state-dir` flag (when explicitly passed);
-2. the `ORG_BROKER_STATE_DIR` environment variable;
-3. the default `.state/broker` (relative to the current working directory).
-
-When the broker spawns a pane, it injects `ORG_BROKER_STATE_DIR` (the daemon's
-**absolute** state dir) into the pane's environment. A CLI subprocess running
-inside that pane therefore reaches the correct daemon **without** having to
-thread `--state-dir` through — this is what lets `broker send` work when the
-daemon was started with a non-default `--state-dir` (Issue #122). The env var
-name is a contract shared with the `claude-org-ja` consumer; do not rename it.
-
-### Exit codes and diagnostics
-
-`broker send` never raises: every failure is absorbed into a non-zero exit and a
-short one-line ASCII diagnostic on stderr (the message body is never echoed).
-
-| Code | Meaning |
-|------|---------|
-| `0` | Enqueued (delivered to the broker queue). |
-| non-0 | Undelivered (no sidecar / auth failure / unknown recipient / daemon unreachable). |
-
-If the recorded daemon pid is no longer alive when the daemon is unreachable,
-the diagnostic appends a `stale sidecar? pass --state-dir or set
-ORG_BROKER_STATE_DIR` hint pointing at the two resolution knobs above.
 
 ## Migration from `claude-org-ja`'s `tools/`
 

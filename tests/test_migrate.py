@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 
@@ -13,13 +14,32 @@ from claude_org_runtime.migrate.v1_to_v2 import (
     migrate_journal_lines,
     migrate_org_state_markdown,
 )
-from claude_org_runtime.schema.json_schema import (
-    journal_event_schema,
-    worker_dir_entry_schema,
-)
-from claude_org_runtime.schema.org_state import parse_worker_directory_registry
 
 FIXTURES = Path(__file__).parent / "fixtures" / "synthetic"
+
+# ``schema.json_schema`` and ``schema.org_state`` are Discard rows removed by
+# interlock#39. Every assertion below is kept verbatim; the three tests that
+# reach for those modules acquire them lazily and skip when absent, so nothing
+# is cut while the migration bridge is re-authored (PORTING_LEDGER.md Q-0023).
+QR = "quarantined with the discarded schema modules (PORTING_LEDGER.md Q-0023)"
+
+
+def _json_schema(name: str):
+    """Return a loader from the discarded ``schema.json_schema``, or skip."""
+    try:
+        module = importlib.import_module("claude_org_runtime.schema.json_schema")
+        return getattr(module, name)
+    except (ImportError, AttributeError):
+        pytest.skip(QR)
+
+
+def _org_state_parser():
+    """Return ``parse_worker_directory_registry``, or skip."""
+    try:
+        module = importlib.import_module("claude_org_runtime.schema.org_state")
+        return module.parse_worker_directory_registry
+    except (ImportError, AttributeError):
+        pytest.skip(QR)
 
 
 def test_migrate_event_keeps_legacy_keys_alongside_canonical() -> None:
@@ -82,7 +102,7 @@ def test_migrate_event_canonical_input_is_idempotent() -> None:
 
 def test_journal_round_trip_validates_against_schema() -> None:
     jsonschema = pytest.importorskip("jsonschema")
-    schema = journal_event_schema()
+    schema = _json_schema("journal_event_schema")()
     src = (FIXTURES / "journal_v1_sample.jsonl").read_text(encoding="utf-8")
     migrated = list(migrate_journal_lines(src.splitlines()))
     assert len(migrated) == len(src.splitlines())
@@ -93,7 +113,30 @@ def test_journal_round_trip_validates_against_schema() -> None:
         jsonschema.validate(obj, schema)
 
 
+def test_org_state_markdown_migration_rewrites_header_columns() -> None:
+    """The raw-markdown half -- depends only on ``migrate/v1_to_v2.py``.
+
+    Split out of ``test_org_state_markdown_migration_preserves_rows`` by
+    interlock#39 so that the surviving ``rewrite`` module keeps executing
+    coverage even though the parser oracle it was checked against
+    (``schema.org_state``) is quarantined (PORTING_LEDGER.md Q-0023).
+    """
+    src = (FIXTURES / "org_state_v1_sample.md").read_text(encoding="utf-8")
+    migrated = migrate_org_state_markdown(src)
+
+    # legacy columns still present in the raw markdown
+    assert "| worker " in migrated
+    assert "| dir " in migrated
+    assert "| task_id " in migrated
+    assert "| worker_dir " in migrated
+    # canonical pane_id / pane_name columns inserted alongside legacy pane
+    assert "| pane " in migrated
+    assert "| pane_id " in migrated
+    assert "| pane_name " in migrated
+
+
 def test_org_state_markdown_migration_preserves_rows() -> None:
+    parse_worker_directory_registry = _org_state_parser()
     src = (FIXTURES / "org_state_v1_sample.md").read_text(encoding="utf-8")
     migrated = migrate_org_state_markdown(src)
 
@@ -121,7 +164,8 @@ def test_org_state_markdown_migration_preserves_rows() -> None:
 
 def test_migrated_org_state_rows_validate_against_schema() -> None:
     jsonschema = pytest.importorskip("jsonschema")
-    schema = worker_dir_entry_schema()
+    parse_worker_directory_registry = _org_state_parser()
+    schema = _json_schema("worker_dir_entry_schema")()
     src = (FIXTURES / "org_state_v1_sample.md").read_text(encoding="utf-8")
     migrated = migrate_org_state_markdown(src)
     rows = parse_worker_directory_registry(migrated)

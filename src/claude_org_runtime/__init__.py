@@ -1,20 +1,12 @@
 """Public surface of the ``claude-org-runtime`` package.
 
-Importing the top-level package exposes the per-feature subpackages
-(:mod:`dispatcher`, :mod:`settings`, :mod:`prompts`, :mod:`schema`,
-:mod:`migrate`, :mod:`terminal`) and the package version SoT
-(:data:`__version__`).
+PORTING_LEDGER.md classes this file ``discard`` as package-level plumbing,
+but deleting it would break every carried module under the package (and
+``pyproject.toml``'s ``version = { attr = ... }``), so the *discard content* --
+the eager re-export of subpackages the ledger deletes -- is stripped and the
+file itself is kept (D-0014 / D-0015). Subpackages are imported by path.
 """
 
 from .__about__ import __version__
-from . import dispatcher, migrate, prompts, schema, settings, terminal
 
-__all__ = [
-    "__version__",
-    "dispatcher",
-    "migrate",
-    "prompts",
-    "schema",
-    "settings",
-    "terminal",
-]
+__all__ = ["__version__"]

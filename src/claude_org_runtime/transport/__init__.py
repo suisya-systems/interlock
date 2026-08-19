@@ -1,51 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Transport surface descriptor — the single SoT that maps a transport
-``flag`` (``renga`` | ``broker``) to its concrete wiring:
+"""Transport package -- currently empty by design.
 
-- the MCP **server name** (``renga-peers`` / ``org-broker``),
-- the **spawn injection flag** the launcher passes to a child pane, and
-- the **role tier -> exposed MCP tool-name set**.
+The transport *surface descriptor* that used to live here mapped a transport
+flag (``renga`` | ``broker``) onto an MCP server name, a spawn-injection flag,
+and a role-tier tool set, deriving the broker half structurally from
+``broker.surface``. Both that descriptor and the surface it read are Discard
+rows (PORTING_LEDGER.md D-0009 / D-0014), so the mechanism is gone.
 
-設計 SoT: docs/design/ja-migration-plan.md §5.2(i) / §5.3 / §3.1 / §4。
-
-Why a descriptor (§5.2 (i) の単一 SoT 要請): ja の renga ツール参照は複数の
-生成器 (runtime の ``settings/generator`` と ja 側の
-``tools/gen_delegate_payload.py`` / worker_brief テンプレート) が別々に同じ
-transport prefix / tool set を必要とする。各所にハードコードすると drift する
-ため、**flag -> {server, 注入 flag, ロール別 tool 集合} を返す加算的 runtime
-API を 1 つ置き、双方の生成器がこれを読む**。ja は pin consume する。
-
-既定 transport (Epic #586 Phase 2 / PR-2): 無設定 (``ORG_TRANSPORT`` 無設定) =
-``broker``。renga は削除せず ``ORG_TRANSPORT=renga`` で opt-in fallback として
-切戻せる。renga surface 自体は従来どおり bit 等価を保つ (§5.3)。
-
-drift 防止 (§5.2): broker の tier 別 tool 集合は
-:mod:`claude_org_runtime.broker.surface` の ``tools_for(auth_role)`` /
-``capped_auth_role`` を一次参照して導出する (ハードコード二重管理を避ける)。
+The transport contract Interlock replaces it with has not been authored yet.
+This package init is retained (stripped, not deleted) because the ledger's
+grouped subpackage-docstring row classes it ``rewrite``.
 """
 
 from __future__ import annotations
 
-from .descriptor import (
-    DEFAULT_TRANSPORT,
-    ENV_KEY,
-    RENGA_REQUIRED_TOOLS,
-    TRANSPORTS,
-    TransportSurface,
-    allow_entries_for_role,
-    get_surface,
-    resolve_transport,
-    tools_for_role,
-)
-
-__all__ = [
-    "DEFAULT_TRANSPORT",
-    "ENV_KEY",
-    "RENGA_REQUIRED_TOOLS",
-    "TRANSPORTS",
-    "TransportSurface",
-    "allow_entries_for_role",
-    "get_surface",
-    "resolve_transport",
-    "tools_for_role",
-]
+__all__: list[str] = []

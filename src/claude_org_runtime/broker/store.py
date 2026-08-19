@@ -49,7 +49,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .tokens import AgentBind
+    from typing import Protocol
+
+    class AgentBind(Protocol):
+        """Structural view of a delivery bind, for annotations only.
+
+        The concrete record lived in the removed ``broker.tokens``
+        (PORTING_LEDGER.md D-0014). The store never constructs one and never
+        touches its pane fields; it reads only the attributes below.
+        """
+
+        token: str
+        agent_id: str
+        name: str
+        revoked: bool
+        registered: bool
+        scope: str
 
 # ---------------------------------------------------------------- row states
 UNDELIVERED = "UNDELIVERED"
@@ -1435,8 +1450,8 @@ class StoreMixin:
 
         per-pane channel sidecar の reap に伴い当該 agent の配送状態をリセットする。
         in-flight ``CLAIMED`` 行は ``UNDELIVERED`` へ戻して pull 経路に委ねる
-        (delivery cred の revoke は :class:`~claude_org_runtime.broker.tokens.
-        TokenMixin.revoke_delivery_creds` が別途行う)。
+        (delivery cred の revoke は token 発行側が別途行う。その担い手だった
+        ``broker.tokens`` は D-0014 で削除済み — Q-0023)。
         """
         with self._lock:
             self._delivery_modes.pop(owner, None)
@@ -1532,6 +1547,9 @@ class StoreMixin:
         self._journal_reaped(reaped)
         return snapshot
 
+    # 以下の協調フックを供給していた ``broker.server`` は D-0014 で削除された。
+    # 宣言は実行時ゼロコストのまま残し、D-0009 が分離すべき delivery/session の
+    # 絡み合い (transport 中立な liveness 信号への置換が未了) を記録する — Q-0023。
     if TYPE_CHECKING:  # server が供給する配達トリガ (型チェッカ向け宣言)
         def _trigger_nudge(self, target: "AgentBind") -> None: ...
 

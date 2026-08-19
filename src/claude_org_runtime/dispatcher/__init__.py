@@ -1,23 +1,8 @@
 """Dispatcher state-machine helpers ported from claude-org-ja ``tools/dispatcher_runner.py``.
 
-Public surface (``runner`` is lazy-imported to avoid ``runpy``
-double-load warnings when invoked as
-``python -m claude_org_runtime.dispatcher.runner``):
-
-- :mod:`runner` -- :func:`runner.build_plan`, :func:`runner.choose_split`,
-  :class:`runner.LocaleConfig`, :func:`runner.main`.
-- :class:`LocaleConfig` -- re-exported here for ergonomic
-  ``from claude_org_runtime.dispatcher import LocaleConfig``.
+The package hosts :mod:`runner`. The lazy re-export shim that used to expose
+``runner`` / ``LocaleConfig`` as package attributes was the discard content of
+this file (PORTING_LEDGER.md D-0014); it is stripped rather than the file
+deleted, because ``runner.py`` is a ``rewrite`` row and still lives here.
+Import it by path: ``from claude_org_runtime.dispatcher import runner``.
 """
-
-__all__ = ["LocaleConfig", "runner"]
-
-
-def __getattr__(name: str):  # pragma: no cover - thin lazy bridge
-    if name == "runner":
-        import importlib
-        return importlib.import_module(f"{__name__}.runner")
-    if name == "LocaleConfig":
-        import importlib
-        return importlib.import_module(f"{__name__}.runner").LocaleConfig
-    raise AttributeError(name)
