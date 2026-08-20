@@ -45,12 +45,31 @@ __all__ = [
     "EVENT_RECOVERY_COMPLETE",
     "EVENT_STEP",
     "EVENT_SYNC",
+    "ESCALATION_REFUSED_FACT_STATES",
+    "FACT_STATES",
+    "FACT_ACTIVE_EVIDENCE",
+    "FACT_EXPLICIT_BLOCK",
+    "FACT_KNOWN_WAIT",
+    "FACT_NO_ACTIVITY_EVIDENCE",
+    "FACT_OBSERVATION_UNAVAILABLE",
+    "FACT_TERMINAL",
+    "OBSERVATION_FACT_STATES",
     "FAULT_KINDS",
     "FAULT_RUNNER_CONTRACT_VERSION",
+    "INVARIANT_INCIDENT_COLLAPSE",
     "INVARIANT_NAMES",
+    "INVARIANT_NO_ANOMALY_ESCALATION",
+    "INVARIANT_OBSERVATION_CLASSIFIED",
+    "INVARIANT_UNRESOLVED_INCIDENTS",
+    "KILL_FAULTS",
+    "TAKEOVER_FAULTS",
     "LANES",
     "LANE_LINUX",
     "LANE_PORTABLE",
+    "OBSERVATION_MODES",
+    "OBSERVATION_HEALTHY",
+    "OBSERVATION_SILENT",
+    "OBSERVATION_UNREADABLE",
     "OPERATIONS",
     "OPERATION_ACK",
     "OPERATION_ATTEMPT",
@@ -59,6 +78,7 @@ __all__ = [
     "OPERATION_LEASE_ACQUIRE",
     "OPERATION_LEASE_RELEASE",
     "OPERATION_LEASE_RENEW",
+    "OPERATION_OBSERVE",
     "PROTOCOL_VERSION",
     "ROLES",
     "ROLE_DISPATCHER",
@@ -68,6 +88,7 @@ __all__ = [
     "RoleDriver",
     "SYNC_POINTS",
     "SYNC_LEASE_ACQUIRED",
+    "SYNC_OBSERVED",
     "SYNC_SCRIPT_COMPLETE",
     "CMD_CONTINUE",
     "CMD_SET_CLOCK_OFFSET",
@@ -79,7 +100,7 @@ __all__ = [
 
 #: Bumped by any change to the checkpoint vocabulary, the protocol messages or
 #: the driver CLI below. A failure report always carries it (design 4.4).
-FAULT_RUNNER_CONTRACT_VERSION = 1
+FAULT_RUNNER_CONTRACT_VERSION = 2
 
 #: The wire format of the two-phase barrier (design 3.1).
 PROTOCOL_VERSION = 1
@@ -137,6 +158,11 @@ OPERATION_BIND = "bind"
 OPERATION_ENQUEUE = "enqueue"
 OPERATION_ATTEMPT = "attempt"
 OPERATION_ACK = "ack"
+#: The watcher's read of a worker, and the classification it produces (D-0005,
+#: D-0006). It is one durable write with no external effect, exactly like
+#: ``bind``: the observation is read through a seam the fault can break, and the
+#: fact state it yields is written to the ``incident`` table.
+OPERATION_OBSERVE = "observe"
 
 OPERATIONS = (
     OPERATION_LEASE_ACQUIRE,
@@ -146,6 +172,7 @@ OPERATIONS = (
     OPERATION_ENQUEUE,
     OPERATION_ATTEMPT,
     OPERATION_ACK,
+    OPERATION_OBSERVE,
 )
 
 #: Which checkpoint windows each operation physically has (design 3.1).
@@ -186,6 +213,10 @@ CHECKPOINT_APPLICABILITY: Mapping[str, tuple[str, ...]] = {
         CHECKPOINT_BEFORE_DURABLE_WRITE,
         CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT,
     ),
+    OPERATION_OBSERVE: (
+        CHECKPOINT_BEFORE_DURABLE_WRITE,
+        CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT,
+    ),
 }
 
 
@@ -199,8 +230,11 @@ CHECKPOINT_APPLICABILITY: Mapping[str, tuple[str, ...]] = {
 
 SYNC_LEASE_ACQUIRED = "lease-acquired"
 SYNC_SCRIPT_COMPLETE = "script-complete"
+#: The observation has been read and classified but nothing downstream has acted
+#: on it yet -- the anchor an escalation-policy fault needs.
+SYNC_OBSERVED = "observed"
 
-SYNC_POINTS = (SYNC_LEASE_ACQUIRED, SYNC_SCRIPT_COMPLETE)
+SYNC_POINTS = (SYNC_LEASE_ACQUIRED, SYNC_SCRIPT_COMPLETE, SYNC_OBSERVED)
 
 #: Everything a case may arm. Design 4.1: *every* fault is anchored; there is
 #: no unanchored kind.
@@ -217,6 +251,11 @@ ROLE_SCRIPTS: Mapping[str, tuple[str, ...]] = {
     ROLE_SUPERVISOR: (
         OPERATION_LEASE_ACQUIRE,
         OPERATION_BIND,
+        # The Supervisor binds the session, so the Supervisor is the role that
+        # observes it. Only this script carries the step; disp and sec are
+        # unchanged, which is what keeps the observation row a Supervisor
+        # concern rather than a property of every role.
+        OPERATION_OBSERVE,
         OPERATION_LEASE_RENEW,
         OPERATION_ENQUEUE,
         OPERATION_ATTEMPT,
@@ -251,6 +290,7 @@ ROLE_SCRIPTS: Mapping[str, tuple[str, ...]] = {
 # ---------------------------------------------------------------------------
 
 FAULT_KINDS = (
+    # -- S9's seed set (Issue #15) ----------------------------------------
     "sigkill",
     "sigstop-expire",
     "clock-fwd",
@@ -259,7 +299,133 @@ FAULT_KINDS = (
     "dup-delivery",
     "lost-ack",
     "staggered-sigkill",
+    # -- I-11: the rest of the ACCEPTANCE.md section 2 matrix (Issue #16) --
+    #
+    # Each name below is one injection the section 2 table asks for by name,
+    # and nothing else. They are grouped by the row they discharge so a reader
+    # can check the table against this tuple without opening the manifest.
+    #
+    # Lease row: "kill the lease holder without release".
+    "sigkill-expire",
+    # Outbox-resend row: "hold the recipient unavailable across several retry
+    # attempts".
+    "recipient-unavailable",
+    # Ack row: "duplicate the ack", "deliver the ack after the sender has
+    # restarted", "ack an already-acked message".
+    "dup-ack",
+    "late-ack",
+    "re-ack",
+    # Single-writer row: "two writers race for the same state item", "a write
+    # is attempted concurrently from a resumed process and its replacement".
+    "writer-race",
+    "resumed-writer-race",
+    # Observation-outage row: "make the observation path fail or return nothing
+    # while the worker is genuinely healthy".
+    "observation-outage",
 )
+
+#: The kill-shaped faults. Three separate places used to spell this membership
+#: out as a literal tuple -- execute_case's dispatch, the at_kill window-landing
+#: gate and the kill-shaped branch of the invariant assertions -- and two of
+#: them fail *silently* when a new kill-shaped kind is not added to all three.
+#: Naming the set once is what stops a new fault kind from quietly asserting
+#: nothing.
+#: The faults in which a second claimant *takes the resource over* -- the
+#: incumbent is gone or fenced out and the claimant's epoch is the one that
+#: wins. They are the cases where the destination-side statement is "the
+#: superseded holder reached the destination zero times".
+#:
+#: ``writer-race`` is deliberately not one of them: there the incumbent is
+#: alive and holds a live lease, so the *racer* is the one refused. Reading the
+#: two shapes the same way would assert that the winner produced nothing.
+TAKEOVER_FAULTS = (
+    "sigstop-expire",
+    "clock-fwd",
+    "sigkill-expire",
+    "resumed-writer-race",
+)
+
+KILL_FAULTS = (
+    "sigkill",
+    "staggered-sigkill",
+    "sigkill-expire",
+    "recipient-unavailable",
+    "late-ack",
+    "resumed-writer-race",
+)
+
+# ---------------------------------------------------------------------------
+# the watcher's fact state and the observation seam -- D-0005, D-0006
+# ---------------------------------------------------------------------------
+#
+# D-0005 fixes the *names* and D-0006 fixes one relation between two of them.
+# Neither fixes any per-state semantics or detection predicate -- that is
+# Q-0012, and it stays open. So the contract carries the closed set as a
+# vocabulary to validate against, and carries **no** mapping from a fact state
+# to a verdict. The only rule encoded here is the one D-0006 actually decides.
+
+FACT_ACTIVE_EVIDENCE = "ACTIVE_EVIDENCE"
+FACT_KNOWN_WAIT = "KNOWN_WAIT"
+FACT_EXPLICIT_BLOCK = "EXPLICIT_BLOCK"
+FACT_NO_ACTIVITY_EVIDENCE = "NO_ACTIVITY_EVIDENCE"
+FACT_OBSERVATION_UNAVAILABLE = "OBSERVATION_UNAVAILABLE"
+FACT_TERMINAL = "TERMINAL"
+
+#: The closed set (D-0005). A seventh state is a ``D-`` entry, not a code
+#: change, so this tuple is a vocabulary check and never a place to add one.
+FACT_STATES = (
+    FACT_ACTIVE_EVIDENCE,
+    FACT_KNOWN_WAIT,
+    FACT_EXPLICIT_BLOCK,
+    FACT_NO_ACTIVITY_EVIDENCE,
+    FACT_OBSERVATION_UNAVAILABLE,
+    FACT_TERMINAL,
+)
+
+#: The two states D-0006 settles are **not** anomalies.
+#:
+#: A case declares an escalation policy -- which fact states it would escalate
+#: on -- as ordinary case data, and the observation cases deliberately name the
+#: very state their injection produces. The driver must then **refuse** to
+#: escalate and record that refusal. Asking for the escalation is the point: it
+#: is what makes "no termination or restart recommendation is produced from it"
+#: an assertion about a row a broken driver would have written, rather than a
+#: count over rows nothing in the tree can write. A case that never asked would
+#: pass whether or not the rule held.
+#:
+#: Nothing here says what either state *means*; Q-0012 stays open.
+ESCALATION_REFUSED_FACT_STATES = (
+    FACT_OBSERVATION_UNAVAILABLE,
+    FACT_NO_ACTIVITY_EVIDENCE,
+)
+
+#: What the observation seam is made to do. The fault acts on the *reader*, not
+#: on the classifier and not on the assertion: ``unreadable`` makes the read
+#: raise, ``silent`` makes it return a well-formed observation carrying no
+#: activity, and ``healthy`` is the control. Collapsing the first two into one
+#: outcome is precisely the defect D-0006 exists to police, so they are distinct
+#: modes producing distinct fact states.
+OBSERVATION_HEALTHY = "healthy"
+OBSERVATION_SILENT = "silent"
+OBSERVATION_UNREADABLE = "unreadable"
+
+OBSERVATION_MODES = (
+    OBSERVATION_HEALTHY,
+    OBSERVATION_SILENT,
+    OBSERVATION_UNREADABLE,
+)
+
+#: The fact state each observation mode must yield. Read the mapping in the
+#: direction it is written: it says what the *reader's outcome* is called, not
+#: what it means. An outage reads as ``OBSERVATION_UNAVAILABLE`` and a silent
+#: but readable worker reads as ``NO_ACTIVITY_EVIDENCE``; asserting a
+#: disjunction of the two would pass exactly the confusion D-0006 forbids.
+OBSERVATION_FACT_STATES: Mapping[str, str] = {
+    OBSERVATION_HEALTHY: FACT_ACTIVE_EVIDENCE,
+    OBSERVATION_SILENT: FACT_NO_ACTIVITY_EVIDENCE,
+    OBSERVATION_UNREADABLE: FACT_OBSERVATION_UNAVAILABLE,
+}
+
 
 LANE_LINUX = "linux"
 LANE_PORTABLE = "portable"
@@ -330,6 +496,19 @@ def driver_cli_arguments() -> tuple[str, ...]:
         "--restart-generation",
         "--control-fd",
         "--event-fd",
+        # I-11: the observation seam (D-0006) and the incident parameters the
+        # ACCEPTANCE.md section 2 dedup row requires to be parameterised rather
+        # than hard-coded (Q-0002, Q-0003). A driver that cannot be told which
+        # collapse rule to apply would be answering an open question by
+        # inertia, which is the one thing the matrix may not do.
+        "--observation-mode",
+        "--escalate-on",
+        "--incident-dedup-key",
+        "--incident-repeats",
+        "--incident-collapse",
+        "--incident-renotify-window-ms",
+        "--incident-reconcile-interval-ms",
+        "--unavailable-attempts",
     )
 
 
@@ -403,6 +582,36 @@ INVARIANT_RECORDED_REFUSALS = "recorded-refusals"
 INVARIANT_NO_PENDING_ACTION = "no-pending-action"
 INVARIANT_LEASE_SINGLE_HOLDER = "lease-single-holder"
 
+# -- I-11 additions (Issue #16) ---------------------------------------------
+#
+# Every one of these is scoped by ``scope`` alone. That is deliberate: an
+# invariant needing a per-case bind (a dedup key, say) would have to widen
+# ``Adapter.query_parameters``, which the conformance battery binds blindly for
+# every name in :data:`SQL_INVARIANTS` on every PR job. Returning the whole
+# scope and letting the assertion group the rows keeps the plumbing unchanged.
+
+#: Every incident row in the scope, so the assertion can group by dedup key and
+#: check whichever collapse rule the case declared. Neither Q-0002 rule is
+#: expressed in the SQL -- that is the point.
+INVARIANT_INCIDENT_COLLAPSE = "incident-collapse"
+
+#: The incidents still open. Gate item 4 asks that "work resumes from
+#: unresolved incidents", and the spike schema indexes exactly this question
+#: (``incident_unresolved``, commented with that sentence). It is also fed into
+#: the controller's recoverable-state set, so an incident open at the kill
+#: counts as something the restart had to recover.
+INVARIANT_UNRESOLVED_INCIDENTS = "unresolved-incidents"
+
+#: What the observation path was classified as. Asserted against the closed
+#: D-0005 set and, per injection, against exactly one member of it.
+INVARIANT_OBSERVATION_CLASSIFIED = "observation-classified"
+
+#: The termination/restart recommendations produced in the scope. Always
+#: returns exactly one row (a count), so "none were produced" is a pass rather
+#: than an empty result -- and a driver that escalated on a D-0006 state would
+#: move the count, which is what makes the assertion falsifiable.
+INVARIANT_NO_ANOMALY_ESCALATION = "no-anomaly-escalation"
+
 #: Destination-side observables. ``ACCEPTANCE.md`` section 2 is explicit that
 #: SQLite alone cannot prove exactly-once for an external effect, so every case
 #: that kills inside or after an effect window **must** name one of these --
@@ -418,6 +627,10 @@ SQL_INVARIANTS = (
     INVARIANT_RECORDED_REFUSALS,
     INVARIANT_NO_PENDING_ACTION,
     INVARIANT_LEASE_SINGLE_HOLDER,
+    INVARIANT_INCIDENT_COLLAPSE,
+    INVARIANT_UNRESOLVED_INCIDENTS,
+    INVARIANT_OBSERVATION_CLASSIFIED,
+    INVARIANT_NO_ANOMALY_ESCALATION,
 )
 
 DESTINATION_INVARIANTS = (
@@ -446,6 +659,10 @@ INVARIANT_PARAMETERS: Mapping[str, tuple[str, ...]] = {
     INVARIANT_RECORDED_REFUSALS: ("resource", "holder"),
     INVARIANT_NO_PENDING_ACTION: ("scope",),
     INVARIANT_LEASE_SINGLE_HOLDER: ("now_ms",),
+    INVARIANT_INCIDENT_COLLAPSE: ("scope",),
+    INVARIANT_UNRESOLVED_INCIDENTS: ("scope",),
+    INVARIANT_OBSERVATION_CLASSIFIED: ("scope",),
+    INVARIANT_NO_ANOMALY_ESCALATION: ("scope",),
 }
 
 #: The checkpoints after which an external effect may already have happened.

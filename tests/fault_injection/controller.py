@@ -891,10 +891,16 @@ def epoch_regressions(history: Sequence[Mapping[str, Any]]) -> list[tuple[dict, 
 #: ``drop-delivery``: the refused attempt and the resend that followed it.
 #: ``dup-delivery``: both copies of the message, under one key.
 #: ``lost-ack``: the first delivery and the re-delivery the missing ack caused.
+#: ``recipient-unavailable``: the refused attempts plus the one that landed.
+#:     Counting fewer would accept a run in which the recipient was never
+#:     actually unavailable, which is the failure mode this table exists for.
+#: ``late-ack``: the first delivery and the re-delivery the missing ack caused.
 _ATTEMPT_FLOOR: Mapping[str, int] = {
     "drop-delivery": 2,
     "dup-delivery": 2,
     "lost-ack": 2,
+    "recipient-unavailable": 4,
+    "late-ack": 2,
 }
 
 
@@ -950,12 +956,80 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
         for step in case["staggered"]:
             controller.wait_at_anchor(step["wait"])
             controller.kill(step["kill"])
-    elif fault in ("sigkill", "staggered-sigkill"):
+    elif fault in ("sigkill", "staggered-sigkill", "recipient-unavailable", "late-ack"):
         # Aligned mode: every target is frozen inside its window before any kill
         # is issued, so the kill set is applied to a known joint state.
+        #
+        # ``recipient-unavailable`` and ``late-ack`` are kill-shaped too, and
+        # deliberately so. Both invariants ACCEPTANCE.md section 2 names for them
+        # are about *surviving a restart* -- "retry count is durable across
+        # restarts" and "deliver the ack after the sender has restarted" -- so a
+        # case with no kill in it could not observe either. What distinguishes
+        # them from a plain ``sigkill`` is the behaviour the driver carries, not
+        # the shape of the kill.
         controller.barrier_aligned(targets)
         for role in case["kill_order"]:
             controller.kill(role)
+    elif fault in ("sigkill-expire", "resumed-writer-race"):
+        # ACCEPTANCE.md section 2's lease row: "kill the lease holder without
+        # release", and its single-writer row: "a write is attempted
+        # concurrently from a resumed process and its replacement".
+        #
+        # The two are one mechanic anchored at two different points. The holder
+        # is killed at its armed anchor and never releases, so its lease row is
+        # left behind with a live expiry and an epoch nobody holds. A claimant
+        # whose clock has crossed that expiry then takes the resource over --
+        # that is the replacement. Finally the killed holder is restarted: it
+        # comes back with *no epoch in memory*, re-runs its script from the top,
+        # and meets the claimant's live lease.
+        #
+        # That last step is why the driver records a refusal at ``acquire``. A
+        # SIGKILLed process cannot "return as a stale writer" the way a
+        # SIGSTOPped one does -- it has no token left to present -- so the
+        # refusal it does earn is the one at the resource boundary, and that is
+        # the refusal this case asserts. The stale-token-write half of the row
+        # is proved by ``sigstop-expire``, where the holder really does keep its
+        # epoch across the takeover.
+        role = targets[0]
+        controller.barrier_aligned(targets)
+        for killed in case["kill_order"]:
+            controller.kill(killed)
+        claimant = case["claimant"]
+        if claimant is not None:
+            resolved_skew_ms = contract.resolve_skew_ms(
+                claimant["clock"], ttl_ms=case["ttl_ms"], elapsed_ms=case["ttl_ms"]
+            )
+            controller.spawn_claimant(
+                claimant["role"],
+                holder_suffix=claimant["holder_suffix"],
+                clock_offset_ms=resolved_skew_ms,
+            )
+            controller.run_to_completion(_claimant_key(claimant["role"]))
+        del role
+    elif fault == "writer-race":
+        # "Two writers race for the same state item." They cannot both be live
+        # writers: ``acquire``'s upsert only replaces a lapsed row, so the second
+        # claimant on one resource is refused at the resource boundary rather
+        # than merged into the history. That refusal *is* section 2's invariant
+        # ("a stale writer is rejected, not merged"), and the ledger row it
+        # leaves is the durable observable.
+        #
+        # The incumbent is held at its barrier for the whole race, so the racer
+        # provably meets a live lease rather than a lapsed one -- the ordering is
+        # a barrier, never a sleep.
+        role = targets[0]
+        controller.wait_at_anchor(role)
+        racer = case["claimant"]
+        if racer is not None:
+            controller.spawn_claimant(
+                racer["role"],
+                holder_suffix=racer["holder_suffix"],
+                # No skew: the point is that the incumbent's lease is *live*.
+                clock_offset_ms=0,
+            )
+            controller.run_to_completion(_claimant_key(racer["role"]))
+        controller.release(role)
+        controller.run_to_completion(role)
     elif fault in ("clock-fwd", "clock-back", "sigstop-expire"):
         role = targets[0]
         controller.wait_at_anchor(role)
@@ -998,7 +1072,22 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
                 controller.set_clock_offset(role, resolved_skew_ms)
             controller.release(role)
         controller.run_to_completion(role)
-    elif fault in ("drop-delivery", "dup-delivery", "lost-ack"):
+    elif fault in (
+        "drop-delivery",
+        "dup-delivery",
+        "lost-ack",
+        "dup-ack",
+        "re-ack",
+        "incident-repeat",
+        "incident-replay",
+        "observation-outage",
+    ):
+        # Surface faults: the injection is in what the script does, not in what
+        # happens to the process. The barrier is a pass-through here, used to
+        # pin the moment rather than to kill -- the ack-multiplicity injections,
+        # the repeated incident condition and the broken observation seam all
+        # need the script to keep running past the anchor to be observable at
+        # all.
         role = targets[0]
         controller.wait_at_anchor(role)
         if not case["release_after_barrier"]:  # pragma: no cover - all seeds release
@@ -1080,7 +1169,148 @@ def _recoverable_state(
         )
         if row["resource"] == params["resource"]
     )
+    # Gate item 4 says the work a restart resumes is "unresolved incidents"
+    # (D-0001), so an incident still open at the kill is recoverable state in
+    # exactly the sense this function means. Before the matrix wrote incident
+    # rows the omission cost nothing; once it does, a case that killed with an
+    # incident open would otherwise be judged to have had nothing to recover.
+    state.extend(
+        dict(row, evidence="incident")
+        for row in controller.query(
+            contract.INVARIANT_UNRESOLVED_INCIDENTS, scope=params["scope"]
+        )
+    )
     return state
+
+
+def _assert_incident_collapse(
+    case: Mapping[str, Any],
+    role: str,
+    rows: Sequence[Mapping[str, Any]],
+    fail: Any,
+) -> None:
+    """A repeated incident condition is collapsed under its dedup key.
+
+    ``ACCEPTANCE.md`` section 2's dedup row is explicit that the Issue fixes the
+    *fields* and not the semantics: whether a repeat increments ``retry count``
+    on the existing incident or opens a linked one is ``Q-0002``, as is the
+    re-notification window in absolute time, and "tests must parameterise both
+    rather than hard-code either". So this function asserts *the rule the case
+    declared* and has no opinion of its own. What it does assert unconditionally
+    is the part the Issue does fix (D-0007): a repeat is collapsed under the
+    dedup key rather than producing an unbounded stream of unrelated incidents,
+    and ``dedup_key`` and ``retry_count`` are present on every row.
+    """
+
+    parameters = case.get("incident_params") or {}
+    collapse = parameters.get("collapse")
+    repeats = int(parameters.get("repeats") or 0)
+    if not rows:
+        fail(f"{role}: no incident was raised, so the collapse rule asserts nothing")
+        return
+
+    by_key: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        by_key.setdefault(str(row["dedup_key"]), []).append(row)
+
+    for row in rows:
+        if not row.get("dedup_key"):
+            fail(f"{role}: incident {row['incident_id']!r} has no dedup key (D-0007)")
+        if row.get("retry_count") is None:
+            fail(f"{role}: incident {row['incident_id']!r} has no retry count (D-0007)")
+
+    if collapse is None:
+        # No rule declared: the case is not making a Q-0002 claim, so only the
+        # fields are checked. This is the shape every S9 seed case has.
+        return
+
+    for key, group in by_key.items():
+        if collapse == "increment-in-place":
+            if len(group) != 1:
+                fail(
+                    f"{role}: dedup key {key!r} opened {len(group)} incidents "
+                    "under the increment-in-place rule, which collapses onto one"
+                )
+                continue
+            if int(group[0]["retry_count"]) != repeats - 1:
+                fail(
+                    f"{role}: dedup key {key!r} was raised {repeats} time(s) but "
+                    f"its incident carries retry_count={group[0]['retry_count']}, "
+                    f"not {repeats - 1}"
+                )
+        elif collapse == "open-linked":
+            if len(group) != repeats:
+                fail(
+                    f"{role}: dedup key {key!r} opened {len(group)} incidents "
+                    f"under the open-linked rule, which opens one per repeat "
+                    f"({repeats})"
+                )
+                continue
+            root = [row for row in group if row["related_incident_id"] is None]
+            if len(root) != 1:
+                fail(
+                    f"{role}: dedup key {key!r} has {len(root)} unlinked "
+                    "incidents; a linked chain has exactly one root"
+                )
+                continue
+            linked = {row["related_incident_id"] for row in group} - {None}
+            if linked and linked != {root[0]["incident_id"]}:
+                fail(
+                    f"{role}: dedup key {key!r} links to {sorted(linked)}, not "
+                    f"to its own chain root {root[0]['incident_id']!r}"
+                )
+        else:  # pragma: no cover - the vocabulary is validated in the manifest
+            fail(f"{role}: {collapse!r} is not a collapse rule this harness implements")
+
+
+def _assert_observation_classified(
+    case: Mapping[str, Any],
+    role: str,
+    rows: Sequence[Mapping[str, Any]],
+    fail: Any,
+) -> None:
+    """The outage is classified, and classified as exactly one thing.
+
+    ``ACCEPTANCE.md`` section 2's observation row, and D-0006 behind it. The
+    assertion is deliberately **not** a disjunction over the two
+    non-anomaly states: a harness that classified a genuine read failure as
+    ``NO_ACTIVITY_EVIDENCE`` would pass a disjunction while committing the exact
+    conflation D-0006 exists to forbid. Each observation mode names one fact
+    state and the case asserts that one.
+
+    Nothing here reads a fact state's *meaning* -- Q-0012 is open and this is a
+    check that the reader's outcome was named correctly, not that the name
+    implies anything.
+    """
+
+    observation = case.get("observation") or {}
+    mode = observation.get("mode")
+    if not rows:
+        fail(f"{role}: the observation produced no incident row to classify")
+        return
+    for row in rows:
+        state = row["fact_state"]
+        if state not in contract.FACT_STATES:
+            fail(
+                f"{role}: incident {row['incident_id']!r} carries fact state "
+                f"{state!r}, which is outside the closed set (D-0005)"
+            )
+        if not row.get("detector_version"):
+            fail(
+                f"{role}: incident {row['incident_id']!r} carries no detector "
+                "version; a fact state without one cannot be replayed (D-0007)"
+            )
+    if mode is None:
+        return
+    wanted = contract.OBSERVATION_FACT_STATES[mode]
+    wrong = [row for row in rows if row["fact_state"] != wanted]
+    if wrong:
+        fail(
+            f"{role}: the observation path was made {mode!r}, which is "
+            f"{wanted}; it was classified "
+            f"{sorted({row['fact_state'] for row in wrong})}. Collapsing a read "
+            "failure and a quiet worker into one state is what D-0006 forbids"
+        )
 
 
 def assert_invariants(
@@ -1215,10 +1445,64 @@ def assert_invariants(
                             f"{role}: a backward-skewed renewal extended the lease "
                             f"to {held[0]['expires_at_ms']} (> {ceiling})"
                         )
+            elif name == contract.INVARIANT_INCIDENT_COLLAPSE:
+                _assert_incident_collapse(case, role, rows, fail)
+            elif name == contract.INVARIANT_UNRESOLVED_INCIDENTS:
+                # "Work resumes from unresolved incidents" (gate item 4). After
+                # the restart the incident the case opened must still be
+                # readable from SQLite alone -- the packet is in the row, not in
+                # anyone's context (D-0003, D-0007) -- and it must carry the two
+                # fields D-0007 makes mandatory.
+                if not rows:
+                    fail(
+                        f"{role}: no unresolved incident survived, so 'work "
+                        "resumes from unresolved incidents' asserts nothing"
+                    )
+                for row in rows:
+                    if not row.get("dedup_key"):
+                        fail(f"{role}: incident {row['incident_id']!r} carries no dedup key")
+                    if row.get("retry_count") is None:
+                        fail(f"{role}: incident {row['incident_id']!r} carries no retry count")
+            elif name == contract.INVARIANT_OBSERVATION_CLASSIFIED:
+                _assert_observation_classified(case, role, rows, fail)
+            elif name == contract.INVARIANT_NO_ANOMALY_ESCALATION:
+                # The query is a COUNT, so it always has exactly one row and
+                # "none were produced" is a pass rather than an empty result.
+                if not rows:  # pragma: no cover - a COUNT always returns a row
+                    fail(f"{role}: the escalation count returned no row at all")
+                escalations = int(rows[0]["escalations"])
+                if escalations:
+                    fail(
+                        f"{role}: {escalations} termination/restart "
+                        "recommendation(s) were produced from an observation "
+                        "outage. D-0006: observation-unavailable and "
+                        "no-activity-evidence are not anomalies"
+                    )
+            else:  # pragma: no cover - guarded by the vocabulary check below
+                raise ContractViolation(
+                    f"{name!r} is a named invariant with no assertion behind it. "
+                    "The chain above has no default arm on purpose: a case that "
+                    "declared this name would otherwise run its SQL, assert "
+                    "nothing, and report coverage it does not have"
+                )
 
         observer = controller.observer(role)
         claimant = case["claimant"]
-        superseded = claimant is not None and claimant["role"] == role
+        # Two different shapes wear the same manifest field. In a takeover the
+        # claimant wins and the incumbent is the superseded one; in a race the
+        # incumbent is alive and holding, so the *claimant* is the writer that
+        # was rejected. Reading them the same way would assert that whichever
+        # writer actually won produced no effect at all.
+        superseded = (
+            claimant is not None
+            and claimant["role"] == role
+            and case["fault"] in contract.TAKEOVER_FAULTS
+        )
+        rejected_claimant = (
+            claimant is not None
+            and claimant["role"] == role
+            and case["fault"] not in contract.TAKEOVER_FAULTS
+        )
         for name in expected["destination"]:
             keys = controller.adapter.effect_keys(role, case)
             if name == contract.INVARIANT_ONE_EFFECT_PER_KEY:
@@ -1249,6 +1533,23 @@ def assert_invariants(
                     count = observer.effect_count(key)
                     if count != 1:
                         fail(f"{role}: {key!r} produced {count} effects, not one")
+                if rejected_claimant:
+                    # The loser of the race never got a lease, so it never
+                    # reached the destination. That zero is the
+                    # destination-side statement of "a stale writer is
+                    # rejected, not merged" -- the control-plane half is the
+                    # recorded refusal.
+                    loser = controller.adapter.effect_keys(
+                        role, case, holder_suffix=claimant["holder_suffix"]
+                    )
+                    for key in loser:
+                        count = observer.effect_count(key)
+                        if count != 0:
+                            fail(
+                                f"{role}: the rejected writer's key {key!r} "
+                                f"reached the destination {count} time(s); it "
+                                "was refused and should have reached it none"
+                            )
             elif name == contract.INVARIANT_DELIVERED_IMPLIES_EFFECT:
                 # A delivery-surface fault is *about* the repeat: the resend
                 # after a drop, the second copy of a duplicate, the re-delivery
@@ -1289,7 +1590,7 @@ def assert_invariants(
     # already at the destination when the process died -- which is only
     # observable between the kill and the restart, because recovery re-attempts
     # and both windows look identical afterwards.
-    if at_kill is not None and case["fault"] in ("sigkill", "staggered-sigkill"):
+    if at_kill is not None and case["fault"] in contract.KILL_FAULTS:
         for role in case["targets"]:
             anchors = [ArmedAnchor.parse(wire) for wire in case["arms"].get(role, ())]
             counted = at_kill.get(role, {})

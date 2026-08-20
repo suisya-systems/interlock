@@ -86,6 +86,123 @@ def test_every_role_is_killed_at_every_mandated_window() -> None:
             assert (role, checkpoint) in singles, (role, checkpoint)
 
 
+#: Every injection ``ACCEPTANCE.md`` section 2's table names, mapped to the fault
+#: kind that discharges it. This is the table read as a checklist: if a row of
+#: the acceptance surface has no case, the matrix is incomplete and the build
+#: says so by name rather than by a count.
+_SECTION_2_INJECTIONS: dict[str, tuple[str, ...]] = {
+    "lease": (
+        "sigkill-expire",   # kill the lease holder without release
+        "sigstop-expire",   # expire a lease while its holder is paused, and return it
+        "clock-fwd",        # skew the clock forward across the expiry boundary
+        "clock-back",       # ... and backward
+    ),
+    "outbox-resend": (
+        "drop-delivery",          # drop the delivery
+        "sigkill",                # kill the sender around the write and the delivery
+        "recipient-unavailable",  # hold the recipient unavailable across several attempts
+    ),
+    "ack": (
+        "lost-ack",  # lose the ack in flight
+        "dup-ack",   # duplicate the ack
+        "late-ack",  # deliver the ack after the sender has restarted
+        "re-ack",    # ack an already-acked message
+    ),
+    "dedup": (
+        "dup-delivery",  # deliver the same message twice, restarting in between
+    ),
+    "single-writer": (
+        "writer-race",          # two writers race for the same state item
+        "sigstop-expire",       # a partitioned writer returns after its lease expired
+        "resumed-writer-race",  # a resumed process and its replacement
+    ),
+    "observation-outage": (
+        "observation-outage",  # the observation path fails or returns nothing
+    ),
+}
+
+
+def test_every_acceptance_section_2_injection_has_a_case() -> None:
+    """The matrix is the table, row by row (Issue ``#16``, gate item 5).
+
+    Gate item 5 passes only if *every* case is automated and reproducible. The
+    counting tests above check that the seed set is well formed; this one checks
+    the thing the gate actually asks about -- that each injection the acceptance
+    surface names by phrase has a case behind it.
+    """
+
+    manifest = manifest_module.load_manifest()
+    present = {case["fault"] for case in manifest["cases"]}
+    for row, injections in _SECTION_2_INJECTIONS.items():
+        missing = [fault for fault in injections if fault not in present]
+        assert not missing, f"ACCEPTANCE.md section 2 row {row!r} has no case for {missing}"
+
+
+def test_the_observation_row_asserts_one_fact_state_per_injection() -> None:
+    """D-0006 is about a distinction, so a disjunction would not test it.
+
+    A read that *fails* and a read that *returns nothing* are different facts
+    about the world, and collapsing them is the defect D-0006 exists to forbid.
+    Each observation case therefore declares one mode, and each mode names
+    exactly one fact state.
+    """
+
+    manifest = manifest_module.load_manifest()
+    cases = [case for case in manifest["cases"] if case["fault"] == "observation-outage"]
+    assert cases, "the observation-outage row has no case"
+    modes = {case["observation"]["mode"] for case in cases}
+    # Both injections the row names, not just the one that is easier to build.
+    assert modes == {contract.OBSERVATION_UNREADABLE, contract.OBSERVATION_SILENT}
+    for case in cases:
+        mode = case["observation"]["mode"]
+        assert contract.OBSERVATION_FACT_STATES[mode] in contract.FACT_STATES
+        # The case asks for the escalation it must not get. Without that, "no
+        # recommendation was produced" would pass on a driver that has no
+        # escalation path at all.
+        assert case["observation"]["escalate_on"] == [
+            contract.OBSERVATION_FACT_STATES[mode]
+        ]
+        assert contract.INVARIANT_NO_ANOMALY_ESCALATION in case["expected"]["queries"]
+
+
+def test_every_named_invariant_is_reachable_from_some_case() -> None:
+    """A name with no case behind it is vocabulary, not coverage.
+
+    The controller now refuses an invariant name it has no assertion for, which
+    catches the opposite mistake. This catches this one.
+    """
+
+    manifest = manifest_module.load_manifest()
+    used = {name for case in manifest["cases"] for name in case["expected"]["queries"]}
+    used |= {name for case in manifest["cases"] for name in case["expected"]["destination"]}
+    unreachable = sorted(set(contract.INVARIANT_NAMES) - used - _NOT_YET_ASSERTED)
+    assert not unreachable, f"no case asserts {unreachable}"
+
+
+#: Invariants whose cases are still to come. ``incident-collapse`` belongs to
+#: the Q-0002 parameterisation, which is a ruling this task deliberately does
+#: not take on its own (see the manifest's own note); its query, its parameters
+#: and its assertion are in place so the cases are a manifest diff.
+_NOT_YET_ASSERTED = frozenset({contract.INVARIANT_INCIDENT_COLLAPSE})
+
+
+def test_the_fast_profile_still_covers_every_fault_kind() -> None:
+    """Design section 9 defines the smoke subset as "one per fault kind".
+
+    Adding kinds without adding fast cases would quietly redefine the PR lane
+    into a subset that no longer smoke-tests what the matrix injects.
+    """
+
+    manifest = manifest_module.load_manifest()
+    fast = {case["fault"] for case in manifest["cases"] if "fast" in case["profiles"]}
+    # Except the one kind design section 9 excludes by name: the smoke subset is
+    # "singles only, no staggered", and the assertion above this file's budget
+    # test enforces that exclusion from the other side.
+    wanted = set(contract.FAULT_KINDS) - {"staggered-sigkill"}
+    missing = sorted(wanted - fast)
+    assert not missing, f"the fast profile smoke-tests no {missing} case"
+
+
 def test_the_combination_subsets_are_covered() -> None:
     """"In combination" is enumerated, not implied (design 5)."""
 

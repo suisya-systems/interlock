@@ -31,8 +31,9 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -48,6 +49,7 @@
         "sup"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -81,8 +83,9 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -98,6 +101,7 @@
         "sup"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -131,8 +135,9 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -148,6 +153,7 @@
         "sup"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -181,8 +187,9 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -198,6 +205,7 @@
         "sup"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -231,8 +239,9 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "fast",
@@ -249,6 +258,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -282,8 +292,9 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "fast",
@@ -300,6 +311,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -333,8 +345,9 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "fast",
@@ -351,6 +364,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -384,8 +398,9 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "fast",
@@ -402,6 +417,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -435,8 +451,9 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -452,6 +469,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -485,8 +503,9 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -502,6 +521,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -535,8 +555,9 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -552,6 +573,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -585,8 +607,9 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -602,6 +625,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -634,8 +658,9 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "bind",
       "profiles": [
         "full"
@@ -651,6 +676,7 @@
         "sup"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -683,8 +709,9 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "enqueue",
       "profiles": [
         "full"
@@ -700,6 +727,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -732,8 +760,9 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "lease-acquire",
       "profiles": [
         "full"
@@ -749,6 +778,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -782,8 +812,9 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 2,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -799,6 +830,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": "occ2"
     },
     {
@@ -830,8 +862,9 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "lease-acquire",
       "profiles": [
         "fast",
@@ -852,6 +885,7 @@
         "sup"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -888,8 +922,9 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "lease-acquire",
       "profiles": [
         "fast",
@@ -906,6 +941,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -937,8 +973,9 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "lease-acquire",
       "profiles": [
         "full"
@@ -958,6 +995,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -994,8 +1032,9 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "lease-acquire",
       "profiles": [
         "full"
@@ -1011,6 +1050,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1047,8 +1087,9 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "lease-acquire",
       "profiles": [
         "fast",
@@ -1065,6 +1106,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1101,8 +1143,9 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "lease-acquire",
       "profiles": [
         "full"
@@ -1118,6 +1161,7 @@
         "sup"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1155,8 +1199,9 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "fast",
@@ -1173,6 +1218,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1210,8 +1256,9 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 2,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "fast",
@@ -1228,6 +1275,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1265,8 +1313,9 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "fast",
@@ -1283,6 +1332,7 @@
         "sup"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1320,8 +1370,9 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -1348,6 +1399,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": "killorder-ds"
     },
     {
@@ -1384,8 +1436,9 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "lease-acquire",
       "profiles": [
         "full"
@@ -1412,7 +1465,836 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": "killorder-sd"
+    },
+    {
+      "arms": {
+        "disp": [
+          "lease-renew@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__lease-renew__before_durable_write__sigkill-expire",
+      "checkpoint": "before_durable_write",
+      "claimant": {
+        "clock": "forward",
+        "holder_suffix": "b",
+        "observation": "sibling",
+        "role": "disp"
+      },
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "linear-writer-history",
+          "recorded-refusals",
+          "lease-single-holder"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "sigkill-expire",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "lease-renew",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "lease-renew@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__lease-renew__before_durable_write__sigkill-expire",
+      "checkpoint": "before_durable_write",
+      "claimant": {
+        "clock": "forward",
+        "holder_suffix": "b",
+        "observation": "sibling",
+        "role": "sup"
+      },
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "linear-writer-history",
+          "recorded-refusals",
+          "lease-single-holder"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill-expire",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "lease-renew",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "lease-acquire@lease-acquired:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__lease-acquire__lease-acquired__writer-race",
+      "checkpoint": "lease-acquired",
+      "claimant": {
+        "clock": "forward",
+        "holder_suffix": "race",
+        "observation": "sibling",
+        "role": "disp"
+      },
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "linear-writer-history",
+          "recorded-refusals",
+          "lease-single-holder"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "writer-race",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "lease-acquire",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": false,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "lease-acquire@lease-acquired:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sec__lease-acquire__lease-acquired__writer-race",
+      "checkpoint": "lease-acquired",
+      "claimant": {
+        "clock": "forward",
+        "holder_suffix": "race",
+        "observation": "sibling",
+        "role": "sec"
+      },
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "linear-writer-history",
+          "recorded-refusals",
+          "lease-single-holder"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "writer-race",
+      "incident_params": null,
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "lease-acquire",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": false,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "enqueue@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__enqueue__before_durable_write__resumed-writer-race",
+      "checkpoint": "before_durable_write",
+      "claimant": {
+        "clock": "forward",
+        "holder_suffix": "b",
+        "observation": "sibling",
+        "role": "disp"
+      },
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "linear-writer-history",
+          "recorded-refusals",
+          "lease-single-holder"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "resumed-writer-race",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "enqueue",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@delivered_before_ack:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "recipient-unavailable"
+      ],
+      "case_id": "disp__attempt__delivered_before_ack__recipient-unavailable",
+      "checkpoint": "delivered_before_ack",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "single-acked-state",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "recipient-unavailable",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "attempt",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": 3,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "attempt@delivered_before_ack:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "recipient-unavailable"
+      ],
+      "case_id": "sec__attempt__delivered_before_ack__recipient-unavailable",
+      "checkpoint": "delivered_before_ack",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "single-acked-state",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "recipient-unavailable",
+      "incident_params": null,
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": 3,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "ack@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "dup-ack"
+      ],
+      "case_id": "disp__ack__before_durable_write__dup-ack",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "single-acked-state",
+          "no-unowned-outbox",
+          "no-pending-action"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "dup-ack",
+      "incident_params": {
+        "collapse": null,
+        "reconcile_interval_ms": null
+      },
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "ack",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "ack@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "dup-ack"
+      ],
+      "case_id": "sec__ack__before_durable_write__dup-ack",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "single-acked-state",
+          "no-unowned-outbox",
+          "no-pending-action"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "dup-ack",
+      "incident_params": {
+        "collapse": null,
+        "reconcile_interval_ms": null
+      },
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "ack",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "ack@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "re-ack"
+      ],
+      "case_id": "sup__ack__before_durable_write__re-ack",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "single-acked-state",
+          "no-unowned-outbox",
+          "no-pending-action"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "re-ack",
+      "incident_params": {
+        "collapse": null,
+        "reconcile_interval_ms": null
+      },
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "ack",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "ack@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "re-ack"
+      ],
+      "case_id": "disp__ack__before_durable_write__re-ack",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "single-acked-state",
+          "no-unowned-outbox",
+          "no-pending-action"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "re-ack",
+      "incident_params": {
+        "collapse": null,
+        "reconcile_interval_ms": null
+      },
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "ack",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@delivered_before_ack:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__attempt__delivered_before_ack__late-ack",
+      "checkpoint": "delivered_before_ack",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "single-acked-state",
+          "retry-count-durable",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "late-ack",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "attempt",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "attempt@delivered_before_ack:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__attempt__delivered_before_ack__late-ack",
+      "checkpoint": "delivered_before_ack",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "single-acked-state",
+          "retry-count-durable",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "late-ack",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": null,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "observe@observed:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__observe__observed__observation-outage__unreadable",
+      "checkpoint": "observed",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "observation-classified",
+          "no-anomaly-escalation",
+          "recorded-refusals",
+          "unresolved-incidents"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "observation-outage",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "portable",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": {
+        "escalate_on": [
+          "OBSERVATION_UNAVAILABLE"
+        ],
+        "mode": "unreadable"
+      },
+      "operation": "observe",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": "unreadable"
+    },
+    {
+      "arms": {
+        "sup": [
+          "observe@observed:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__observe__observed__observation-outage__silent",
+      "checkpoint": "observed",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "observation-classified",
+          "no-anomaly-escalation",
+          "recorded-refusals",
+          "unresolved-incidents"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "observation-outage",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": {
+        "escalate_on": [
+          "NO_ACTIVITY_EVIDENCE"
+        ],
+        "mode": "silent"
+      },
+      "operation": "observe",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": "silent"
     },
     {
       "arms": {
@@ -1449,8 +2331,9 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -1468,6 +2351,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1505,8 +2389,9 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -1524,6 +2409,7 @@
         "disp"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1561,8 +2447,9 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -1580,6 +2467,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1617,8 +2505,9 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -1636,6 +2525,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1673,8 +2563,9 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -1692,6 +2583,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1729,8 +2621,9 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -1748,6 +2641,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1789,8 +2683,9 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -1810,6 +2705,7 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     },
     {
@@ -1851,8 +2747,9 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 1,
+      "manifest_version": 2,
       "messages": 1,
+      "observation": null,
       "operation": "attempt",
       "profiles": [
         "full"
@@ -1872,13 +2769,14 @@
         "sec"
       ],
       "ttl_ms": 30000,
+      "unavailable_attempts": null,
       "variant": null
     }
   ],
   "clock_base_ms": 1700000000000,
   "clock_guard_ms": 1000,
-  "contract_version": 1,
-  "manifest_version": 1,
+  "contract_version": 2,
+  "manifest_version": 2,
   "profiles": {
     "fast": {
       "barrier_timeout_s": 10,

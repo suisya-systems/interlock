@@ -554,6 +554,46 @@ def check_invariant_queries_are_not_vacuous(adapter: Any, workdir: Path, *, role
                 )
 
 
+def check_refusal_ids_are_unique(adapter: Any, workdir: Path, *, role: str) -> None:
+    """No two refusals recorded in one case share an ``action_id``.
+
+    A refusal's ``action_id`` is whatever the driver passed as ``attempt_id``,
+    and it is the primary key of the row. A harness cannot use a uuid there --
+    a uuid in the evidence is a re-run that cannot be compared -- so the ids are
+    composed, and a composed id collides the moment the same writer is refused
+    twice on the same operation. The collision does not surface as a duplicate
+    row: it surfaces as an ``IntegrityError`` raised from inside the write's own
+    transaction, *instead of* the refusal exception, which rolls the refusal
+    back. The record ACCEPTANCE.md section 2 requires to be durable is precisely
+    the thing that is lost.
+
+    S7 hit this and randomises its own bare-refusal ids; this check is how the
+    harness keeps the property without being able to.
+    """
+
+    case = synthetic_case(
+        case_id=f"conformance-refusal-ids-{role}", role=role, arms={}
+    )
+    with _controller(adapter, workdir, case) as controller:
+        controller.bootstrap()
+        controller.spawn(role, armed=())
+        controller.run_to_completion(role)
+
+        now_ms = controller.last_reported_now_ms(default=CONFORMANCE_CLOCK_BASE_MS)
+        params = adapter.query_parameters(role, now_ms=now_ms)
+        history = controller.query(
+            contract.INVARIANT_LINEAR_WRITER_HISTORY, scope=params["scope"]
+        )
+        ids = [row["action_id"] for row in history]
+        duplicates = sorted({name for name in ids if ids.count(name) > 1})
+        if duplicates:
+            raise ContractViolation(
+                f"{adapter.driver_module}: {role} wrote action rows sharing "
+                f"{duplicates}; a refusal id that repeats loses the refusal it "
+                "was supposed to record"
+            )
+
+
 #: The battery, as data, so a report can name what ran.
 BATTERY = (
     "checkpoint-blocks",
@@ -567,4 +607,5 @@ BATTERY = (
     "driver-cli",
     "invariant-queries",
     "invariant-queries-not-vacuous",
+    "refusal-ids-unique",
 )

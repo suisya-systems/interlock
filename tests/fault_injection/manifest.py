@@ -43,12 +43,15 @@ from tests.fault_injection.contract import (
     OPERATION_BIND,
     OPERATION_ENQUEUE,
     OPERATION_LEASE_ACQUIRE,
+    OPERATION_LEASE_RENEW,
+    OPERATION_OBSERVE,
     ROLES,
     ROLE_DISPATCHER,
     ROLE_SECRETARY,
     ROLE_SUPERVISOR,
     SQL_INVARIANTS,
     SYNC_LEASE_ACQUIRED,
+    SYNC_OBSERVED,
 )
 
 __all__ = [
@@ -68,7 +71,14 @@ MANIFEST_PATH = Path(__file__).with_name("manifest.json")
 
 #: Bumped on any semantic change to the matrix. A failure report carries it
 #: alongside the contract version (design 4.2, 4.4).
-MANIFEST_VERSION = 1
+#:
+#: 1 -> 2 (I-11, Issue ``#16``): the matrix grows from S9's seed set to the whole
+#: ``ACCEPTANCE.md`` section 2 table. The bump is not cosmetic -- the version is
+#: stamped into every case entry and mixed into every per-case seed, so it also
+#: re-rolls the payload bytes and schedule jitter of the 35 seed cases. That is
+#: the intended meaning of a semantic change to the matrix: the old evidence was
+#: recorded against manifest 1 and is not silently re-labelled as manifest 2.
+MANIFEST_VERSION = 2
 
 #: A fixed constant, not a wall-clock reading: the injected clock's base
 #: (design 7). It is the same instant the S6/S7 suites use.
@@ -136,6 +146,8 @@ def _case(
     restart_after: bool = True,
     staggered: Sequence[Mapping[str, Any]] | None = None,
     incident_params: Mapping[str, Any] | None = None,
+    observation: Mapping[str, Any] | None = None,
+    unavailable_attempts: int | None = None,
 ) -> dict:
     """One manifest entry. Every field a case needs that the id does not carry.
 
@@ -181,6 +193,18 @@ def _case(
         "restart_after": restart_after,
         "staggered": [dict(step) for step in staggered] if staggered else None,
         "incident_params": dict(incident_params) if incident_params else None,
+        # Normalised to JSON's own types, so the frozen literal and the
+        # generator compare equal: a tuple survives ``dict()`` unchanged but
+        # reads back from JSON as a list.
+        "observation": (
+            {
+                "mode": observation["mode"],
+                "escalate_on": list(observation.get("escalate_on", ())),
+            }
+            if observation
+            else None
+        ),
+        "unavailable_attempts": unavailable_attempts,
         "ttl_ms": TTL_MS,
         "clock_base_ms": CLOCK_BASE_MS,
         "manifest_version": MANIFEST_VERSION,
@@ -484,6 +508,286 @@ def build_cases() -> list[dict]:
             },
         )
     )
+
+    # =====================================================================
+    # I-11 (Issue #16): the rest of the ACCEPTANCE.md section 2 table.
+    #
+    # Everything above is S9's seed set -- one case per fault kind, per
+    # checkpoint, per lane, plus the combination seeds. Everything below closes
+    # the gap between that set and the six-row table, and each block names the
+    # row and the injected phrase it discharges so the table can be checked
+    # against this file without opening the manifest.
+    # =====================================================================
+
+    # -- Lease row: "kill the lease holder without release" -----------------
+    #
+    # The holder dies mid-script without ever releasing, a claimant whose clock
+    # has crossed the expiry takes the resource over, and the restarted holder
+    # comes back to find the lease gone. It is refused at ``acquire`` and the
+    # refusal is recorded -- which is the observable this row asks for, obtained
+    # at the point a SIGKILLed process can actually be refused. (A killed
+    # process keeps no epoch in memory, so it cannot present a stale token the
+    # way the SIGSTOP cases' holder does; that half of the row is theirs.)
+    for role, operation, checkpoint, profiles in (
+        (ROLE_DISPATCHER, OPERATION_LEASE_RENEW, CHECKPOINT_BEFORE_DURABLE_WRITE,
+         ("fast", "full")),
+        (ROLE_SUPERVISOR, OPERATION_LEASE_RENEW, CHECKPOINT_BEFORE_DURABLE_WRITE,
+         ("full",)),
+    ):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=operation,
+                checkpoint=checkpoint,
+                fault="sigkill-expire",
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={role: (f"{operation}@{checkpoint}:1",)},
+                claimant={
+                    "role": role,
+                    "holder_suffix": "b",
+                    "clock": "forward",
+                    "observation": "sibling",
+                },
+                expected={
+                    "queries": _TAKEOVER_QUERIES,
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": role,
+                },
+            )
+        )
+
+    # -- Single-writer row: "two writers race for the same state item" ------
+    #
+    # They cannot both be live writers, and that is the finding rather than a
+    # limitation: ``acquire`` only replaces a lapsed row, so the second claimant
+    # is refused at the resource boundary. "A stale writer is rejected, not
+    # merged" is observed exactly there. The incumbent is held at a barrier for
+    # the whole race so the racer provably meets a *live* lease.
+    for role, profiles in ((ROLE_DISPATCHER, ("fast", "full")), (ROLE_SECRETARY, ("full",))):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_LEASE_ACQUIRE,
+                checkpoint=SYNC_LEASE_ACQUIRED,
+                fault="writer-race",
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={role: (f"{OPERATION_LEASE_ACQUIRE}@{SYNC_LEASE_ACQUIRED}:1",)},
+                restart_after=False,
+                claimant={
+                    "role": role,
+                    "holder_suffix": "race",
+                    "clock": "forward",
+                    "observation": "sibling",
+                },
+                expected={
+                    "queries": (
+                        contract.INVARIANT_LINEAR_WRITER_HISTORY,
+                        contract.INVARIANT_RECORDED_REFUSALS,
+                        contract.INVARIANT_LEASE_SINGLE_HOLDER,
+                    ),
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+            )
+        )
+
+    # -- Single-writer row: "a write is attempted concurrently from a resumed
+    #    process and its replacement" ---------------------------------------
+    #
+    # Same mechanic as the lease row above, anchored mid-write instead of at the
+    # lease boundary: the resumed process is the restarted generation and the
+    # replacement is the claimant that took the resource over while it was gone.
+    cases.append(
+        _case(
+            targets=(ROLE_DISPATCHER,),
+            operation=OPERATION_ENQUEUE,
+            checkpoint=CHECKPOINT_BEFORE_DURABLE_WRITE,
+            fault="resumed-writer-race",
+            lane=LANE_LINUX,
+            profiles=("fast", "full"),
+            arms={
+                ROLE_DISPATCHER: (
+                    f"{OPERATION_ENQUEUE}@{CHECKPOINT_BEFORE_DURABLE_WRITE}:1",
+                )
+            },
+            claimant={
+                "role": ROLE_DISPATCHER,
+                "holder_suffix": "b",
+                "clock": "forward",
+                "observation": "sibling",
+            },
+            expected={
+                "queries": _TAKEOVER_QUERIES,
+                "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                "recovery_owner": ROLE_DISPATCHER,
+            },
+        )
+    )
+
+    # -- Outbox-resend row: "hold the recipient unavailable across several
+    #    retry attempts" ---------------------------------------------------
+    #
+    # The invariant this row names is that the retry count is "monotonically
+    # increasing, restart-surviving", so the case has to contain a restart --
+    # a run without one could not observe the surviving half at all. The
+    # refusal budget lives in the destination's own attempt log, so it keeps
+    # counting across the kill instead of starting again.
+    for role, profiles in ((ROLE_DISPATCHER, ("fast", "full")), (ROLE_SECRETARY, ("full",))):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_ATTEMPT,
+                checkpoint=CHECKPOINT_DELIVERED_BEFORE_ACK,
+                fault="recipient-unavailable",
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={
+                    role: (f"{OPERATION_ATTEMPT}@{CHECKPOINT_DELIVERED_BEFORE_ACK}:1",)
+                },
+                behaviours=("recipient-unavailable",),
+                unavailable_attempts=3,
+                expected={
+                    "queries": (
+                        contract.INVARIANT_NO_UNOWNED_OUTBOX,
+                        contract.INVARIANT_RETRY_COUNT_DURABLE,
+                        contract.INVARIANT_SINGLE_ACKED_STATE,
+                        contract.INVARIANT_NO_PENDING_ACTION,
+                    ),
+                    "destination": _KILL_DESTINATION,
+                    "recovery_owner": role,
+                },
+            )
+        )
+
+    # -- Ack row: "duplicate the ack", "ack an already-acked message",
+    #    "deliver the ack after the sender has restarted" -------------------
+    #
+    # All three used to happen in every case and therefore in no case: the ack
+    # step acked twice unconditionally, so a regression in either shape had
+    # nowhere to show. The repeat is behaviour-driven now and these are the
+    # cases that ask for it. The observable is section 2's own: "message
+    # identity in SQLite shows exactly one acked state regardless of ack
+    # multiplicity; the recipient's effect count is one".
+    for role, fault, behaviour, profiles in (
+        (ROLE_DISPATCHER, "dup-ack", "dup-ack", ("fast", "full")),
+        (ROLE_SECRETARY, "dup-ack", "dup-ack", ("full",)),
+        (ROLE_SUPERVISOR, "re-ack", "re-ack", ("fast", "full")),
+        (ROLE_DISPATCHER, "re-ack", "re-ack", ("full",)),
+    ):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_ACK,
+                checkpoint=CHECKPOINT_BEFORE_DURABLE_WRITE,
+                fault=fault,
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={role: (f"{OPERATION_ACK}@{CHECKPOINT_BEFORE_DURABLE_WRITE}:1",)},
+                release_after_barrier=True,
+                restart_after=False,
+                expected={
+                    "queries": (
+                        contract.INVARIANT_SINGLE_ACKED_STATE,
+                        contract.INVARIANT_NO_UNOWNED_OUTBOX,
+                        contract.INVARIANT_NO_PENDING_ACTION,
+                    ),
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+                behaviours=(behaviour,),
+                incident_params={
+                    "collapse": None,
+                    "reconcile_interval_ms": None,
+                },
+            )
+        )
+
+    # The late ack: the sender dies after delivery and before the ack is
+    # recorded, and the ack lands only in the generation that comes back. "A
+    # lost ack causes a resend (safe), never a lost message", and the late ack
+    # changes nothing.
+    for role, profiles in ((ROLE_DISPATCHER, ("fast", "full")), (ROLE_SUPERVISOR, ("full",))):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_ATTEMPT,
+                checkpoint=CHECKPOINT_DELIVERED_BEFORE_ACK,
+                fault="late-ack",
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={
+                    role: (f"{OPERATION_ATTEMPT}@{CHECKPOINT_DELIVERED_BEFORE_ACK}:1",)
+                },
+                expected={
+                    "queries": (
+                        contract.INVARIANT_NO_UNOWNED_OUTBOX,
+                        contract.INVARIANT_SINGLE_ACKED_STATE,
+                        contract.INVARIANT_RETRY_COUNT_DURABLE,
+                        contract.INVARIANT_NO_PENDING_ACTION,
+                    ),
+                    "destination": _KILL_DESTINATION,
+                    "recovery_owner": role,
+                },
+            )
+        )
+
+    # -- Observation-outage row (D-0006) ------------------------------------
+    #
+    # "Make the observation path fail or return nothing while the worker is
+    # genuinely healthy." Two distinct injections, because the whole of D-0006
+    # is that they are distinct: a read that *fails* is
+    # ``OBSERVATION_UNAVAILABLE`` and a read that *returns nothing* is
+    # ``NO_ACTIVITY_EVIDENCE``, and neither is an anomaly.
+    #
+    # Each case also declares an escalation policy naming the very state the
+    # injection produces. That is what makes the second half of the row
+    # falsifiable: the driver is *asked* to escalate and must refuse, so
+    # ``no-anomaly-escalation`` counts a row a broken driver would have written
+    # rather than a row nothing in the tree can write.
+    for mode, lane, profiles in (
+        # The off-Linux add-on has a 20-case budget of its own (design 9) and
+        # this fills the last slot deliberately: the read-failure injection is
+        # the row's headline, it touches no signal, and D-0006 is a
+        # control-plane property worth proving on every OS. The silent-read
+        # injection runs on the conformance lane, which is where I-11's gate
+        # evidence is read from in any case.
+        (contract.OBSERVATION_UNREADABLE, LANE_PORTABLE, ("fast", "full")),
+        (contract.OBSERVATION_SILENT, LANE_LINUX, ("fast", "full")),
+    ):
+        cases.append(
+            _case(
+                targets=(ROLE_SUPERVISOR,),
+                operation=OPERATION_OBSERVE,
+                checkpoint=SYNC_OBSERVED,
+                fault="observation-outage",
+                variant=mode,
+                lane=lane,
+                profiles=profiles,
+                arms={ROLE_SUPERVISOR: (f"{OPERATION_OBSERVE}@{SYNC_OBSERVED}:1",)},
+                release_after_barrier=True,
+                restart_after=False,
+                observation={
+                    "mode": mode,
+                    "escalate_on": (contract.OBSERVATION_FACT_STATES[mode],),
+                },
+                expected={
+                    "queries": (
+                        contract.INVARIANT_OBSERVATION_CLASSIFIED,
+                        contract.INVARIANT_NO_ANOMALY_ESCALATION,
+                        contract.INVARIANT_RECORDED_REFUSALS,
+                        # The packet is in the row and not in anyone's context
+                        # (D-0003, D-0007), so it is readable from SQLite alone
+                        # after the fact -- which is what gate item 4's "work
+                        # resumes from unresolved incidents" rests on.
+                        contract.INVARIANT_UNRESOLVED_INCIDENTS,
+                    ),
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+            )
+        )
 
     # -- aligned combinations ------------------------------------------------
     for targets in (
