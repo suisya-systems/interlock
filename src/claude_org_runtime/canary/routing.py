@@ -162,38 +162,46 @@ class RunStartRoutingPoint:
         caller then starts the run on the returned owner's own path; this
         method starts nothing.
 
+        The decision is read **inside the insert**, as one statement, rather
+        than looked up first and written after: a lookup-then-insert would
+        leave a window in which a rollback on another connection commits
+        between the two, and the run would then start on the system the
+        rollback just routed away from -- a stale decision surviving its own
+        rollback, which is precisely the run-boundary property under
+        rehearsal.
+
         Idempotent against a crashed-and-retried router: routing an
         already-routed run to the **same** owner returns the existing row
         unchanged. Routing it to a **different** owner -- which is what a
         retry after a policy flip amounts to -- is refused: the run started
-        under its recorded owner and keeps it (gate item 10).
+        under its recorded owner and keeps it (gate item 10). Only the
+        duplicate-run uniqueness failure is read that way; any other
+        integrity failure (a CHECK, say) is not an ownership question and
+        passes through as itself.
 
         :raises NoRoutingDecision: if no decision has been taken.
         :raises OwnerChangeRefused: if *run_id* is already owned by another
             system.
         """
 
-        decision = self.current_decision()
         try:
             with self._connection:
-                self._connection.execute(
+                cursor = self._connection.execute(
                     "INSERT INTO run_owner (run_id, owning_system, decision_seq, routed_at_ms) "
-                    "VALUES (:run_id, :owning_system, :decision_seq, :now_ms)",
-                    {
-                        "run_id": run_id,
-                        "owning_system": decision.owning_system,
-                        "decision_seq": decision.decision_seq,
-                        "now_ms": now_ms,
-                    },
+                    "SELECT :run_id, owning_system, decision_seq, :now_ms "
+                    "  FROM routing_decision ORDER BY decision_seq DESC LIMIT 1",
+                    {"run_id": run_id, "now_ms": now_ms},
                 )
+                if cursor.rowcount == 0:
+                    raise NoRoutingDecision(
+                        "no routing decision has been taken; the routing point "
+                        "does not assume an owner (record a baseline decision first)"
+                    )
         except sqlite3.IntegrityError as error:
-            # Only a duplicate run_id is interpretable here; any other
-            # integrity failure (a CHECK, say) is not an ownership question
-            # and passes through as itself.
-            try:
-                existing = self.routed_run(run_id)
-            except UnroutedRun:
-                raise error
+            if "UNIQUE constraint failed: run_owner.run_id" not in str(error):
+                raise
+            existing = self.routed_run(run_id)
+            decision = self.current_decision()
             if existing.owning_system == decision.owning_system:
                 return existing
             raise OwnerChangeRefused(
@@ -202,12 +210,7 @@ class RunStartRoutingPoint:
                 f"{decision.owning_system!r} would change its owner mid-flight, "
                 "which gate item 10 forbids"
             ) from None
-        return RoutedRun(
-            run_id=run_id,
-            owning_system=decision.owning_system,
-            decision_seq=decision.decision_seq,
-            routed_at_ms=now_ms,
-        )
+        return self.routed_run(run_id)
 
     def routed_run(self, run_id: str) -> RoutedRun:
         """The ledger row for *run_id*.

@@ -100,6 +100,16 @@ def test_a_non_ownership_integrity_failure_passes_through_as_itself(routing, led
     assert ledger.execute("SELECT COUNT(*) FROM run_owner").fetchone() == (0,)
 
 
+def test_an_idempotent_retry_does_not_absorb_a_validation_failure(routing):
+    # A retry of an already-routed run that itself fails a CHECK (a string
+    # timestamp, say) is a broken write, not a duplicate: it must surface as
+    # the database's refusal rather than be read as "already done".
+    routing.route_new_runs_to(SYNTHETIC_V1, now_ms=T0, reason="baseline")
+    routing.route_run_start("run-1", now_ms=T0 + 1)
+    with pytest.raises(sqlite3.IntegrityError):
+        routing.route_run_start("run-1", now_ms="later")  # type: ignore[arg-type]
+
+
 def test_a_run_never_routed_reads_as_such(routing):
     with pytest.raises(UnroutedRun):
         routing.routed_run("run-never")
