@@ -959,6 +959,65 @@ def test_provider_owned_flags_in_base_cli_args_are_a_construction_error(
     )
 
 
+def test_resume_reconciles_the_finished_generation_before_spawning(
+    provider, tmp_path, spawn_log, monkeypatch
+):
+    """A child that reported the wrong identity and then exited must not be
+    resumed straight past the incident: the finished generation is read --
+    and the incident persisted -- before any new generation may bury it."""
+
+    monkeypatch.setenv("FAKE_REPORT_ID", str(uuid.uuid4()))
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    # Deliberately no read_state in between: resume itself must reconcile.
+    result = provider.resume("sess-1")
+    assert isinstance(result, Failure)
+    assert "identity incident" in result.detail
+    assert len(_spawned(spawn_log)) == 1, "resume spawned past an unreconciled incident"
+    record = json.loads(
+        (tmp_path / "state" / "sess-1" / "record.json").read_text(encoding="utf-8")
+    )
+    assert record["incident"] is not None
+
+
+def test_a_child_whose_pid_cannot_be_recorded_is_not_left_running(
+    fake_cli, tmp_path, monkeypatch
+):
+    """A running child whose pid never reached the durable record would be
+    unadoptable by the next supervisor life -- and read as 'gone', resumed
+    around. The spawn fails closed: terminated, cleaned up, reported."""
+
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider = ClaudeCliSessionProvider(
+        tmp_path / "state", claude_command=fake_cli, stop_timeout=2.0
+    )
+    original = ClaudeCliSessionProvider._write_record
+
+    def failing_second_write(self, record):
+        if record.pid is not None:
+            raise OSError(28, "No space left on device")
+        return original(self, record)
+
+    monkeypatch.setattr(ClaudeCliSessionProvider, "_write_record", failing_second_write)
+    result = provider.start(_request(tmp_path))
+    assert isinstance(result, Failure)
+    assert "terminated" in result.detail
+    assert provider.list_sessions() == Ok(())
+    assert not (tmp_path / "state" / "sess-1").exists()
+
+
+def test_a_broken_records_identity_stays_reserved(provider, tmp_path):
+    session_dir = tmp_path / "state" / "brok"
+    session_dir.mkdir(parents=True)
+    (session_dir / "record.json").write_text('{"truncated', encoding="utf-8")
+    result = provider.start(
+        _request(tmp_path, session_id=claude_session_uuid("brok"))
+    )
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+    assert "brok" in result.detail
+
+
 def test_the_probes_raw_answers_are_durably_recorded(provider, tmp_path):
     result = provider.probe_capabilities()
     assert isinstance(result, Ok)

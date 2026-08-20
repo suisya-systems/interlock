@@ -830,6 +830,19 @@ class ClaudeCliSessionProvider(SessionProvider):
         # an exit it confirmed (a reaped child of ours, a recorded pid that no
         # longer exists, or a recycled pid whose command line proves it is a
         # stranger -- which is left untouched).
+        #
+        # The finished generation is reconciled *before* a new one may bury
+        # it: a child that reported the wrong identity and then exited would
+        # otherwise be resumed straight past the incident, with the evidence
+        # abandoned in the previous generation's file.
+        outcome = self._readout(session)
+        if isinstance(outcome, _Uninterpretable):
+            return Failure(
+                FailureKind.UNINTERPRETABLE_RESPONSE,
+                f"refusing to resume session {session_id!r}: its finished "
+                f"generation cannot be reconciled first -- {outcome.detail}",
+                outcome.provider_detail,
+            )
         try:
             self.require_spawnable()
         except SpawnRefused as exc:
@@ -933,17 +946,32 @@ class ClaudeCliSessionProvider(SessionProvider):
         try:
             self._write_record(record)
         except OSError as exc:
-            # The child is running; a record that still carries no pid is
-            # degraded but honest, and killing a healthy child over it would
-            # be the worse answer. The failure is surfaced on the readout
-            # instead of silently dropped.
-            detail: Mapping[str, Any] = {"record_update_failed": str(exc)}
-        else:
-            detail = {}
+            # A running child whose pid never reached the durable record is a
+            # child the *next* supervisor life cannot adopt, cannot signal,
+            # and -- reading the pid-less record as "gone" -- would resume
+            # around, minting the second live writer. Terminating it now is
+            # the only ending that leaves no unsupervisable process behind.
+            if os.name == "posix":
+                _signal_group(process.pid, signal.SIGKILL)
+            else:  # pragma: no cover - exercised only on Windows
+                process.kill()
+            try:
+                process.wait(timeout=self._stop_timeout)
+            except subprocess.TimeoutExpired:
+                pass
+            if fresh:
+                self._remove_session_dir(record.session_id)
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"the pid of session {record.session_id!r}'s child could not "
+                f"be durably recorded ({exc}); the child was terminated "
+                "rather than left running unadoptably",
+                {"errno": exc.errno, "pid": process.pid},
+            )
         session = _Supervised(
             record=record,
             process=process,
-            provider_detail={"pid": process.pid, "generation": record.generation, **detail},
+            provider_detail={"pid": process.pid, "generation": record.generation},
         )
         self._sessions[record.session_id] = session
         outcome = self._readout(session)
@@ -1610,6 +1638,12 @@ class ClaudeCliSessionProvider(SessionProvider):
             return None
         for entry in discovered:
             if isinstance(entry, _BrokenRecord):
+                # Unreadable, but not identity-less: the identity is a pure
+                # function of the directory name, so what the record *held*
+                # is derivable and stays conservatively reserved. A broken
+                # record may still have a live child behind it.
+                if claude_session_uuid(entry.session_id) == session_uuid:
+                    return entry.session_id
                 continue
             if entry.record.claude_session_uuid == session_uuid:
                 return entry.record.session_id
