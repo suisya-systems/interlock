@@ -775,13 +775,14 @@ class Comparison:
             raise LeaseUsageError(
                 f"a comparison operator is '=' or '<>', got {self.operator!r}"
             )
-        if not isinstance(self.operand, (Param, Value, _FenceEpoch)):
+        if type(self.operand) not in (Param, Value) and self.operand is not fence_epoch:
             raise UnfencedStatement(
                 f"the operand for {self.column!r} must be param(...), value(...) "
-                f"or fence_epoch, got {self.operand!r}; a predicate is composed "
-                "from typed objects, never from SQL text"
+                f"or fence_epoch itself, got {self.operand!r}; a predicate is "
+                "composed from the builder's own typed objects, never from a "
+                "subclass of them and never from SQL text"
             )
-        if isinstance(self.operand, Value) and self.operand.constant is None:
+        if type(self.operand) is Value and self.operand.constant is None:
             # "= NULL" and "<> NULL" are UNKNOWN for every row in SQL: the
             # predicate would match nothing, and the protected write would
             # silently become a no-op rather than the null test it looks like.
@@ -846,27 +847,35 @@ def and_(*predicates: Predicate) -> Conjunction:
 
 
 def _require_predicate(field: str, predicate: object) -> None:
-    if not isinstance(predicate, (Comparison, IsNull, Conjunction)):
+    # Exact types, not isinstance: a predicate subclass would pass every
+    # construction-time check and still render through its author's own
+    # attribute reads.
+    if type(predicate) not in (Comparison, IsNull, Conjunction):
         raise UnfencedStatement(
             f"{field} must be composed with eq(), ne(), is_null() and and_(), "
-            f"got {predicate!r}. The builders take no SQL text from a caller: "
-            "a raw fragment is exactly the surface #42 retired"
+            f"got {predicate!r}. The builders take no SQL text from a caller -- "
+            "and no subclass either: a raw fragment is exactly the surface #42 "
+            "retired"
         )
 
 
 def _render_operand(expression: object) -> str:
     # The gate every rendering path shares, so no shape -- the insert values in
     # particular -- can reach the f-strings below with an object whose own
-    # methods would decide what the statement says.
-    if not isinstance(expression, (Param, Value, _FenceEpoch)):
+    # methods would decide what the statement says. Exact types, and for the
+    # sentinel identity, never isinstance: a *subclass* of Param or Value is
+    # its author's code wearing the builder's name, free to answer
+    # construction-time validation with one text and rendering with another.
+    if type(expression) not in (Param, Value) and expression is not fence_epoch:
         raise UnfencedStatement(
-            f"a rendered value must be param(...), value(...) or fence_epoch, "
-            f"got {expression!r}. The builders take no SQL text from a caller: "
-            "a raw fragment is exactly the surface #42 retired"
+            f"a rendered value must be param(...), value(...) or fence_epoch "
+            f"itself, got {expression!r}. The builders take no SQL text from a "
+            "caller -- and no subclass either: a raw fragment is exactly the "
+            "surface #42 retired"
         )
-    if isinstance(expression, _FenceEpoch):
+    if expression is fence_epoch:
         return ":fence_epoch"
-    if isinstance(expression, Param):
+    if type(expression) is Param:
         return f":{expression.name}"
     constant = expression.constant
     if constant is None:
@@ -881,22 +890,17 @@ def _render_operand(expression: object) -> str:
 
 
 def _render_assignment(column: str, expression: object) -> str:
-    if isinstance(expression, Increment):
+    if type(expression) is Increment:
         if expression.column != column:
             raise LeaseUsageError(
                 f"increment({expression.column!r}) assigned to {column!r}: a "
                 "counter is incremented in place, so the two names must agree"
             )
         rendered = f"{column} + {int(expression.by)}"
-    elif isinstance(expression, (Param, Value, _FenceEpoch)):
-        rendered = _render_operand(expression)
     else:
-        raise UnfencedStatement(
-            f"the value for column {column!r} must be param(...), value(...), "
-            f"increment(...) or fence_epoch, got {expression!r}. The builders "
-            "take no SQL text from a caller: a raw fragment is exactly the "
-            "surface #42 retired"
-        )
+        # _render_operand's own exact-type gate refuses everything else,
+        # subclasses of the builder's types included.
+        rendered = _render_operand(expression)
     return f"{column} = {rendered}"
 
 
@@ -1066,8 +1070,11 @@ def _require_assignments(
     if stamps_writer_epoch:
         # The single-writer property is read back out of the epoch each row was
         # written under, so a row that carries no epoch -- or one a caller
-        # chose -- is refused here rather than found unprovable later.
-        if not isinstance(stamp, _FenceEpoch):
+        # chose -- is refused here rather than found unprovable later. Identity
+        # with the sentinel, not isinstance: a foreign _FenceEpoch instance is
+        # an object of the caller's, and the caller does not get to mint the
+        # stamp.
+        if stamp is not fence_epoch:
             raise UnfencedStatement(
                 f"a protected write to {table} must assign fence_epoch to "
                 f"writer_epoch, and this one assigns {stamp!r}. Pass "

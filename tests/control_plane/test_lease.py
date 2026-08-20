@@ -510,6 +510,56 @@ def test_a_subclass_is_not_a_str_however_equal_it_compares(cp):
         param(Sneaky("p"))
     with pytest.raises(LeaseUsageError):
         eq(Sneaky("c"), value(1))
+
+    # The builder's own types admit no subclasses either: a Param or predicate
+    # subclass would pass construction-time validation and still render
+    # through its author's attribute reads.
+    Param = type(param("p"))
+    Value = type(value(1))
+
+    class SneakyParam(Param):
+        @property
+        def name(self):  # pragma: no cover - must never be consulted
+            return "x, writer_epoch = 1 WHERE 1 = 1 --"
+
+    class SneakyValue(Value):
+        @property
+        def constant(self):  # pragma: no cover - must never be consulted
+            return "x' WHERE 1 = 1 --"
+
+    sneaky_param = object.__new__(SneakyParam)
+    sneaky_value = object.__new__(SneakyValue)
+    with pytest.raises(UnfencedStatement):
+        fenced_update(
+            "run",
+            set={"status": sneaky_value},
+            where=eq("run_id", param("r")),
+            stamps_writer_epoch=False,
+        )
+    with pytest.raises(UnfencedStatement):
+        fenced_insert(
+            "action",
+            values={"action_id": sneaky_param, "writer_epoch": fence_epoch},
+        )
+    with pytest.raises(UnfencedStatement):
+        eq("run_id", sneaky_param)
+
+    SneakyPredicate = type("SneakyPredicate", (type(is_null("x")),), {})
+
+    with pytest.raises(UnfencedStatement):
+        fenced_update(
+            "run",
+            set={"status": value("done")},
+            where=object.__new__(SneakyPredicate),
+            stamps_writer_epoch=False,
+        )
+    # ...and a foreign _FenceEpoch instance is not the sentinel.
+    with pytest.raises(UnfencedStatement):
+        fenced_update(
+            "action",
+            set={"writer_epoch": object.__new__(type(fence_epoch))},
+            where=eq("action_id", param("a")),
+        )
     with pytest.raises(LeaseUsageError):
         fenced_update(
             "run",
