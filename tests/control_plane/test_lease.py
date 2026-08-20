@@ -1158,23 +1158,27 @@ def test_no_dependency_edge_on_the_session_provider():
 
 
 def test_the_package_does_not_silently_shadow_a_clashing_name():
-    """S6 and S7 share a package, and two names collide in it.
+    """S6 and S7 share a package, and one name still collides in it.
 
-    ``StaleWriterRefused`` exists in both modules and means the same thing, so
-    re-exporting either would make ``except control_plane.StaleWriterRefused``
-    miss the other half of the refusals. ``Destination`` exists in both and means
-    two different things -- S7's is the delivery target, S6's register entry is
-    ``DestinationFencing``. Neither collision may be resolved by whichever import
-    happens to run second.
+    ``Destination`` exists in both modules and means two different things --
+    S7's is the delivery target, S6's register entry is ``DestinationFencing``.
+    The collision may not be resolved by whichever import happens to run
+    second. ``StaleWriterRefused`` used to be a second collision; it was
+    consolidated into the lease-owned class (#45), so the package now exports
+    exactly one and ``except control_plane.StaleWriterRefused`` catches every
+    refusal from both modules.
     """
 
     from claude_org_runtime import control_plane
     from claude_org_runtime.control_plane import outbox
 
-    assert "StaleWriterRefused" not in control_plane.__all__
-    assert not hasattr(control_plane, "StaleWriterRefused")
+    assert "StaleWriterRefused" in control_plane.__all__
+    assert control_plane.StaleWriterRefused is s6.StaleWriterRefused
+    assert outbox.StaleWriterRefused is s6.StaleWriterRefused
+    assert "StaleWriterRefused" in outbox.__all__, (
+        "S7 keeps re-exporting the name its callers already import from it"
+    )
     assert control_plane.Destination is not DestinationFencing
-    assert s6.StaleWriterRefused is not outbox.StaleWriterRefused
 
     # The one name both modules define that is genuinely the same value: it is
     # ACCEPTANCE.md section 2's clause and the DDL's enumeration, not either

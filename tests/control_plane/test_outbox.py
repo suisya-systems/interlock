@@ -961,14 +961,35 @@ def test_a_stale_writer_is_refused_and_the_refusal_is_recorded(cp, dropbox):
     )
     cp.commit()
 
-    with pytest.raises(StaleWriterRefused):
+    with pytest.raises(StaleWriterRefused) as refused:
         outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
 
     refusals = actions(cp, status="refused")
     assert len(refusals) == 1, "the rejection is durable, not silently dropped"
     assert "not a live lease" in refusals[0]["refusal_reason"]
     assert refusals[0]["writer_epoch"] == EPOCH
+    assert refused.value.action_id == refusals[0]["action_id"], (
+        "the exception names the durable row that records the rejection"
+    )
+    observed = refused.value.observed
+    assert (observed.holder, observed.epoch) == ("writer-b", 2), (
+        "and carries the lease as it actually stood at the refusal"
+    )
     assert outbox.load(message.message_id).retry_count == 0, "and no write landed"
+
+
+def test_the_refusal_class_is_the_lease_owned_one():
+    """One class, not two: #45 consolidated S7's copy into S6's.
+
+    A caller that catches ``lease.StaleWriterRefused`` therefore catches the
+    outbox's refusals too, and the shared constructor obliges every raiser to
+    name the durable refusal row and the lease it actually observed.
+    """
+
+    from claude_org_runtime.control_plane import lease as lease_module
+    from claude_org_runtime.control_plane import outbox as outbox_module
+
+    assert outbox_module.StaleWriterRefused is lease_module.StaleWriterRefused
 
 
 def test_a_writer_that_keeps_returning_is_refused_every_time(cp, dropbox):
@@ -1001,9 +1022,16 @@ def test_an_expired_lease_refuses_the_write_even_though_the_epoch_matches(cp, dr
     outbox = make_outbox(cp, dropbox)
     message = enqueue(outbox)
 
-    with pytest.raises(StaleWriterRefused):
+    with pytest.raises(StaleWriterRefused) as refused:
         outbox.attempt(message.message_id, now_ms=T0 + TTL_MS + 1, epoch=EPOCH)
-    assert len(actions(cp, status="refused")) == 1
+    refusals = actions(cp, status="refused")
+    assert len(refusals) == 1
+    assert refused.value.action_id == refusals[0]["action_id"]
+    observed = refused.value.observed
+    assert observed is not None and observed.epoch == EPOCH
+    assert not observed.looks_live_at(T0 + TTL_MS + 1), (
+        "the observed lease is the writer's own row, already expired"
+    )
 
 
 def test_the_fence_is_one_statement_and_not_a_check_then_write(cp, dropbox):
@@ -1046,13 +1074,18 @@ def test_a_stale_writer_cannot_even_enqueue(cp, dropbox):
     cp.execute("UPDATE lease SET holder = 'writer-b', epoch = 2 WHERE resource = ?", (RESOURCE,))
     cp.commit()
 
-    with pytest.raises(StaleWriterRefused, match="refused to enqueue"):
+    with pytest.raises(StaleWriterRefused, match="refused to enqueue") as refused:
         enqueue(outbox, message_id="msg-stale", dedup_key="dk-stale")
 
     assert cp.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0, "no row was written"
     refusals = actions(cp, status="refused")
     assert len(refusals) == 1, "and the rejection is durable"
     assert "refused to enqueue" in refusals[0]["refusal_reason"]
+    assert refused.value.action_id == refusals[0]["action_id"], (
+        "the enqueue path names its durable row like every other refusal"
+    )
+    observed = refused.value.observed
+    assert (observed.holder, observed.epoch) == ("writer-b", 2)
 
 
 def test_an_expired_lease_refuses_the_enqueue_too(cp, dropbox):
@@ -1217,7 +1250,7 @@ def test_a_stale_writer_cannot_record_an_effect_intent(cp, dropbox):
     cp.execute("UPDATE lease SET holder = 'writer-b', epoch = 2 WHERE resource = ?", (RESOURCE,))
     cp.commit()
 
-    with pytest.raises(StaleWriterRefused, match="record the effect intent"):
+    with pytest.raises(StaleWriterRefused, match="record the effect intent") as refused:
         outbox._ensure_pending_action(
             message, handler, key_for("dk-1"), T0 + 10, EPOCH
         )
@@ -1225,6 +1258,9 @@ def test_a_stale_writer_cannot_record_an_effect_intent(cp, dropbox):
     assert actions(cp, status="pending") == [], "no intent was recorded"
     refusals = actions(cp, status="refused")
     assert len(refusals) == 1 and "effect intent" in refusals[0]["refusal_reason"]
+    assert refused.value.action_id == refusals[0]["action_id"]
+    observed = refused.value.observed
+    assert (observed.holder, observed.epoch) == ("writer-b", 2)
 
 
 def test_the_effect_intent_insert_is_one_statement_and_not_a_check_then_write():
@@ -1284,7 +1320,7 @@ def test_a_writer_superseded_during_the_effect_may_not_record_the_result(cp, dro
     outbox = make_outbox(cp, dropbox, registry=registry)
     message = enqueue(outbox)
 
-    with pytest.raises(StaleWriterRefused, match="while the effect was in flight"):
+    with pytest.raises(StaleWriterRefused, match="while the effect was in flight") as refused:
         outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
 
     key = key_for(message.dedup_key)
@@ -1293,7 +1329,11 @@ def test_a_writer_superseded_during_the_effect_may_not_record_the_result(cp, dro
         "but it was not recorded applied by a writer that had been superseded"
     )
     assert outbox.load(message.message_id).status == "pending"
-    assert len(actions(cp, status="refused")) == 1
+    refusals = actions(cp, status="refused")
+    assert len(refusals) == 1
+    assert refused.value.action_id == refusals[0]["action_id"]
+    observed = refused.value.observed
+    assert (observed.holder, observed.epoch) == ("writer-b", 2)
 
 
 def test_the_applied_instant_survives_a_backward_clock_skew(cp, dropbox):

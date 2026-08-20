@@ -14,23 +14,21 @@ only exclusion in the system -- the provider supplies none (U27, U32) -- so
 nothing here may be softened on the strength of a provider refusing a duplicate.
 See ``docs/lease-fencing.md``.
 
-**Two names are deliberately not re-exported here, because two modules define
-them and shadowing one with the other would be silent:**
-
-``StaleWriterRefused``
-    :class:`.lease.StaleWriterRefused` and :class:`.outbox.StaleWriterRefused`
-    mean the same thing and are different classes -- S7 landed first and grew
-    its own while S6 was in flight, which its own module docstring anticipates
-    ("S6 owns the lease; S7 only validates it"). Exporting either would make
-    ``except control_plane.StaleWriterRefused`` miss the other half of the
-    refusals, so both are reached through their module. Reconciling them to one
-    class is follow-up work, not a merge decision.
+**One name is deliberately not re-exported here, because two modules define it
+and shadowing one with the other would be silent:**
 
 ``Destination``
     :class:`.destination.Destination` is a delivery *target* with a receipt.
     S6's register entry -- whether a target can refuse a stale epoch, and what
     residual is left when it cannot -- is :class:`.lease.DestinationFencing`,
     renamed for the property rather than the place so the two can coexist.
+
+``StaleWriterRefused`` used to be a second such name: S7 landed first and grew
+its own copy while S6 was in flight. The two classes were consolidated into
+:class:`.lease.StaleWriterRefused` (#45) -- :mod:`.outbox` re-exports it and
+every raiser carries the ``action_id`` of the durable refusal row and the
+lease actually ``observed`` -- so ``except control_plane.StaleWriterRefused``
+now catches every refusal and the name is exported here.
 
 ``EXACTLY_ONCE_MECHANISMS`` is defined by both and is the *same* tuple in each:
 it is ``ACCEPTANCE.md`` section 2's clause and the DDL's enumeration, not either
@@ -68,6 +66,7 @@ from .lease import (
     LeaseUsageError,
     ProtectedWrite,
     ProtectedWriteMissed,
+    StaleWriterRefused,
     UnfencedStatement,
     acquire,
     applied_epoch_regressions,
@@ -163,6 +162,7 @@ __all__ = [
     "ProtectedWrite",
     "ProtectedWriteMissed",
     "RecoveryReport",
+    "StaleWriterRefused",
     "UnfencedStatement",
     "acquire",
     "applied_epoch_regressions",
