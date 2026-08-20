@@ -117,6 +117,7 @@ __all__ = [
     "BEHAVIOUR_LOST_ACK",
     "BEHAVIOUR_RECIPIENT_UNAVAILABLE",
     "BEHAVIOUR_RE_ACK",
+    "BEHAVIOUR_INCIDENT_REPLAY",
     "BEHAVIOUR_STALE_WRITER",
     "COLLAPSE_INCREMENT_IN_PLACE",
     "COLLAPSE_OPEN_LINKED",
@@ -178,6 +179,12 @@ BEHAVIOUR_DUP_ACK = "dup-ack"
 #: reached its terminal state.
 BEHAVIOUR_RE_ACK = "re-ack"
 
+#: "Replay a persisted incident packet": every raise after the first is sourced
+#: from the row already in SQLite rather than from a fresh observation, which is
+#: what a replay is. The packet is in the row and not in anyone's context
+#: (D-0003, D-0007), so replaying it means reading it back.
+BEHAVIOUR_INCIDENT_REPLAY = "incident-replay"
+
 #: Present a fencing token the lease row will reject, on two consecutive
 #: protected writes. It exists for the conformance battery: the refusal
 #: ``action_id`` collision it checks for can only happen when the *same* writer
@@ -192,6 +199,7 @@ BEHAVIOURS = (
     BEHAVIOUR_DUP_ACK,
     BEHAVIOUR_RE_ACK,
     BEHAVIOUR_STALE_WRITER,
+    BEHAVIOUR_INCIDENT_REPLAY,
 )
 
 #: How many attempts the recipient refuses before it becomes available again.
@@ -1258,14 +1266,30 @@ def op_observe(ctx: Context) -> None:
     )
     if stale:
         repeats = max(repeats, 2)
+    replay = BEHAVIOUR_INCIDENT_REPLAY in ctx.behaviours
     outcomes: list[str] = []
     incident_id = ""
     for repeat in range(repeats):
         ctx.barrier.hit(CHECKPOINT_BEFORE_DURABLE_WRITE, operation=OPERATION_OBSERVE)
         now_ms = ctx.clock.advance()
+        raised = fact_state
+        if replay and repeat:
+            # The replay: this raise is not a fresh observation at all, it is
+            # the persisted packet read back and submitted again. Whether the
+            # replay is collapsed or opens a linked incident is the case's
+            # declared rule -- the same rule a repeat follows -- which is the
+            # point: a replayed packet must not be a way around dedup.
+            persisted = _rows(
+                ctx.connection,
+                "SELECT fact_state FROM incident WHERE dedup_key = :dedup_key "
+                "ORDER BY created_at_ms, incident_id LIMIT 1",
+                {"dedup_key": dedup_key},
+            )
+            if persisted:
+                raised = str(persisted[0]["fact_state"])
         incident_id, outcome = raise_incident(
             ctx,
-            fact_state=fact_state,
+            fact_state=raised,
             dedup_key=dedup_key,
             repeat=repeat,
             now_ms=now_ms,

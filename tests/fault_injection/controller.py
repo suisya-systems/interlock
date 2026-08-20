@@ -1226,6 +1226,7 @@ def _assert_incident_collapse(
     parameters = case.get("incident_params") or {}
     collapse = parameters.get("collapse")
     repeats = int(parameters.get("repeats") or 0)
+    expect_collapse = parameters.get("expect_collapse")
     if not rows:
         fail(f"{role}: no incident was raised, so the collapse rule asserts nothing")
         return
@@ -1243,6 +1244,28 @@ def _assert_incident_collapse(
     if collapse is None:
         # No rule declared: the case is not making a Q-0002 claim, so only the
         # fields are checked. This is the shape every S9 seed case has.
+        return
+
+    if expect_collapse is False:
+        # The raises fell outside the case's own re-notification window, so
+        # there is nothing to collapse *under either rule*: each raise is its
+        # own condition as far as the window is concerned. Asserting this is
+        # what makes the window a real parameter rather than one that is
+        # carried and ignored -- and it is deliberately checked before the rule
+        # branch, because outside the window the rule does not apply at all.
+        for key, group in by_key.items():
+            if len(group) != repeats:
+                fail(
+                    f"{role}: dedup key {key!r} produced {len(group)} incident(s) "
+                    f"for {repeats} raise(s) outside its re-notification window; "
+                    "outside the window nothing is collapsed"
+                )
+            linked = [row for row in group if row["related_incident_id"] is not None]
+            if linked:
+                fail(
+                    f"{role}: dedup key {key!r} linked {len(linked)} incident(s) "
+                    "although the raises fell outside its window"
+                )
         return
 
     for key, group in by_key.items():

@@ -315,6 +315,10 @@ FAULT_KINDS = (
     "dup-ack",
     "late-ack",
     "re-ack",
+    # Dedup row: "raise the same incident condition repeatedly within a
+    # window", "replay a persisted incident packet".
+    "incident-repeat",
+    "incident-replay",
     # Single-writer row: "two writers race for the same state item", "a write
     # is attempted concurrently from a resumed process and its replacement".
     "writer-race",

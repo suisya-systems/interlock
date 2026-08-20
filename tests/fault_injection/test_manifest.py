@@ -136,44 +136,49 @@ def test_every_acceptance_section_2_injection_has_a_case() -> None:
     manifest = manifest_module.load_manifest()
     present = {case["fault"] for case in manifest["cases"]}
     for row, injections in _SECTION_2_INJECTIONS.items():
-        missing = [
-            fault
-            for fault in injections
-            if fault not in present and fault not in _PENDING_INJECTIONS
-        ]
+        missing = [fault for fault in injections if fault not in present]
         assert not missing, f"ACCEPTANCE.md section 2 row {row!r} has no case for {missing}"
 
 
-#: The injections that are named, understood, and deliberately not yet in the
-#: manifest -- the two halves of the dedup row that depend on ``Q-0002``.
-#:
-#: They are listed rather than omitted, and the test below pins the list, so
-#: this file cannot report the matrix complete while a row is missing. Removing
-#: an entry here without adding its case turns the checklist red; adding one
-#: without a reason is a reviewable diff. Silence was the alternative, and
-#: silence is how a gate reports success it has not earned.
-_PENDING_INJECTIONS = frozenset({"incident-repeat", "incident-replay"})
+def test_the_incident_row_parameterises_q_0002_rather_than_answering_it() -> None:
+    """Both halves of Q-0002, covered rather than chosen (ACCEPTANCE.md §2).
 
+    The dedup row says the Issue fixes the incident *fields* and not the
+    semantics: whether a repeat increments the retry count on the existing
+    incident or opens a linked one is unresolved, "as is the re-notification
+    window in absolute time -- both are Q-0002", and "tests must parameterise
+    both rather than hard-code either".
 
-def test_what_the_matrix_does_not_yet_cover_is_named() -> None:
-    """The gap is enumerable, in the same spirit as the lane skips (design 8.1).
-
-    ``ACCEPTANCE.md`` section 2's dedup row requires the incident collapse rule
-    *and* the re-notification window to be parameterised rather than hard-coded
-    (``Q-0002``), and S9's own manifest validation refuses any value in
-    ``incident_params`` on the grounds that S9 fixes none. Relaxing that rule is
-    a change to a discipline the S9 design set, so it is a ruling and not this
-    task's to take (design section 10).
+    So the matrix runs both rules and more than one window, and one case's
+    raises fall *outside* its declared window -- without that, the window would
+    be a parameter that never changes an outcome, which is indistinguishable
+    from a hard-coded one.
     """
 
     manifest = manifest_module.load_manifest()
-    present = {case["fault"] for case in manifest["cases"]}
-    assert _PENDING_INJECTIONS.isdisjoint(present), (
-        "a pending injection now has a case; remove it from _PENDING_INJECTIONS "
-        "so the checklist starts enforcing it"
+    incident_cases = [
+        case
+        for case in manifest["cases"]
+        if case["fault"] in manifest_module.INCIDENT_FAULTS
+    ]
+    assert incident_cases
+    rules = {case["incident_params"]["collapse"] for case in incident_cases}
+    assert rules == set(manifest_module.COLLAPSE_RULES)
+    windows = {case["incident_params"]["renotify_window_ms"] for case in incident_cases}
+    assert len(windows) >= 2
+    assert any(
+        case["incident_params"]["expect_collapse"] is False for case in incident_cases
     )
-    named = {fault for faults in _SECTION_2_INJECTIONS.values() for fault in faults}
-    assert _PENDING_INJECTIONS <= named
+    # Q-0003 is a different question and no case settles it.
+    assert all(
+        case["incident_params"]["reconcile_interval_ms"] is None
+        for case in incident_cases
+    )
+    # The dedup key is case data, and the cases do not all spell it one way --
+    # Q-0002 asks what composes it, and a matrix whose keys were all one shape
+    # would have answered that by inertia.
+    keys = {case["incident_params"]["dedup_key"] for case in incident_cases}
+    assert len({key.count("/") for key in keys}) > 1
 
 
 def test_the_observation_row_asserts_one_fact_state_per_injection() -> None:

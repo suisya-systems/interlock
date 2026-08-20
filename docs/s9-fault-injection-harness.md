@@ -648,12 +648,26 @@ maps no fact state to any verdict, so `Q-0012` (per-state semantics) stays open;
 encoded is the one D-0006 actually decides. The same shape is the answer whenever a case's
 observable is the absence of something: make the thing possible, then assert it did not happen.
 
-**11.5 Still open, deliberately.** The dedup row's incident-collapse cases are not here.
-`ACCEPTANCE.md` §2 requires the collapse rule *and* the re-notification window to be parameterised
-rather than hard-coded (`Q-0002`), and S9's `validate_case` currently refuses any value at all in
-`incident_params` on the grounds that S9 fixes none. Relaxing that rule — to "a case may carry a
-value, and the matrix must exercise every value in the vocabulary" — is a change to a discipline
-this document set, so it goes to the secretary rather than being taken here (§10). The machinery is
-in place: the driver implements both collapse rules and is told which to apply, the
-`incident-collapse` invariant returns the rows without expressing either rule in SQL, and the
-assertion checks the rule the case declared. What is missing is the manifest diff.
+**11.5 The dedup row, and how `Q-0002` is carried.** ACCEPTANCE.md §2 requires the incident collapse
+rule *and* the re-notification window in absolute time to be parameterised rather than hard-coded —
+both halves are `Q-0002` — so S9's own rule that `incident_params` may hold no value at all had to be
+relaxed for the matrix, which is a change to a discipline this document set and was taken as a
+ruling rather than in passing. The relaxation is narrow and its scope is the point:
+
+- A **case** names its collapse rule, its window, and its dedup key. The driver implements both
+  rules and is *told* which to apply; it never picks, and it never composes the dedup key, because a
+  driver-side formula would answer `Q-0002`'s "what composes the key" half by inertia — the same way
+  a role-to-resource table would have answered `Q-0001`.
+- The **matrix** is held to covering the question rather than answering it: manifest validation
+  refuses a matrix in which the set of collapse rules is not the whole vocabulary, or in which every
+  case declares the same window. One value being load-bearing on a pass is what "hard-coded" means.
+- One case declares a window its own raises fall **outside** of and expects no collapse. Without it
+  the window would be carried and never change an outcome, and a parameter that changes nothing is
+  indistinguishable from a hard-coded one. (Both directions are verified falsifiable: a driver that
+  ignores the declared rule fails the increment-in-place cases, and one that ignores the declared
+  window fails the outside-the-window case.)
+- `reconcile_interval_ms` is **Q-0003**, not `Q-0002`, and is refused a value. The two were conflated
+  in an earlier reading of this row; they are labelled apart now.
+
+Nothing here settles `Q-0002`. When it is decided, the manifest keeps every case it has — the
+decision removes the obligation to cover both rules, it does not invalidate either.

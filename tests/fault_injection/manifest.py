@@ -112,6 +112,13 @@ PROFILES: Mapping[str, Mapping[str, Any]] = {
 
 #: Recorded rather than left implicit (design 5): scale is controlled by policy,
 #: not by product, and anything pruned is listed.
+#: The two collapse rules ACCEPTANCE.md section 2 names without choosing between
+#: them (Q-0002). The matrix must cover both; this file expresses no preference.
+COLLAPSE_RULES = ("increment-in-place", "open-linked")
+
+#: The faults whose subject is the incident packet rather than the delivery.
+INCIDENT_FAULTS = ("incident-repeat", "incident-replay")
+
 PRUNING_RULE = (
     "Aligned combination cases cover the multi-role subsets against a curated "
     "set of (operation, checkpoint) pairs -- the delivery loop's windows where "
@@ -739,6 +746,82 @@ def build_cases() -> list[dict]:
             )
         )
 
+    # -- Dedup row: "raise the same incident condition repeatedly within a
+    #    window", "replay a persisted incident packet" ---------------------
+    #
+    # This is the block Q-0002 governs, and the shape is dictated by what §2
+    # asks for rather than by what would be convenient: "tests must parameterise
+    # both rather than hard-code either". So every case names its collapse rule
+    # and its re-notification window, the driver implements both rules and is
+    # told which to apply, and `_validate_incident_parameterisation` refuses a
+    # matrix that has drifted onto one rule or one window. Nothing here decides
+    # Q-0002; the matrix covers it.
+    #
+    # The window is made to *do* something, too. A parameter that is carried but
+    # never changes an outcome is indistinguishable from a hard-coded one, so one
+    # case declares a window its own raises fall outside of and expects no
+    # collapse at all.
+    #
+    # ``expect_collapse`` is declared rather than derived. Deriving it would mean
+    # comparing the window against this harness's step interval inside the
+    # assertion, which bakes an implementation detail of the driver into the
+    # thing that is supposed to be checking the driver.
+    for fault, collapse, window_ms, expect_collapse, profiles in (
+        ("incident-repeat", "increment-in-place", 5_000, True, ("fast", "full")),
+        ("incident-repeat", "open-linked", 60_000, True, ("full",)),
+        # The window is too small for the second raise to fall inside it, so the
+        # repeat is not a repeat *within a window* and nothing is collapsed.
+        ("incident-repeat", "open-linked", 10, False, ("full",)),
+        ("incident-replay", "increment-in-place", 60_000, True, ("fast", "full")),
+        ("incident-replay", "open-linked", 5_000, True, ("full",)),
+    ):
+        replay = fault == "incident-replay"
+        variant = f"{collapse}-{'in' if expect_collapse else 'out'}"
+        cases.append(
+            _case(
+                targets=(ROLE_SUPERVISOR,),
+                operation=OPERATION_OBSERVE,
+                checkpoint=SYNC_OBSERVED,
+                fault=fault,
+                variant=variant,
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={ROLE_SUPERVISOR: (f"{OPERATION_OBSERVE}@{SYNC_OBSERVED}:1",)},
+                release_after_barrier=True,
+                restart_after=False,
+                behaviours=("incident-replay",) if replay else (),
+                observation={"mode": contract.OBSERVATION_SILENT, "escalate_on": ()},
+                incident_params={
+                    # Case data, never composed by the driver: Q-0002 asks what
+                    # composes an incident dedup key, and the two spellings
+                    # below differ in composition on purpose so no case can be
+                    # relying on one shape.
+                    "dedup_key": (
+                        f"observe/{fault}/{collapse}"
+                        if expect_collapse
+                        else f"{fault}:{collapse}:outside"
+                    ),
+                    "repeats": 2,
+                    "collapse": collapse,
+                    "renotify_window_ms": window_ms,
+                    "expect_collapse": expect_collapse,
+                    # Q-0003, not Q-0002. Named so it is visibly unset rather
+                    # than absent, and refused a value by validation.
+                    "reconcile_interval_ms": None,
+                },
+                expected={
+                    "queries": (
+                        contract.INVARIANT_INCIDENT_COLLAPSE,
+                        contract.INVARIANT_UNRESOLVED_INCIDENTS,
+                        contract.INVARIANT_OBSERVATION_CLASSIFIED,
+                        contract.INVARIANT_NO_ANOMALY_ESCALATION,
+                    ),
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+            )
+        )
+
     # -- Observation-outage row (D-0006) ------------------------------------
     #
     # "Make the observation path fail or return nothing while the worker is
@@ -1007,6 +1090,65 @@ def validate_case(case: Mapping[str, Any]) -> None:
             "under its new clock (design 7)"
         )
 
+    if case["fault"] in INCIDENT_FAULTS:
+        parameters = case["incident_params"]
+        if parameters is None:
+            raise ContractViolation(
+                f"{case_id}: an incident case carries its Q-0002 parameters"
+            )
+        # The relaxation, and its exact scope (I-11, Issue `#16`).
+        #
+        # S9 refused any value in ``incident_params`` on the grounds that S9
+        # fixes none, which was right for S9: it shipped no incident case, so a
+        # value there could only have been a decision taken by accident.
+        # ACCEPTANCE.md section 2 asks something different of the *matrix*:
+        # "tests must parameterise both rather than hard-code either". A case
+        # therefore carries a value, and the discipline moves up one level -- to
+        # :func:`_validate_incident_parameterisation`, which refuses a matrix
+        # that has quietly settled on one rule or one window. Neither this
+        # function nor that one expresses a preference between the rules, and
+        # ``Q-0002`` stays open.
+        if parameters.get("collapse") not in COLLAPSE_RULES:
+            raise ContractViolation(
+                f"{case_id}: {parameters.get('collapse')!r} is not one of the "
+                f"collapse rules {COLLAPSE_RULES}; an incident case names the "
+                "rule it runs under so the matrix can cover both"
+            )
+        window = parameters.get("renotify_window_ms")
+        if not isinstance(window, int) or window <= 0:
+            raise ContractViolation(
+                f"{case_id}: the re-notification window is the *other* half of "
+                "Q-0002 and is stated in absolute time, so a case names a "
+                f"positive value; got {window!r}"
+            )
+        if not isinstance(parameters.get("repeats"), int) or parameters["repeats"] < 2:
+            raise ContractViolation(
+                f"{case_id}: 'raise the same condition repeatedly' needs at "
+                "least two raises"
+            )
+        if not isinstance(parameters.get("expect_collapse"), bool):
+            raise ContractViolation(
+                f"{case_id}: a case says whether its raises fall inside its own "
+                "window; deriving it from the window would bake this harness's "
+                "step interval into the assertion"
+            )
+        if not parameters.get("dedup_key"):
+            raise ContractViolation(
+                f"{case_id}: the dedup key is case data. Q-0002 asks what "
+                "composes it, and a driver-side formula would answer that by "
+                "inertia -- exactly as a role-to-resource table would answer "
+                "Q-0001"
+            )
+        if "reconcile_interval_ms" not in parameters:
+            raise ContractViolation(
+                f"{case_id}: incident_params omits 'reconcile_interval_ms'"
+            )
+        if parameters["reconcile_interval_ms"] is not None:
+            raise ContractViolation(
+                f"{case_id}: reconcile_interval_ms is Q-0003, not Q-0002, and "
+                "nothing in this task settles it; leave it unset"
+            )
+
     if case["fault"] in ("drop-delivery", "dup-delivery", "lost-ack"):
         if not case["release_after_barrier"]:
             raise ContractViolation(
@@ -1035,6 +1177,59 @@ def validate_case(case: Mapping[str, Any]) -> None:
     for profile in case["profiles"]:
         if profile not in PROFILES:
             raise ContractViolation(f"{case_id}: {profile!r} is not a profile")
+
+
+def _validate_incident_parameterisation(manifest: Mapping[str, Any]) -> None:
+    """Q-0002 is parameterised by the matrix, not answered by it.
+
+    ``ACCEPTANCE.md`` section 2's dedup row is explicit that the Issue fixes the
+    incident *fields* and not the semantics -- whether a repeat increments the
+    retry count on the existing incident or opens a linked one is unresolved,
+    "as is the re-notification window in absolute time -- both are Q-0002" --
+    and that "tests must parameterise both rather than hard-code either".
+
+    Per-case validation lets a case name a rule. This is what stops the matrix
+    as a whole from having quietly picked one: every rule in the vocabulary must
+    appear, and more than one window must appear, so no single value can be
+    load-bearing on a pass. A matrix that drifted onto one rule fails at
+    collection with the drift named, rather than passing and reading as though
+    the question were settled.
+
+    Q-0003 is a different question and stays out of it: ``reconcile_interval_ms``
+    is refused a value by :func:`validate_case`.
+    """
+
+    incident_cases = [
+        case for case in manifest["cases"] if case["fault"] in INCIDENT_FAULTS
+    ]
+    if not incident_cases:
+        raise ContractViolation(
+            "the dedup row of ACCEPTANCE.md section 2 names two injections -- a "
+            "repeated incident condition and a replayed packet -- and the "
+            "matrix has no case for either"
+        )
+    rules = {case["incident_params"]["collapse"] for case in incident_cases}
+    if rules != set(COLLAPSE_RULES):
+        raise ContractViolation(
+            f"the incident cases run under {sorted(rules)}; Q-0002 is open, so "
+            f"the matrix covers every rule in {sorted(COLLAPSE_RULES)} rather "
+            "than settling on one by omission"
+        )
+    windows = {case["incident_params"]["renotify_window_ms"] for case in incident_cases}
+    if len(windows) < 2:
+        raise ContractViolation(
+            f"every incident case declares the same re-notification window "
+            f"({sorted(windows)}); one window cannot show that the assertion "
+            "does not depend on its value, which is what parameterising it means"
+        )
+    if not any(
+        case["incident_params"]["expect_collapse"] is False for case in incident_cases
+    ):
+        raise ContractViolation(
+            "no incident case declares a window its own raises fall outside of, "
+            "so the window is carried but never does anything -- an inert "
+            "parameter is indistinguishable from a hard-coded one"
+        )
 
 
 def validate_manifest(manifest: Mapping[str, Any]) -> None:
@@ -1075,6 +1270,8 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
             f"the portable lane holds {portable} cases, over its 20-case "
             "off-Linux budget"
         )
+
+    _validate_incident_parameterisation(manifest)
 
     # Coverage the design requires S9 to seed: one case per fault kind, per
     # checkpoint, per lane.

@@ -2194,6 +2194,317 @@
       },
       "barrier": "aligned",
       "behaviours": [],
+      "case_id": "sup__observe__observed__incident-repeat__increment-in-place-in",
+      "checkpoint": "observed",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "incident-collapse",
+          "unresolved-incidents",
+          "observation-classified",
+          "no-anomaly-escalation"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "incident-repeat",
+      "incident_params": {
+        "collapse": "increment-in-place",
+        "dedup_key": "observe/incident-repeat/increment-in-place",
+        "expect_collapse": true,
+        "reconcile_interval_ms": null,
+        "renotify_window_ms": 5000,
+        "repeats": 2
+      },
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": {
+        "escalate_on": [],
+        "mode": "silent"
+      },
+      "operation": "observe",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": "increment-in-place-in"
+    },
+    {
+      "arms": {
+        "sup": [
+          "observe@observed:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__observe__observed__incident-repeat__open-linked-in",
+      "checkpoint": "observed",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "incident-collapse",
+          "unresolved-incidents",
+          "observation-classified",
+          "no-anomaly-escalation"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "incident-repeat",
+      "incident_params": {
+        "collapse": "open-linked",
+        "dedup_key": "observe/incident-repeat/open-linked",
+        "expect_collapse": true,
+        "reconcile_interval_ms": null,
+        "renotify_window_ms": 60000,
+        "repeats": 2
+      },
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": {
+        "escalate_on": [],
+        "mode": "silent"
+      },
+      "operation": "observe",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": "open-linked-in"
+    },
+    {
+      "arms": {
+        "sup": [
+          "observe@observed:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__observe__observed__incident-repeat__open-linked-out",
+      "checkpoint": "observed",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "incident-collapse",
+          "unresolved-incidents",
+          "observation-classified",
+          "no-anomaly-escalation"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "incident-repeat",
+      "incident_params": {
+        "collapse": "open-linked",
+        "dedup_key": "incident-repeat:open-linked:outside",
+        "expect_collapse": false,
+        "reconcile_interval_ms": null,
+        "renotify_window_ms": 10,
+        "repeats": 2
+      },
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": {
+        "escalate_on": [],
+        "mode": "silent"
+      },
+      "operation": "observe",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": "open-linked-out"
+    },
+    {
+      "arms": {
+        "sup": [
+          "observe@observed:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "incident-replay"
+      ],
+      "case_id": "sup__observe__observed__incident-replay__increment-in-place-in",
+      "checkpoint": "observed",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "incident-collapse",
+          "unresolved-incidents",
+          "observation-classified",
+          "no-anomaly-escalation"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "incident-replay",
+      "incident_params": {
+        "collapse": "increment-in-place",
+        "dedup_key": "observe/incident-replay/increment-in-place",
+        "expect_collapse": true,
+        "reconcile_interval_ms": null,
+        "renotify_window_ms": 60000,
+        "repeats": 2
+      },
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": {
+        "escalate_on": [],
+        "mode": "silent"
+      },
+      "operation": "observe",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": "increment-in-place-in"
+    },
+    {
+      "arms": {
+        "sup": [
+          "observe@observed:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "incident-replay"
+      ],
+      "case_id": "sup__observe__observed__incident-replay__open-linked-in",
+      "checkpoint": "observed",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "incident-collapse",
+          "unresolved-incidents",
+          "observation-classified",
+          "no-anomaly-escalation"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "incident-replay",
+      "incident_params": {
+        "collapse": "open-linked",
+        "dedup_key": "observe/incident-replay/open-linked",
+        "expect_collapse": true,
+        "reconcile_interval_ms": null,
+        "renotify_window_ms": 5000,
+        "repeats": 2
+      },
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 2,
+      "messages": 1,
+      "observation": {
+        "escalate_on": [],
+        "mode": "silent"
+      },
+      "operation": "observe",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": "open-linked-in"
+    },
+    {
+      "arms": {
+        "sup": [
+          "observe@observed:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
       "case_id": "sup__observe__observed__observation-outage__unreadable",
       "checkpoint": "observed",
       "claimant": null,
