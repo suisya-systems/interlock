@@ -1018,6 +1018,56 @@ def test_a_broken_records_identity_stays_reserved(provider, tmp_path):
     assert "brok" in result.detail
 
 
+@pytest.mark.skipif(not HAS_PROC, reason="the stranger check reads cmdline via /proc")
+def test_stop_of_a_record_whose_pid_is_now_a_stranger_touches_nothing(
+    provider, tmp_path
+):
+    """A recorded pid recycled to a stranger (here: this very test process)
+    reads as 'the child is gone': the stop signals nothing, sweeps nothing
+    unverified, and reports the session as itself."""
+
+    _plant_record(tmp_path, "stale", pid=os.getpid(), pgid=os.getpid())
+    result = provider.stop("stale")
+    assert isinstance(result, Ok)
+    assert result.value.observation is Observation.COULD_NOT_OBSERVE
+
+
+def test_a_misplaced_record_is_broken_not_another_sessions_readout(
+    provider, tmp_path
+):
+    """A record copied into the wrong directory must not let read_state
+    answer with another session's state, or stop/resume act on another
+    session's pid: the directory's derivable identity is the invariant."""
+
+    _plant_record(tmp_path, "session-a")
+    source = (tmp_path / "state" / "session-a" / "record.json").read_text(encoding="utf-8")
+    misplaced = tmp_path / "state" / "session-b"
+    misplaced.mkdir(parents=True)
+    (misplaced / "record.json").write_text(source, encoding="utf-8")
+
+    read = provider.read_state("session-b")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+    assert "misplaced" in read.value.could_not_observe_reason
+    for verb in (provider.stop, provider.resume):
+        result = verb("session-b")
+        assert isinstance(result, Failure)
+        assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+
+
+def test_a_record_replaced_by_a_directory_stays_on_the_roster(provider, tmp_path):
+    session_dir = tmp_path / "state" / "dirrec"
+    (session_dir / "record.json").mkdir(parents=True)
+    listed = provider.list_sessions()
+    assert isinstance(listed, Ok)
+    (readout,) = listed.value
+    assert readout.session_id == "dirrec"
+    assert readout.observation is Observation.COULD_NOT_OBSERVE
+    read = provider.read_state("dirrec")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+
+
 def test_the_probes_raw_answers_are_durably_recorded(provider, tmp_path):
     result = provider.probe_capabilities()
     assert isinstance(result, Ok)

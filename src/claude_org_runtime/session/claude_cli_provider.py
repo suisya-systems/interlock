@@ -1188,25 +1188,30 @@ class ClaudeCliSessionProvider(SessionProvider):
                     )
             # The leader's exit is not the group's (H1): an MCP child that
             # ignored the SIGTERM outlives a parent that honoured it, and
-            # ``wait()`` returning says nothing about it. The group itself is
-            # confirmed empty before the stop reports done.
-            return self._reap_group_remnants(
-                record.pgid or process.pid, record.session_id
-            )
+            # ``wait()`` returning says nothing about it. The group is swept
+            # -- and because ``wait()`` also *reaped* the leader, freeing its
+            # pid/pgid for reuse, the sweep is the marker-verified one: an
+            # unverified group under a recycled number is never signalled.
+            return self._sweep_after_exit(session)
         # An adopted orphan is not a child of this process, so there is no
-        # ``wait``; the exit is confirmed by the pid disappearing. The
-        # identity was confirmed by ``_child_liveness`` above -- a stranger on
-        # a recycled pid is never signalled.
+        # ``wait``; the exit is confirmed by the child no longer being
+        # *identifiably ours* -- the pid gone, or the pid alive under a
+        # command line that no longer carries this session's UUID, which is a
+        # recycled pid and not a survivor. Rechecked at every poll and before
+        # every escalation, because the pid can be reaped by init and reused
+        # between two looks, and a signal aimed at yesterday's number would
+        # land on a stranger.
         assert record.pid is not None  # liveness was True, so a pid existed
         _signal_group(record.pgid or record.pid, signal.SIGTERM)
         deadline = time.monotonic() + self._stop_timeout
-        while _pid_running(record.pid):
+        while _orphan_child_alive(record):
             if time.monotonic() >= deadline:
-                _signal_group(record.pgid or record.pid, signal.SIGKILL)
+                if _orphan_child_alive(record):
+                    _signal_group(record.pgid or record.pid, signal.SIGKILL)
                 break
             time.sleep(0.05)
         deadline = time.monotonic() + self._stop_timeout
-        while _pid_running(record.pid):
+        while _orphan_child_alive(record):
             if time.monotonic() >= deadline:
                 return Failure(
                     FailureKind.TIMED_OUT,
@@ -1216,7 +1221,7 @@ class ClaudeCliSessionProvider(SessionProvider):
                     {"pid": record.pid},
                 )
             time.sleep(0.05)
-        return self._reap_group_remnants(record.pgid or record.pid, record.session_id)
+        return self._sweep_after_exit(session)
 
     def _sweep_after_exit(self, session: _Supervised) -> Failure | None:
         """The H1 sweep for a leader that is already gone -- proven, then done.
@@ -1246,32 +1251,6 @@ class ClaudeCliSessionProvider(SessionProvider):
                     f"process group {pgid} of session "
                     f"{record.session_id!r} still has members carrying its "
                     f"marker {self._stop_timeout}s after SIGKILL",
-                    {"pgid": pgid},
-                )
-            time.sleep(0.05)
-        return None
-
-    def _reap_group_remnants(self, pgid: int, session_id: str) -> Failure | None:
-        """Confirm the whole process group is gone, killing what remains (H1).
-
-        The CLI does not reap MCP-server children of its own, and one that
-        ignored the SIGTERM survives the leader -- so the leader's confirmed
-        exit is where the sweep *starts*, not where the stop is done. Best
-        effort on a platform without process groups.
-        """
-
-        if os.name != "posix":  # pragma: no cover - exercised only on Windows
-            return None
-        if not _group_has_live_members(pgid):
-            return None
-        _signal_group(pgid, signal.SIGKILL)
-        deadline = time.monotonic() + self._stop_timeout
-        while _group_has_live_members(pgid):
-            if time.monotonic() >= deadline:
-                return Failure(
-                    FailureKind.TIMED_OUT,
-                    f"process group {pgid} of session {session_id!r} still "
-                    f"has members {self._stop_timeout}s after SIGKILL",
                     {"pgid": pgid},
                 )
             time.sleep(0.05)
@@ -1623,6 +1602,25 @@ class ClaudeCliSessionProvider(SessionProvider):
                     f"{record_path} but could not be read as one: {exc!r}"
                 ),
             )
+        if record.session_id != session_id or record.claude_session_uuid != claude_session_uuid(
+            session_id
+        ):
+            # Well-formed, but not this directory's: a record copied, moved
+            # or altered into place would otherwise let read_state answer
+            # with another session's state and let stop/resume act on another
+            # session's pid and identity. The identity a directory may hold
+            # is a pure function of its name, so the mismatch is checkable --
+            # and a mismatched record is a broken one, not a usable one.
+            return _BrokenRecord(
+                session_id=session_id,
+                reason=(
+                    f"the record at {record_path} names session "
+                    f"{record.session_id!r} with identity "
+                    f"{record.claude_session_uuid!r}, which is not what its "
+                    f"directory {session_id!r} derives; a misplaced or "
+                    "altered record is not acted on"
+                ),
+            )
         session = _Supervised(record=record, provider_detail={"adopted_from_record": True})
         self._sessions[session_id] = session
         return session
@@ -1663,7 +1661,12 @@ class ClaudeCliSessionProvider(SessionProvider):
         if not self._state_root.is_dir():
             return discovered
         for entry in sorted(self._state_root.iterdir()):
-            if entry.name in known or not (entry / _RECORD_NAME).is_file():
+            # ``exists()`` rather than ``is_file()``: a record that has been
+            # replaced by a directory (or any other non-regular entry) is a
+            # *broken* record -- read_state reports it as such and start
+            # keeps its id reserved -- so the roster must carry it too, not
+            # silently claim the session does not exist.
+            if entry.name in known or not (entry / _RECORD_NAME).exists():
                 continue
             session = self._find(entry.name)
             if session is not None:
@@ -1756,37 +1759,21 @@ def _group_member_carries_marker(pgid: int, marker: bytes) -> bool:
     return False
 
 
-def _group_has_live_members(pgid: int) -> bool:
-    """Does the process group still hold anything that is actually running?
+def _orphan_child_alive(record: _SessionRecord) -> bool:
+    """Is the recorded orphan still running *and still identifiably ours*?
 
-    ``killpg(pgid, 0)`` alone cannot answer it: an unreaped zombie holds its
-    group open while being unkillable, and a sweep that waited on it would
-    time out on an exit that already happened. Where ``/proc`` exists the
-    group's members are read directly and zombies discounted; elsewhere the
-    signal-0 probe is the best available answer.
+    A pid can be reaped and reused between two looks, so the identity check
+    rides inside the poll rather than being done once up front: a live pid
+    whose command line no longer carries the session's UUID -- or can no
+    longer be read at all -- is a stranger on a recycled number, which for
+    the purpose of confirming *our* child's exit means the child is gone.
     """
 
-    proc = Path("/proc")
-    if proc.is_dir():
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                text = (entry / "stat").read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            fields = text.rpartition(")")[2].split()
-            # After the command name: state, ppid, pgrp, ...
-            if len(fields) >= 3 and fields[2] == str(pgid) and fields[0] != "Z":
-                return True
+    assert record.pid is not None
+    if not _pid_running(record.pid):
         return False
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    cmdline = _pid_cmdline(record.pid)
+    return cmdline is not None and record.claude_session_uuid in cmdline
 
 
 def _signal_group(pgid: int, signum: int) -> None:
