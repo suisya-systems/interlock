@@ -119,6 +119,21 @@ CREATE TABLE run_owner (
     CHECK (owning_system IN ('interlock', 'synthetic_v1'))
 );
 
+-- The foreign key alone only proves the referenced decision EXISTS; it does
+-- not prove the row agrees with it. A direct writer could otherwise record a
+-- run as owned by one system under a decision that names the other -- a
+-- contradiction that would then be immutable, verifiable, and capable of
+-- passing a writer audit while violating the routing policy it cites. (A
+-- missing decision_seq makes the subselect NULL and the WHEN vacuous; that
+-- case is the foreign key's, and foreign_key_check refuses it at open.)
+CREATE TRIGGER run_owner_matches_its_decision
+BEFORE INSERT ON run_owner
+WHEN NEW.owning_system <> (SELECT owning_system FROM routing_decision
+                            WHERE decision_seq = NEW.decision_seq)
+BEGIN
+    SELECT RAISE(ABORT, 'a run owner must be the system its routing decision names');
+END;
+
 CREATE TRIGGER run_owner_never_changes_mid_flight
 BEFORE UPDATE ON run_owner
 BEGIN

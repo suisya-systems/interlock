@@ -117,12 +117,15 @@ def test_or_replace_is_not_a_way_around_the_owner_trigger(ledger):
     # delete fires no trigger at all -- a mid-flight owner change in one
     # statement. The connections this module hands out turn the pragma on,
     # and this test holds them to it.
-    add_decision(ledger)
-    add_run(ledger, owning_system="synthetic_v1")
+    # Two decisions, so the replacement row agrees with the decision it
+    # cites and only the delete trigger stands between it and the rewrite.
+    add_decision(ledger, owning_system="synthetic_v1")
+    add_decision(ledger, owning_system="interlock", reason="canary")
+    add_run(ledger, owning_system="synthetic_v1", seq=1)
     with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
         ledger.execute(
             "INSERT OR REPLACE INTO run_owner (run_id, owning_system, decision_seq, routed_at_ms) "
-            "VALUES ('run-1', 'interlock', 1, ?)",
+            "VALUES ('run-1', 'interlock', 2, ?)",
             (T0 + 1,),
         )
     assert ledger.execute(
@@ -139,6 +142,15 @@ def test_or_replace_is_not_a_way_around_the_decision_history(ledger):
             "VALUES (1, 'interlock', ?, 'rewritten')",
             (T0 + 1,),
         )
+
+
+def test_a_run_owner_must_agree_with_the_decision_it_cites(ledger):
+    # The foreign key proves the decision exists; this proves the row is not
+    # lying about it. An owner row citing a synthetic_v1 decision while
+    # naming interlock would be an immutable, verifiable contradiction.
+    add_decision(ledger, owning_system="synthetic_v1")
+    with pytest.raises(sqlite3.IntegrityError, match="its routing decision names"):
+        add_run(ledger, owning_system="interlock", seq=1)
 
 
 def test_one_ledger_row_per_run(ledger):
