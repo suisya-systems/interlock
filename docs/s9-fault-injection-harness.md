@@ -76,13 +76,22 @@ Every component under test is a **role process**:
    names. Each runs a distinct **operation script** over the S6/S7 surface, shaped like the real
    component's write-set:
    - **Supervisor script** — owns the run/session-binding style writes: acquire its lease, insert
-     rows binding an identity, renew, hand off.
+     rows binding an identity, renew, hand off — **plus** one externally-effecting action driven
+     through its own outbox `attempt` (a spawn-notification effect to its own destination).
    - **Dispatcher Core script** — the delivery loop: hold the writer lease, take due outbox rows
      through `attempt` (record → effect → result), the path all four checkpoints live on.
-   - **Secretary script** — the intake/ack side: enqueue messages, record acks, exercise dedup.
+   - **Secretary script** — the intake/ack side: enqueue messages, record acks, exercise dedup —
+     **plus** one externally-effecting action through `attempt` (an ack-report effect to its own
+     destination).
 
    The scripts touch different tables, rows and leases, so a combination case (§5) exercises a
-   cross-role interleaving that a single renamed process could not produce.
+   cross-role interleaving that a single renamed process could not produce. The added
+   `attempt`-driven action in the Supervisor and Secretary scripts is not decoration: gate item 4
+   requires **all three** kill windows for **each** of the three components, and the two mid-call
+   windows exist only on a record → effect → result path. Every role script must expose all
+   mandated windows through at least one of its operations — that is a contract requirement the
+   conformance battery (§6.3) checks per role, so I-11 can arm any required (role, window) pair
+   without a manifest-validation dead end.
 
 ### 2.2 What is proved now, and how it stays valid
 
@@ -93,9 +102,16 @@ matrix run and is re-established when the real processes exist. What keeps S9 va
 transition:
 
 - The durable tests speak only to the **fault-runner contract** (§6). Today's role driver is an
-  adapter over S6/S7; when I-12 (a real supervised `claude -p` provider) and I-14 (S8
-  `MessageBus`) land, each supplies an adapter over its real entrypoint, and the manifest, barrier
-  protocol, invariant queries and tests are unchanged.
+  adapter over S6/S7; when the real components exist, adapters over their real entrypoints
+  replace it, and the manifest, barrier protocol, invariant observables and tests are unchanged.
+  **The re-proof has owners, not a vague future**: the plan runs I-11 (the matrix) *before* I-12
+  and I-14, so the first issues in which a real component and this harness coexist are **I-13**
+  (item 2 crash-window proof, `depends_on: I-12, I-11` — the real-provider adapter and the
+  kill-window re-run against it belong there; the plan already names I-13 as machinery re-run on
+  this harness) and **I-15** (item 11 re-run, `depends_on: I-13, I-14` — where the S8
+  `MessageBus` adapter obligation lands). Neither issue's current body states the adapter
+  deliverable explicitly; this document cannot re-scope another issue, so that gap is flagged for
+  escalation in §10 rather than papered over here.
 - A **conformance battery** (§6.3) is part of the harness: every adapter — today's spike driver and
   every future real one — must pass it before its cases count. It asserts the contract itself
   (every checkpoint reachable, barrier round-trip works, restart entrypoint recovers, injected
@@ -313,10 +329,17 @@ conventions:
   it is. The timeline property is asserted through what *is* durable: the epoch attribution the
   fenced writes leave on the rows they touched (`linear-writer-history`: per resource, applied
   writes carry a non-interleaved epoch sequence), the required **recorded refusal** of the stale
-  writer's attempt (a fenced write that matched zero rows, surfaced as `StaleWriterRefused`-class
-  evidence the driver reports and the controller persists in the case's event trace), and the
-  destination observer where the write had an external effect. No lease-history table is added —
-  that would be a schema decision touching `Q-0001`, which stays open (§10).
+  writer's attempt, and the destination observer where the write had an external effect. The
+  refusal record is held to `ACCEPTANCE.md` §2's own standard: a control-plane observable is a
+  SQLite query or a persisted field, so the contract names a `recorded-refusals` **SQL query**
+  and a harness event-trace line is *not* accepted as the evidence (the trace proves the harness
+  saw an exception, not that the refusal is durable). Providing the durable record is the
+  driver's obligation: the spike driver appends the refusal (resource, holder, stale epoch,
+  statement kind, `now_ms`) to a harness-owned, append-only refusal table in the same database
+  before proceeding — deliberately outside the fence, because it records a *failure to write*
+  control state rather than control state itself, and explicitly harness-scope: it is part of the
+  throwaway adapter's schema footprint, not a resolution of `Q-0001` or a change to the S5 spike
+  schema's control tables. No lease-history table is added.
 
 Scale is controlled by policy, not by product: aligned combination cases cover all 7 subsets ×
 a curated set of (operation, checkpoint) pairs chosen where roles genuinely interact (the delivery
@@ -401,13 +424,18 @@ nor *by how much* — and a host-clock change is a CI-hostile non-answer.
 **The resolution.**
 
 - **The host clock is never touched.** Neither wall nor monotonic, on any lane.
-- **The injected clock is the wall-milliseconds clock the control plane compares against.** Every
-  S6/S7 API already takes `now_ms` as an argument and the database holds no clock of its own; the
-  driver supplies every `now_ms` from a single per-process `Clock` object:
-  `now_ms() = host_wall_ms() + offset_ms`, with `offset_ms` set at spawn (`--clock-offset-ms`)
-  and adjustable only via the controller's `set_clock_offset` command while the process is blocked
-  at an armed checkpoint. The operation scripts are forbidden (by conformance test) from calling
-  `time.time()`/`datetime.now()` directly.
+- **The injected clock is fully virtual.** Every S6/S7 API already takes `now_ms` as an argument
+  and the database holds no clock of its own; the driver supplies every `now_ms` from a single
+  per-process `Clock` object: `now_ms() = clock_base_ms + advance_ms + offset_ms`, where
+  `clock_base_ms` is a **fixed constant from the manifest** (`--clock-base-ms`), `advance_ms`
+  grows only by **script-declared deterministic increments** (each operation step advances the
+  clock by an amount the script states, seeded jitter allowed under §4.3's rules), and
+  `offset_ms` starts at `--clock-offset-ms` and moves only via the controller's
+  `set_clock_offset` command while the process is blocked at an armed barrier. The driver never
+  reads the host wall clock — not as a base, not as a fallback — which is what lets §6.3's
+  identical-event-trace conformance requirement (same case + same seed ⇒ byte-identical trace,
+  timestamps included) actually hold across re-runs on different days. The operation scripts are
+  forbidden (by conformance test) from calling `time.time()`/`datetime.now()` directly.
 - **Per-role**: each role process has its own offset. Skew between roles — the case
   `ACCEPTANCE.md` §2's lease row actually needs, a holder whose clock lags the claimant's — is two
   offsets, not a global shift.
@@ -473,8 +501,11 @@ stopped processes or leaks process groups hangs CI for everyone.
 - **Teardown is unconditional, layered, and reaps last.** A fixture registered per spawned
   process runs on pass, fail and error alike. On POSIX the ladder is applied to the **process
   group** via `killpg`: `SIGCONT` (a stopped process ignores SIGTERM until continued), then
-  `SIGTERM`, then a short grace (2 s) polling the leader with `WNOHANG`-style checks, then
-  `SIGKILL` — and only **after** the final group `SIGKILL` is the leader reaped with `wait()`.
+  `SIGTERM`, then a short grace (2 s) during which leader exit is checked **without reaping** —
+  `os.waitid(P_PID, ..., WEXITED | WNOWAIT)` where available, otherwise no exit polling at all
+  and the grace is a plain sleep (`Popen.poll()`/`waitpid(WNOHANG)` are forbidden here: they reap
+  on success, which would release the pgid mid-ladder) — then `SIGKILL`, and only **after** the
+  final group `SIGKILL` is the leader reaped with `wait()`.
   The ordering is the point: an exited-but-unreaped leader is a zombie, a zombie's PID — and
   therefore the group's pgid — **cannot be reused** until it is reaped, so every `killpg` in the
   ladder is guaranteed to address the group we created, even when the leader died at the first
@@ -540,6 +571,11 @@ plus the cheap portable lane; the full matrix is a scheduled/gate concern.
   identifies as *someday needed* — promoting any spike artifact (D-0026), reading a budget number
   as gate evidence (§9), a concurrent-restart semantics beyond §5's sequential default if I-11
   wants one as gate evidence — are escalated to the secretary when they become due.
+- **One plan gap flagged for escalation now**: §2.2 assigns the real-component adapters and the
+  matrix re-run to I-13 (real-provider adapter) and I-15 (`MessageBus` adapter), but neither
+  issue's body currently names a fault-runner adapter as a deliverable. Making that explicit is a
+  change to those issues, owned by the plan, not by this document — it goes to the secretary with
+  this design.
 - **Open questions stay open.** `Q-0001` (writer assignment): resource names are per-case data
   (§2.1). `Q-0002`/`Q-0003` (incident collapse semantics, reconcile interval): incident-dedup
   cases must parameterise both, per `ACCEPTANCE.md` §2's dedup row — the manifest schema carries
