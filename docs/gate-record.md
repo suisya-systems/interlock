@@ -45,8 +45,9 @@ Three things follow, and every row below is read in their light:
 **Where the sequence stands.** Item 9 is discharged (independently of any provider). **Item 3 is
 discharged on C2**, on the weakened observable D-0023 defines — and its residual is stated in §3 in
 D-0023's own terms rather than folded into the verdict. Item 2 carries a **failed** verdict on C1
-and is **pending** on C2. Every other item is **pending** — the spike is under way on C2 and its
-evidence has not landed yet.
+and is **pending** on C2. **Item 8 is rehearsed on C2 — explicitly not discharged** (D-0022): its
+discharge point remains before the canary starts, against the real Secretary. Every other item is
+**pending** — the spike is under way on C2 and its evidence has not landed yet.
 
 ---
 
@@ -66,7 +67,7 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#12` (S5), `#13` (S6) and `#14` (S7) landed 2026-08-19; `#15`, `#16` — not yet landed | The spike (phases 4–5) |
 | 6 | `MessageBus` delivers and resends independently of the UI | `pending` | `pending` | `pending` | `#19` — not yet landed | The spike (phase 7) |
 | 7 | Unsaved artifacts protected from the managed worktree lifecycle | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#7` — not yet landed | The spike (phase 1b) |
-| 8 | Secretary window responsiveness under worker load | `pending` rehearsal → **not discharged** | `pending` | `pending` | `#21` (rehearsal) — not yet landed | **Before the canary starts** (D-0022) |
+| 8 | Secretary window responsiveness under worker load | `rehearsed — not discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#21` — `tests/secretary/`; `docs/secretary-intake-boundary.md`; `investigation/i16-item8-rehearsal.md` | **Before the canary starts** (D-0022) |
 | 9 | Curator output cannot reach a skill without human approval | `discharged` | `proven on the spike slice` | `provider-independent` | `#22`, PR `#27`; `docs/curator-promotion-gate.md`; `tests/curator/`; `investigation/u8-skill-hot-reload-probe.md` (U8) | **Discharged 2026-08-18**, independently of the spike |
 | 10 | One-worker canary and run-boundary rollback | `pending` rehearsal → **not discharged** | `pending` | `pending` | `#23` (rehearsal) — not yet landed | **At the canary itself** (D-0022) |
 | 11 | Only the `SessionProvider` need be swapped | `discharged` | `proven on the spike slice` | `provider-independent` | `#10` (S1) and `#11` (S3) landed 2026-08-19; `#20` landed 2026-08-20 — `tests/gate_item11/`, and the control-plane suite in CI with a provider bound. Zero test modifications; the S2 half of `#20`'s fourth criterion is residual until `#17` lands | The spike (phase 8) |
@@ -316,20 +317,35 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 ### Item 8 — Secretary window responsiveness while workers are loaded
 
-- **Verdict:** `pending` rehearsal → **explicitly not discharged**
-- **D-0022 label:** `pending` (the rehearsal, when it lands, is labelled *proven on the spike slice*
-  and is **not** a discharge; the discharge carries *re-proven on the real implementation*)
-- **Provider:** `pending` — and note `ACCEPTANCE.md` §4 lists item 8 among the items that must be
-  proven **in full** against whatever provider ships.
-- **Evidence:** `#21` — a stub Secretary intake with an explicit queue boundary under a load
-  generator at the worker cap, asserting structurally that intake and queue boundary are
-  asynchronous and recording baseline-vs-load latency. Not yet landed.
+- **Verdict:** `rehearsed — not discharged` (2026-08-21). The rehearsal is **not** the discharge;
+  the discharge carries *re-proven on the real implementation* and is still owed.
+- **D-0022 label:** `proven on the spike slice`.
+- **Provider:** `C2 (claude -p subprocesses)` — and note `ACCEPTANCE.md` §4 lists item 8 among the
+  items that must be proven **in full** against whatever provider ships, so the discharge is
+  against the shipping provider regardless of this rehearsal.
+- **Evidence:** `#21` — a stub Secretary intake behind an explicit bounded queue boundary
+  (`src/claude_org_runtime/secretary/`, throwaway per D-0026;
+  `docs/secretary-intake-boundary.md` is the contract). **Structural:** `tests/secretary/` holds
+  the intake package to a stdlib import allowlist (no dependency edge to `session/` or
+  `dispatcher/`), bans blocking primitives from its syntax tree, holds the package lock-free
+  outright (a lock is an implicit wait), and stalls each of the three named dependencies (worker
+  monitoring, long-running work, AI judgement) while the intake answers. **Empirical**
+  (`investigation/i16-item8-rehearsal.md`): with 8 workers at the spike-slice cap plus a
+  long-running task — live `claude -p` children — and an incident parked awaiting a stub
+  judgement, intake latency was unchanged from idle (medians ~0.001 ms both sides, recorded, not
+  a threshold), and stayed unchanged while the supervisor thread was deliberately blocked for
+  14.3 s. **The #6 blocking-`readline()` control, inconclusive there, is re-measured against live
+  children:** one blocking read on a mid-turn child cost 13.01 s against a ~0.07 ms non-blocking
+  whole-sweep of all nine — the U6 C2 fold-in measured rather than argued. Spend recorded:
+  USD 2.82 across 47 spawns.
 - **Discharge point:** **before the canary starts** (D-0022, D-0013).
 - **Discharge point reached:** `no` — the canary has not started. A Secretary that blocks under
   load would invalidate the canary's own measurements.
-- **Residual:** the numeric latency threshold is **unresolved** — `Q-0011`. The gate check is the
-  absence of blocking dependencies plus a recorded baseline-vs-load comparison, and the real proof
-  is against the real Secretary under genuine worker load.
+- **Residual:** the numeric latency threshold is **unresolved** — `Q-0011`; nothing in the
+  rehearsal states one and its numbers are not criteria. The real proof is against the real
+  Secretary (durable intake, real Dispatcher AI judgement, genuine worker load) — the stub
+  judgement here is an Event, and the spike-slice cap of 8 is the rehearsal's stated load, not a
+  decided cap.
 - **Scoped exception:** see §4. If the discharge point is reached without the predicate met, that is
   a **gate failure recorded as such**. Deferred, not waived.
 
@@ -461,6 +477,7 @@ anything.
 | **S5 — the spike SQLite schema** | **throwaway — named explicitly by D-0026** | `#12` — landed 2026-08-19: `src/claude_org_runtime/control_plane/spike_schema.sql`, tests `tests/control_plane/`. The file carries its own note, at the top, that it is a spike schema and that **no migration path is promised from it**, and the loader refuses DDL whose marking has been removed. A database at another revision is **refused, never migrated**. `Q-0001` stays open and is not answered by inertia: no column, CHECK or index names a component or a role, and `Q-0002` stays open too — `dedup_key` is indexed but not unique, so neither collapse rule is forced |
 | S6 / S7 — lease and outbox implementations | throwaway (their tests are durable) | `#13` — landed 2026-08-19: `src/claude_org_runtime/control_plane/lease.py`, tests `tests/control_plane/test_lease.py`, written record `docs/lease-fencing.md`. Throwaway under D-0026 and it survives a C2 switch untouched — it is Interlock's own obligation regardless of provider (D-0024), and after the fence search it is the only exclusion there is. `Q-0001` stays open: `holder` is an opaque claimant identity and never a role. `#14` — landed 2026-08-19: `src/claude_org_runtime/control_plane/{outbox,handlers,destination}.py` is throwaway, `tests/control_plane/test_outbox.py` is the durable half |
 | S8 — `MessageBus` MCP endpoint | throwaway (the no-edge assertion is durable) | `#19` |
+| Stub Secretary intake (item 8 rehearsal) | throwaway implementation, durable tests and boundary contract | `#21` — landed 2026-08-21: `src/claude_org_runtime/secretary/` is throwaway; `tests/secretary/` (the structural and behavioural assertions) and `docs/secretary-intake-boundary.md` (the contract the real Secretary and `#29` build against) are the durable half; `investigation/i16_item8_rehearsal.py` is an S4-style throwaway harness and `investigation/i16-item8-rehearsal.md` its record |
 | S10 — per-role fencing renderer, `PreToolUse` deny hook, breach-probe battery | throwaway implementation, durable tests | `#9`; implementation `src/claude_org_runtime/fencing/`, tests `tests/fencing/`. Landed 2026-08-18; nothing here is promoted by having discharged item 3 |
 | Curator promotion gate implementation | throwaway | PR `#27`, `src/claude_org_runtime/curator/` |
 | Investigation records (U-register, fence search, U1, U8, U15/U35/U42) | evidence, not spike output — kept as the basis of the verdicts above | `investigation/` |

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Item 8 rehearsal -- the stub Secretary intake and its explicit queue
+  boundary** (`ACCEPTANCE.md` §1 item 8, D-0022, Issue #21). **A rehearsal,
+  not a discharge**: the discharge point is the real Secretary under genuine
+  worker load, before the canary starts, against a threshold settled by
+  Q-0011 -- no numeric threshold is invented here.
+  `src/claude_org_runtime/secretary/` is the throwaway stub (D-0026);
+  `docs/secretary-intake-boundary.md` is the boundary contract later work
+  (e.g. Issue #29) builds against; the durable half is `tests/secretary/`:
+  the intake package is held to a stdlib import allowlist (no dependency edge
+  to `session/` or `dispatcher/`), banned from calling blocking primitives,
+  and held lock-free outright (no `with`-block, no lock constructor, no
+  `threading` import -- a lock is an implicit wait) -- all on the syntax
+  tree -- and behavioural tests stall each of the three dependencies gate
+  item 8 names (worker monitoring, long-running work, an AI judgement) while
+  the intake keeps answering.
+
+  **The empirical half ran against live `claude -p` children**
+  (`investigation/i16_item8_rehearsal.py`, reusing the #6 harness;
+  `investigation/i16-item8-rehearsal.md` is the record): baseline-vs-load
+  intake latency at the spike-slice cap of 8 workers plus a long-running
+  task and an incident parked awaiting a stub AI judgement, and the #6
+  blocking-`readline()` control -- inconclusive there because the children
+  had finished -- re-measured against children mid-turn, folding the C2
+  analogue of U6 in with numbers rather than a structural claim alone.
+
 - **S9 -- the fault-injection harness** (`ACCEPTANCE.md` §2, gate items 4 and 5,
   D-0026, Issue #15). `tests/fault_injection/` implements
   `docs/s9-fault-injection-harness.md`: deterministic injection at the three
