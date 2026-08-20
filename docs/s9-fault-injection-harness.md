@@ -335,11 +335,27 @@ conventions:
   and a harness event-trace line is *not* accepted as the evidence (the trace proves the harness
   saw an exception, not that the refusal is durable). Providing the durable record is the
   driver's obligation: the spike driver appends the refusal (resource, holder, stale epoch,
-  statement kind, `now_ms`) to a harness-owned, append-only refusal table in the same database
+  statement kind, `now_ms`) to a harness-owned, append-only refusal table
   before proceeding — deliberately outside the fence, because it records a *failure to write*
   control state rather than control state itself, and explicitly harness-scope: it is part of the
   throwaway adapter's schema footprint, not a resolution of `Q-0001` or a change to the S5 spike
   schema's control tables. No lease-history table is added.
+
+  **Where that table lives, corrected against the implementation (S9, Issue `#15`).** This
+  paragraph originally said "in the same database". It cannot be: `open_control_plane` verifies a
+  sha256 fingerprint over *every* object in `sqlite_master` — tables, indices and triggers, with
+  their stored DDL text — so a harness table added to the control-plane database makes the next
+  open refuse the whole file with `CorruptStateRefused`, and D-0026 promises no migration path to
+  repair it with. The ledger is therefore a **sidecar SQLite file beside the control plane**
+  (`<workdir>/harness-refusals.sqlite3`, one per case). Everything else this paragraph requires is
+  unchanged: append-only, harness-owned, written outside the fence and with its own connection,
+  and read back by the `recorded-refusals` **named SQL query** — a persisted, query-answerable
+  record, which is the standard `ACCEPTANCE.md` §2 actually sets. It adds no object to
+  `spike_schema.sql`, so the fingerprint and every existing database stay valid, and it resolves
+  no `Q-`. The sidecar also carries the refusal classes S6 records nowhere (`LeaseHeld`,
+  `LeaseNotHeld`, `ClockSkewRefused`) and the S7 `enqueue` refusal, whose `action.kind` is not
+  composed by `effect_kind` and therefore cannot be attributed to a resource by query — which is
+  the other half of why the driver, and not S6/S7, owns this record.
 
 Scale is controlled by policy, not by product: aligned combination cases cover all 7 subsets ×
 a curated set of (operation, checkpoint) pairs chosen where roles genuinely interact (the delivery

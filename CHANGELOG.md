@@ -9,6 +9,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S9 -- the fault-injection harness** (`ACCEPTANCE.md` §2, gate items 4 and 5,
+  D-0026, Issue #15). `tests/fault_injection/` implements
+  `docs/s9-fault-injection-harness.md`: deterministic injection at the three
+  §2 mid-flight points plus the fourth the outbox rows add, clock skew in both
+  directions across the expiry boundary, SIGSTOP with a real takeover, and each
+  of Supervisor / Dispatcher Core / Secretary killed separately and in
+  combination. Human intervention: none. A failing case re-runs alone.
+
+  **Every component under test is a real process.** A role is spawned with its
+  own PID, its own session, its own SQLite connection and its own lease
+  identity, and the three run different operation scripts over different tables
+  and rows -- so a combination case is a cross-role interleaving rather than one
+  renamed function killed three times. A restart is the same command line plus
+  `--restart-generation N`, with no warm state: the entrypoint reconstructs by
+  query and drives unfinished work to resolution before it proceeds (D-0001).
+
+  **The kill is a real signal, never an exception.** S7's `checkpoint` callable
+  kills a delivery by raising, which unwinds the stack, runs `finally` clauses
+  and closes the connection in an orderly way -- the opposite of a crash. Here
+  the hook is phase one of a two-phase barrier: it writes one line to the event
+  pipe and blocks reading the control pipe, holding no locks and touching no
+  SQLite state. Phase two is `SIGKILL` from the controller, and the exit status
+  is asserted to be `-SIGKILL` on the conformance lane, because a role process
+  that exited any other way did not experience the crash its case claims.
+
+  **The matrix is enumerated and the seed is subordinate.** Injection points are
+  never sampled: `manifest.json` is a frozen literal, a generator-freeze test
+  makes every addition a reviewable diff, and the per-case seed is
+  `sha256(manifest_version || case_id || suite_seed)` whose authority is payload
+  and schedule only. Manifest validation refuses a barrier an operation does not
+  have, a case anchored in an effect window that asserts only over our own rows,
+  a same-role skew expected to be seen by an in-flight call, and a case count
+  over its profile budget -- all at collection, so an unreachable barrier is a
+  manifest error and never a CI hang.
+
+  **The clock is injected, per role, and boundary-relative.** No host clock is
+  touched on any lane; every `now_ms` comes from a virtual clock whose skew
+  magnitudes are recorded symbolically against the lease geometry
+  (`ttl_ms + guard`) and resolved at run time into the reproduction line. The
+  controller's own watchdogs stay on host monotonic time, deliberately.
+
+  **Durable half and throwaway half are separated by one seam.**
+  `spike_driver.py` is the only module allowed to import
+  `claude_org_runtime.control_plane`, asserted structurally; the contract,
+  controller, manifest, conformance battery and cases name no S6/S7 symbol, so
+  the I-12/I-14 adapters replace one file. Every adapter -- today's and every
+  future one -- must pass `conformance.py` before its cases count.
+
+  **Budgets are mechanical** (design §9): the PR matrix runs the fast smoke
+  subset plus the portable lane, the full matrix runs nightly and on demand
+  (`.github/workflows/s9-full.yml`), and the per-case, suite and barrier
+  watchdogs carry the manifest's numbers. These are harness engineering
+  parameters, not acceptance thresholds.
+
+  **One forced deviation from the design, recorded here rather than papered
+  over.** §5 puts the harness-owned refusal ledger "in the same database"; it
+  cannot go there, because `open_control_plane` verifies a sha256 fingerprint
+  over every object in `sqlite_master` and would refuse the file on the next
+  open (D-0026 promises no migration). The ledger is a sidecar SQLite file
+  beside the control plane instead -- append-only, harness-owned, written
+  outside the fence, read back by the `recorded-refusals` named query. It adds
+  no table to the S5 spike schema and resolves no `Q-`.
+
+  **What S9 does not ship:** the full §2 matrix (I-11), the real-component
+  adapters (I-12/I-14 follow-ups), and any recovery logic -- that belongs to the
+  components.
+
 - **Gate item 11 discharged -- the control-plane suite runs unchanged against
   S3** (`ACCEPTANCE.md` §1 item 11, D-0019 / D-0026, Issue #20).
   `tests/gate_item11/` measures D-0019's promise that a provider that does not

@@ -40,6 +40,17 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[dev]
       - name: Run pytest
+        # S9 (Issue #15) reads two variables here. S9_PROFILE selects the fault
+        # injection profile: the PR matrix pays for the *fast* smoke subset
+        # only, and the full matrix is a scheduled and gate concern (see
+        # s9-full.yml). S9_SUITE_SEED is fixed rather than random so a red build
+        # is reproducible from its own log -- the failure prints an S9-REPRO
+        # line carrying it. On macOS and Windows the harness selects the
+        # portable lane by itself; the Linux conformance lane is where gate
+        # evidence is read from.
+        env:
+          S9_PROFILE: fast
+          S9_SUITE_SEED: "20260820"
         run: python -m pytest -x -q
       - name: Control-plane suite against the S3 provider (gate item 11)
         # Issue #20: from this point on the control-plane suite is also run with
