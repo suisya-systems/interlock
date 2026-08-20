@@ -69,7 +69,7 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | 8 | Secretary window responsiveness under worker load | `pending` rehearsal → **not discharged** | `pending` | `pending` | `#21` (rehearsal) — not yet landed | **Before the canary starts** (D-0022) |
 | 9 | Curator output cannot reach a skill without human approval | `discharged` | `proven on the spike slice` | `provider-independent` | `#22`, PR `#27`; `docs/curator-promotion-gate.md`; `tests/curator/`; `investigation/u8-skill-hot-reload-probe.md` (U8) | **Discharged 2026-08-18**, independently of the spike |
 | 10 | One-worker canary and run-boundary rollback | `pending` rehearsal → **not discharged** | `pending` | `pending` | `#23` (rehearsal) — not yet landed | **At the canary itself** (D-0022) |
-| 11 | Only the `SessionProvider` need be swapped | `pending` | `pending` | `provider-independent` | `#10` (S1) and `#11` (S3) landed 2026-08-19; `#20` — not yet landed | The spike (phase 8) |
+| 11 | Only the `SessionProvider` need be swapped | `discharged` | `proven on the spike slice` | `provider-independent` | `#10` (S1) and `#11` (S3) landed 2026-08-19; `#20` landed 2026-08-20 — `tests/gate_item11/`, and the control-plane suite in CI with a provider bound. Zero test modifications; the S2 half of `#20`'s fourth criterion is residual until `#17` lands | The spike (phase 8) |
 
 All eleven items are present. None is omitted and none is merged into another.
 
@@ -380,20 +380,47 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 ### Item 11 — even if the provider does not hold, only the `SessionProvider` need be swapped
 
-- **Verdict:** `pending`
-- **D-0022 label:** `pending`
+- **Verdict:** `discharged`
+- **D-0022 label:** `proven on the spike slice`
 - **Provider:** `provider-independent` — by construction: the item measures the *absence* of
   provider detail in the control plane.
 - **Evidence:** `#10` (S1, the provisional `SessionProvider` interface), `#11` (S3, the stub
   provider over local child processes), `#20` (re-run the control-plane suite unchanged against S3).
-  `#10` and `#11` landed 2026-08-19; `#20` — the half that actually measures the item — has not.
-  Both halves are needed: a stub that exists proves nothing until an unmodified suite runs against it.
-- **Residual:** none recorded yet. Any test that has to be **modified** to run against S3 marks a
-  leak of session-backend detail into the control plane and must be fixed before the item passes.
+  `#10` and `#11` landed 2026-08-19; `#20` landed 2026-08-20. Both halves are needed: a stub that
+  exists proves nothing until an unmodified suite runs against it.
+- **What `#20` measured.** `tests/gate_item11/` runs the control-plane suite
+  (`tests/control_plane/`, 184 cases) twice as subprocesses — once plain, once with
+  `tests/gate_item11/provider_plugin.py` binding a live S3 session for the whole run — and compares
+  the collected test ids, the per-phase outcome of every one of them, and the SHA-256 of every file
+  each run read. All three are identical, which is `#20`'s fourth criterion (*the same suite
+  artifact, differing only in provider fixture*) evidenced rather than asserted. The provider is
+  **qualified before collection starts** — the plugin binds a session, writes it into S5 under a
+  fencing token through the adapter and delivers one acked effect about it, aborting the run if it
+  cannot — so the comparison is not one a provider the control plane could not use would also pass.
+  **Zero test modifications were required**: no file under `tests/control_plane/` or
+  `src/claude_org_runtime/control_plane/` is touched by the commit that discharges this item.
+  `tests/gate_item11/test_substitution_scenarios.py` drives the other direction — sessions really
+  started by S3, bound into S5's source of truth through the one adapter that knows both
+  vocabularies — so that "the suite does not need a provider" is not satisfied by a control plane
+  that could not use one.
+- **How a later leak fails the build.** The CI workflow runs the control-plane suite a second time
+  with the provider bound, and `tests/gate_item11/test_no_provider_detail_leaks.py` widens
+  `tests/control_plane/test_lease.py`'s import-edge assertion from S6 alone to the whole
+  control-plane package and the whole suite, adds *nothing under `src/` may import both a session
+  backend and the control plane*, and discovers `SessionProvider` implementations so that one
+  shipping without a registry entry fails the build rather than silently narrowing the measurement
+  back to the provider it was already known to pass.
+- **Residual:** the S2 half of `#20`'s fourth criterion. The comparison is currently between two
+  runs of the same suite that differ in whether a provider is bound, not between S3 and S2, because
+  `#17` has not landed. The registry tripwire above is what forces the second row to be added the
+  day it does. No test needed modification, so the leak clause below has nothing recorded against
+  it.
 - **Notes:** D-0020's B+ ordering — S3 written before S2 — exists so that item 11 measures a
   structural property rather than a retrofit. The C1→C2 switch is the first real test of D-0019's
   promise that a gate failure costs a provider and not a design, and item 11 is where that promise
-  is measured rather than asserted.
+  is measured rather than asserted. Any test that has to be **modified** to run against a provider
+  marks a leak of session-backend detail into the control plane and must be fixed — not annotated,
+  not skipped, not marked expected-fail — before the item passes.
 
 ---
 
@@ -427,7 +454,7 @@ anything.
 | Artifact | Class (D-0026) | Where |
 |---|---|---|
 | S1 — the provisional `SessionProvider` interface | **durable (contract)** | `#10` — marked provisional in the file itself (D-0021); promoted to a settled contract only by a later `D-` entry. Landed 2026-08-19: `src/claude_org_runtime/session/provider.py`, tests `tests/session/`. Being written does not promote it |
-| Tests — fault injection, recovery, accident-derived fixtures, the control-plane suite | **durable (tests)** | `#15`, `#16`, `#18`, `#19`, `#20`, `tests/curator/`, `tests/fencing/` |
+| Tests — fault injection, recovery, accident-derived fixtures, the control-plane suite | **durable (tests)** | `#15`, `#16`, `#18`, `#19`, `#20`, `tests/curator/`, `tests/fencing/`. `#20` landed 2026-08-20: `tests/gate_item11/` is durable test material — the provider registry, the substitution adapter and the two plugins are the fixture half a second provider re-uses, not an implementation to throw away with S3 |
 | S2 — the C2 `SessionProvider` | throwaway | `#17` |
 | S3 — the stub provider | throwaway | `#11` — landed 2026-08-19: `src/claude_org_runtime/session/stub_provider.py`, tests `tests/session/test_stub_provider.py`. Local child processes only: no Claude CLI, no network. Throwaway under D-0026, but it survives a C2 switch untouched |
 | S4 — the probe harnesses | throwaway | `#6`, `#7` |

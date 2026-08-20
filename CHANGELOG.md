@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gate item 11 discharged -- the control-plane suite runs unchanged against
+  S3** (`ACCEPTANCE.md` §1 item 11, D-0019 / D-0026, Issue #20).
+  `tests/gate_item11/` measures D-0019's promise that a provider that does not
+  hold costs a `SessionProvider` and not a design. Nothing under
+  `tests/control_plane/` or `src/claude_org_runtime/control_plane/` changed:
+  **zero test modifications** is the item's exit condition, and an edit made to
+  get the suite green would have been the leak rather than the fix.
+
+  **Measured by running the same suite twice.** One subprocess runs
+  `tests/control_plane/` plain; the other runs it with
+  `provider_plugin.py` binding a live S3 session for the whole run. Both are
+  recorded by `outcome_recorder.py`, and the comparison is over collected test
+  ids, the per-phase outcome of each, and the SHA-256 of every file the run read
+  -- so "the same suite artifact, differing only in provider fixture" (Issue
+  #20's fourth criterion) is evidenced rather than asserted. Subprocesses
+  because a provider bound inside the same process as the suite would make "a
+  backend was live" a claim about ordering rather than a fact about the run.
+
+  **The provider is qualified before collection starts.** One running next to
+  the suite would leave that comparison true for a provider the control plane
+  could not use at all, so the plugin first drives a full round trip -- readout
+  to binding to fenced write to acked delivery -- and aborts the run if it
+  cannot. Fail-closed (D-0010): a green run that measured nothing is worse than
+  a red one.
+
+  **And the other direction, so the absence is not vacuous.**
+  `test_substitution_scenarios.py` starts real sessions on S3 and binds them
+  into S5's source of truth through `substitution.py` -- the one module that
+  knows both vocabularies. It shows the provider's own state word reaching the
+  row uninterpreted, R4's *could not observe* arriving as a readout with its
+  reason rather than as an empty result, and the second live session for a run
+  being refused by the partial unique index while the provider starts its child
+  without complaint (U27, U32: the exclusion is ours, never the backend's).
+
+  **A later leak fails the build on the day it is introduced.** CI runs the
+  control-plane suite a second time with the provider bound.
+  `test_no_provider_detail_leaks.py` widens the import-edge assertion that
+  `tests/control_plane/test_lease.py` made about S6 alone to the whole
+  control-plane package and the whole suite, adds that nothing under `src/` may
+  import both a session backend and the control plane, and discovers
+  `SessionProvider` implementations rather than listing them -- so S2 shipping
+  without a registry entry (Issue #17) fails the build instead of quietly
+  narrowing the measurement back to the provider it already passed. That S2 row
+  is the item's one residual, and it is recorded as such in
+  `docs/gate-record.md`.
+
 - **S6 -- the lease, and the fencing token validated atomically as part of each
   protected write** (`ACCEPTANCE.md` §2, D-0024 / D-0026, Issue #13).
   `src/claude_org_runtime/control_plane/lease.py` implements acquisition,
