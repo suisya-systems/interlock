@@ -70,6 +70,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 
 from .destination import DeliveryReceipt, DestinationRefusal
+from .lease import Lease, StaleWriterRefused, _immediate, read_lease
 
 __all__ = [
     "CHECKPOINTS",
@@ -216,14 +217,14 @@ class HandlerRejected(Exception):
     """
 
 
-class StaleWriterRefused(Exception):
-    """A protected write matched no row: the writer's fencing token is not live.
-
-    The refusal is durable before this is raised -- see
-    :meth:`Outbox._record_refusal`. ``ACCEPTANCE.md`` section 2 requires the
-    rejection itself to be recorded, so an exception alone would not discharge
-    it.
-    """
+# ``StaleWriterRefused`` is :class:`.lease.StaleWriterRefused`, imported above
+# and re-exported through ``__all__``. S7 landed first and grew its own copy
+# while S6 was in flight; the two classes were consolidated into the
+# lease-owned one (#45). Every raise below matches that class's contract: the
+# refusal is durable *before* the raise, ``action_id`` names the ``action``
+# row in status ``'refused'`` that records it, and ``observed`` is the lease
+# row as it stood at the moment of the refusal (``None`` if the resource has
+# no row), read in the same transaction that records the refusal.
 
 
 class HumanGateRequired(Exception):
@@ -551,7 +552,7 @@ class Outbox:
                 f"{epoch} is not a live lease on {self._resource!r} held by "
                 f"{self._holder!r} at {now_ms}"
             )
-            self._record_bare_refusal(
+            action_id, observed = self._record_bare_refusal(
                 run_id=run_id,
                 kind=f"enqueue:{recipient}",
                 idempotency_key=f"enqueue:{recipient}:{dedup_key}",
@@ -560,7 +561,7 @@ class Outbox:
                 now_ms=now_ms,
                 epoch=epoch,
             )
-            raise StaleWriterRefused(reason)
+            raise StaleWriterRefused(reason, action_id=action_id, observed=observed)
 
         return self.load(message_id)
 
@@ -690,8 +691,10 @@ class Outbox:
                 f"stopped being a live lease on {self._resource!r} held by "
                 f"{self._holder!r} before the effect was attempted"
             )
-            self._record_refusal(message, handler, reason, now_ms=now_ms, epoch=epoch)
-            raise StaleWriterRefused(reason)
+            action_id, observed = self._record_refusal(
+                message, handler, reason, now_ms=now_ms, epoch=epoch
+            )
+            raise StaleWriterRefused(reason, action_id=action_id, observed=observed)
 
         # (3) the effect itself -- attempted every time, including when our own
         # action row already says 'applied'.
@@ -764,8 +767,10 @@ class Outbox:
                     f"{epoch} stopped being a live lease on {self._resource!r} "
                     f"held by {self._holder!r} while the effect was in flight"
                 )
-                self._record_refusal(message, handler, reason, now_ms=now_ms, epoch=epoch)
-                raise StaleWriterRefused(reason)
+                action_id, observed = self._record_refusal(
+                    message, handler, reason, now_ms=now_ms, epoch=epoch
+                )
+                raise StaleWriterRefused(reason, action_id=action_id, observed=observed)
         self._mark_delivered(message_id, now_ms=now_ms, epoch=epoch,
                              message=message, handler=handler)
         self._checkpoint(CHECKPOINT_DELIVERED_BEFORE_ACK)
@@ -976,8 +981,10 @@ class Outbox:
             f"epoch {epoch} is not a live lease on {self._resource!r} held by "
             f"{self._holder!r} at {now_ms}"
         )
-        self._record_refusal(message, handler, reason, now_ms=now_ms, epoch=epoch)
-        raise StaleWriterRefused(reason)
+        action_id, observed = self._record_refusal(
+            message, handler, reason, now_ms=now_ms, epoch=epoch
+        )
+        raise StaleWriterRefused(reason, action_id=action_id, observed=observed)
 
     def _mark_delivered(
         self,
@@ -1053,8 +1060,10 @@ class Outbox:
             f"a live lease on {self._resource!r} held by {self._holder!r} at "
             f"{now_ms}"
         )
-        self._record_refusal(message, handler, reason, now_ms=now_ms, epoch=epoch)
-        raise StaleWriterRefused(reason)
+        action_id, observed = self._record_refusal(
+            message, handler, reason, now_ms=now_ms, epoch=epoch
+        )
+        raise StaleWriterRefused(reason, action_id=action_id, observed=observed)
 
     def _fence_is_live(self, *, epoch: int, now_ms: int) -> bool:
         row = self._one(
@@ -1078,16 +1087,19 @@ class Outbox:
         *,
         now_ms: int,
         epoch: int,
-    ) -> None:
+    ) -> tuple[str, Lease | None]:
         """Persist the rejection. ``ACCEPTANCE.md`` section 2 requires it durable.
 
         A refused row is excluded from ``action_one_effect_per_key``, so a
         writer that keeps returning is recorded every time it is turned away
         rather than having its first refusal stand in for the rest -- which is
         why the identity below cannot be derived from the attempt's own values.
+
+        :returns: the id of the refusal row, and the lease actually observed --
+            what :class:`.lease.StaleWriterRefused` requires of its raiser.
         """
 
-        self._record_bare_refusal(
+        return self._record_bare_refusal(
             run_id=message.run_id,
             kind=handler.action_kind,
             idempotency_key=handler.idempotency_key(message),
@@ -1107,7 +1119,7 @@ class Outbox:
         reason: str,
         now_ms: int,
         epoch: int,
-    ) -> None:
+    ) -> tuple[str, Lease | None]:
         """Insert one refusal row, for a message that may not exist yet.
 
         The action id is randomised rather than composed from the message id,
@@ -1117,9 +1129,25 @@ class Outbox:
         recorded -- losing precisely the evidence ``ACCEPTANCE.md`` section 2
         requires to be durable, in exactly the case where the writer is trying
         hardest to get in.
+
+        :returns: the id of the refusal row, and the lease as it stood when the
+            refusal was recorded (``None`` if the resource has no row). The
+            read happens inside the transaction that records the refusal, so
+            the row the caller raises with is the row the refusal was written
+            against, not one re-read after another writer moved the lease.
         """
 
-        with self._connection:
+        action_id = f"refused-{uuid.uuid4().hex}"
+        # BEGIN IMMEDIATE, not ``with self._connection:``. Under the legacy
+        # isolation level this codebase's connections run on, the connection
+        # context manager begins no transaction of its own -- the implicit
+        # BEGIN happens at the INSERT, so the read above it would run in
+        # autocommit and another connection could move the lease between the
+        # row we observe and the refusal committing against it. The write lock
+        # taken here up front is the same guard :func:`.lease.protected_write`
+        # uses to keep its own classification honest.
+        with _immediate(self._connection):
+            observed = read_lease(self._connection, self._resource)
             self._connection.execute(
                 """
                 INSERT INTO action (action_id, run_id, kind, idempotency_key,
@@ -1129,7 +1157,7 @@ class Outbox:
                         :mechanism, 'refused', :reason, :epoch, :now_ms)
                 """,
                 {
-                    "action_id": f"refused-{uuid.uuid4().hex}",
+                    "action_id": action_id,
                     "run_id": run_id,
                     "kind": kind,
                     "idempotency_key": idempotency_key,
@@ -1139,6 +1167,7 @@ class Outbox:
                     "now_ms": now_ms,
                 },
             )
+        return action_id, observed
 
     def _one(self, query: str, params: Mapping[str, object]):
         rows = self._all(query, params)
