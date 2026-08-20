@@ -1051,6 +1051,12 @@ def _require_assignments(
             f"typed values, got {assignments!r}. The builders take no SQL text "
             "from a caller: a raw fragment is exactly the surface #42 retired"
         )
+    # Snapshotted into a dict of our own before anything is checked: the
+    # caller's mapping is the caller's object, and one that answered the
+    # validation differently from the rendering would carry an unvalidated
+    # name or an unstamped epoch into the statement. Everything below -- and
+    # the rendering in the builders -- reads only this copy.
+    assignments = dict(assignments)
     if not assignments:
         raise LeaseUsageError(f"a protected write to {table} assigns no column at all")
     for column in assignments:

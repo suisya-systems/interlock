@@ -536,6 +536,41 @@ def test_a_subclass_is_not_a_str_however_equal_it_compares(cp):
     assert sneaky_table == statement
 
 
+def test_the_builder_reads_the_callers_mapping_exactly_once():
+    """A mapping that answers validation and rendering differently.
+
+    The Mapping is the caller's object: one that returned fence_epoch to the
+    stamp check but value(0) to the rendering would put an unstamped epoch --
+    or an unvalidated name -- into the statement. The builder snapshots the
+    mapping before anything is checked, so whatever it says, it says once.
+    """
+
+    from collections.abc import Mapping as MappingABC
+
+    class TwoFaced(MappingABC):
+        def __init__(self) -> None:
+            self._reads = 0
+
+        def __iter__(self):
+            yield "status"
+            yield "writer_epoch"
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, key):
+            if key == "status":
+                return value("applied")
+            self._reads += 1
+            return fence_epoch if self._reads == 1 else value(0)
+
+    statement = fenced_update(
+        "action", set=TwoFaced(), where=eq("action_id", param("a"))
+    )
+    assert "writer_epoch = :fence_epoch" in statement
+    assert "writer_epoch = 0" not in statement
+
+
 def test_a_null_comparison_is_refused_in_favour_of_is_null():
     """``= NULL`` matches no row in SQL; the write would be a silent no-op."""
 
