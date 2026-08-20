@@ -1,0 +1,706 @@
+"""The case matrix: an explicit, checked-in enumeration (design 4).
+
+Injection points are never sampled. Issue ``#15`` reads as if the seed selected
+them; it does not, and design section 4 says why: if it did, adding a case,
+reordering an enumeration or a different Python hash seed would silently change
+what every seed means. The matrix is a frozen literal in ``manifest.json``,
+:func:`build_cases` is the generator that must reproduce it exactly, and
+``test_manifest.py`` asserts the two agree -- so adding or pruning a case is
+always a reviewable diff and never a side effect of an enumeration change.
+
+The seed's authority is payload and schedule only (design 4.3).
+
+**What S9 ships here** is the schema, the seed set that proves the harness (at
+least one case per fault kind, per checkpoint and per lane, plus the section 5
+combination seed set) and the generator-freeze test. Populating the full
+``ACCEPTANCE.md`` section 2 matrix is I-11's deliverable, on this schema.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from tests.fault_injection import contract
+from tests.fault_injection.contract import (
+    ARMABLE_ANCHORS,
+    ArmedAnchor,
+    BARRIER_ALIGNED,
+    BARRIER_STAGGERED,
+    CHECKPOINTS,
+    CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD,
+    CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT,
+    CHECKPOINT_BEFORE_DURABLE_WRITE,
+    CHECKPOINT_DELIVERED_BEFORE_ACK,
+    ContractViolation,
+    DESTINATION_INVARIANTS,
+    EFFECT_BEARING_CHECKPOINTS,
+    LANE_LINUX,
+    LANE_PORTABLE,
+    OPERATION_ACK,
+    OPERATION_ATTEMPT,
+    OPERATION_BIND,
+    OPERATION_ENQUEUE,
+    OPERATION_LEASE_ACQUIRE,
+    ROLES,
+    ROLE_DISPATCHER,
+    ROLE_SECRETARY,
+    ROLE_SUPERVISOR,
+    SQL_INVARIANTS,
+    SYNC_LEASE_ACQUIRED,
+)
+
+__all__ = [
+    "MANIFEST_PATH",
+    "MANIFEST_VERSION",
+    "PROFILES",
+    "PRUNING_RULE",
+    "build_cases",
+    "build_manifest",
+    "load_manifest",
+    "profile_cases",
+    "validate_case",
+    "validate_manifest",
+]
+
+MANIFEST_PATH = Path(__file__).with_name("manifest.json")
+
+#: Bumped on any semantic change to the matrix. A failure report carries it
+#: alongside the contract version (design 4.2, 4.4).
+MANIFEST_VERSION = 1
+
+#: A fixed constant, not a wall-clock reading: the injected clock's base
+#: (design 7). It is the same instant the S6/S7 suites use.
+CLOCK_BASE_MS = 1_700_000_000_000
+
+#: Lease geometry the boundary-relative skew magnitudes are resolved against.
+TTL_MS = 30_000
+
+#: The harness engineering budgets (design 9). These are **not** acceptance
+#: thresholds -- they are enforced CI budgets, revisable by an ordinary reviewed
+#: diff, and reading one *as* gate evidence would be a ruling and goes to the
+#: secretary.
+PROFILES: Mapping[str, Mapping[str, Any]] = {
+    "fast": {
+        "runs_on": "every PR push, Linux job only (plus the portable lane everywhere)",
+        "max_cases": 25,
+        "per_case_timeout_s": 15,
+        "combination_case_timeout_s": 15,
+        "suite_timeout_s": 240,
+        "barrier_timeout_s": 10,
+    },
+    "full": {
+        "runs_on": "nightly and gate runs (I-11/I-13/I-15), Linux conformance lane",
+        "max_cases": 200,
+        "per_case_timeout_s": 30,
+        "combination_case_timeout_s": 60,
+        "suite_timeout_s": 1500,
+        "barrier_timeout_s": 20,
+    },
+}
+
+#: Recorded rather than left implicit (design 5): scale is controlled by policy,
+#: not by product, and anything pruned is listed.
+PRUNING_RULE = (
+    "Aligned combination cases cover the multi-role subsets against a curated "
+    "set of (operation, checkpoint) pairs -- the delivery loop's windows where "
+    "roles genuinely interact -- and not the full cross-product. Pruned "
+    "deliberately: (a) the 7-subset x 4-checkpoint x 7-operation product, of "
+    "which only the pairs listed here are kept; (b) single-role sigkill cases "
+    "on operations other than the three named non-attempt seeds; (c) staggered "
+    "sequences beyond the two the acceptance surface cares most about. I-11 "
+    "extends this set deliberately, never by product."
+)
+
+
+def _case(
+    *,
+    targets: Sequence[str],
+    operation: str,
+    checkpoint: str,
+    fault: str,
+    variant: str | None = None,
+    lane: str,
+    profiles: Sequence[str],
+    arms: Mapping[str, Sequence[str]],
+    barrier: str = BARRIER_ALIGNED,
+    kill_order: Sequence[str] | None = None,
+    restart_order: Sequence[str] | None = None,
+    expected: Mapping[str, Any],
+    messages: int = 1,
+    behaviours: Sequence[str] = (),
+    claimant: Mapping[str, Any] | None = None,
+    skew: Mapping[str, Any] | None = None,
+    release_after_barrier: bool = False,
+    restart_after: bool = True,
+    staggered: Sequence[Mapping[str, Any]] | None = None,
+    incident_params: Mapping[str, Any] | None = None,
+) -> dict:
+    """One manifest entry. Every field a case needs that the id does not carry.
+
+    ``case_id + manifest_version`` denotes exactly one fully-specified case,
+    which is what the re-run and failure-report contracts rely on (design 4.1).
+    """
+
+    segments = ["+".join(targets), operation, checkpoint, fault]
+    if variant:
+        segments.append(variant)
+    case_id = "__".join(segments)
+    entry = {
+        "case_id": case_id,
+        "targets": list(targets),
+        "operation": operation,
+        "checkpoint": checkpoint,
+        "fault": fault,
+        "variant": variant,
+        "lane": lane,
+        "profiles": list(profiles),
+        "barrier": barrier,
+        "arms": {role: list(anchors) for role, anchors in arms.items()},
+        "kill_order": list(kill_order if kill_order is not None else targets),
+        "restart_order": list(restart_order if restart_order is not None else targets),
+        "expected": {
+            "queries": list(expected.get("queries", ())),
+            "destination": list(expected.get("destination", ())),
+            "recovery_owner": expected.get("recovery_owner"),
+        },
+        "messages": messages,
+        "behaviours": list(behaviours),
+        "claimant": dict(claimant) if claimant else None,
+        "skew": dict(skew) if skew else None,
+        "release_after_barrier": release_after_barrier,
+        "restart_after": restart_after,
+        "staggered": [dict(step) for step in staggered] if staggered else None,
+        "incident_params": dict(incident_params) if incident_params else None,
+        "ttl_ms": TTL_MS,
+        "clock_base_ms": CLOCK_BASE_MS,
+        "manifest_version": MANIFEST_VERSION,
+    }
+    return entry
+
+
+_KILL_QUERIES = (
+    contract.INVARIANT_NO_UNOWNED_OUTBOX,
+    contract.INVARIANT_RETRY_COUNT_DURABLE,
+    contract.INVARIANT_LINEAR_WRITER_HISTORY,
+    contract.INVARIANT_NO_PENDING_ACTION,
+)
+_KILL_DESTINATION = (
+    contract.INVARIANT_ONE_EFFECT_PER_KEY,
+    contract.INVARIANT_DELIVERED_IMPLIES_EFFECT,
+)
+_TAKEOVER_QUERIES = (
+    contract.INVARIANT_LINEAR_WRITER_HISTORY,
+    contract.INVARIANT_RECORDED_REFUSALS,
+    contract.INVARIANT_LEASE_SINGLE_HOLDER,
+)
+
+
+def build_cases() -> list[dict]:
+    """Produce the candidate matrix. The frozen literal is the authority.
+
+    A test asserts this equals ``manifest.json``'s ``cases``; the generator is a
+    convenience for producing a diff, never a collection-time enumeration.
+    """
+
+    cases: list[dict] = []
+
+    # -- kill at each of the four windows, for each role separately ---------
+    #
+    # Gate item 4 requires all three ACCEPTANCE.md section 2 windows for *each*
+    # of the three components, plus the fourth the outbox rows add. Every role
+    # reaches all four through its own ``attempt``-driven action, which is why
+    # the Supervisor and Secretary scripts carry one (design 2.1).
+    for role in ROLES:
+        for checkpoint in CHECKPOINTS:
+            fast = role == ROLE_DISPATCHER
+            cases.append(
+                _case(
+                    targets=(role,),
+                    operation=OPERATION_ATTEMPT,
+                    checkpoint=checkpoint,
+                    fault="sigkill",
+                    lane=LANE_PORTABLE,
+                    profiles=("full",) if not fast else ("fast", "full"),
+                    arms={role: (f"{OPERATION_ATTEMPT}@{checkpoint}:1",)},
+                    expected={
+                        "queries": _KILL_QUERIES,
+                        "destination": _KILL_DESTINATION,
+                        "recovery_owner": role,
+                    },
+                )
+            )
+
+    # -- kill on the operations that are not the delivery loop --------------
+    for role, operation, checkpoint in (
+        (ROLE_SUPERVISOR, OPERATION_BIND, CHECKPOINT_BEFORE_DURABLE_WRITE),
+        (ROLE_SECRETARY, OPERATION_ENQUEUE, CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT),
+        (ROLE_DISPATCHER, OPERATION_LEASE_ACQUIRE, CHECKPOINT_BEFORE_DURABLE_WRITE),
+    ):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=operation,
+                checkpoint=checkpoint,
+                fault="sigkill",
+                lane=LANE_LINUX,
+                profiles=("full",),
+                arms={role: (f"{operation}@{checkpoint}:1",)},
+                expected={
+                    "queries": _KILL_QUERIES,
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": role,
+                },
+            )
+        )
+
+    # -- the same checkpoint, a later occurrence ----------------------------
+    #
+    # A loop passes the same point repeatedly, so the occurrence index is part
+    # of the arming and gets its own variant slug (design 4.1).
+    cases.append(
+        _case(
+            targets=(ROLE_DISPATCHER,),
+            operation=OPERATION_ATTEMPT,
+            checkpoint=CHECKPOINT_BEFORE_DURABLE_WRITE,
+            fault="sigkill",
+            variant="occ2",
+            lane=LANE_LINUX,
+            profiles=("full",),
+            arms={ROLE_DISPATCHER: (f"{OPERATION_ATTEMPT}@{CHECKPOINT_BEFORE_DURABLE_WRITE}:2",)},
+            messages=2,
+            expected={
+                "queries": _KILL_QUERIES,
+                "destination": _KILL_DESTINATION,
+                "recovery_owner": ROLE_DISPATCHER,
+            },
+        )
+    )
+
+    # -- clock skew, both directions, across the expiry boundary ------------
+    #
+    # Two supported shapes only (design 7): cross-role skew, where the target is
+    # blocked while a *sibling's* offset moves and the sibling acts under its
+    # new clock; and same-role skew, observed by the script's *next* operation.
+    # A case whose expectation depends on an in-flight call seeing a mid-call
+    # skew is invalid by construction and refused at validation.
+    for role, direction, profiles in (
+        (ROLE_SUPERVISOR, "backward", ("fast", "full")),
+        (ROLE_DISPATCHER, "forward", ("fast", "full")),
+        (ROLE_SECRETARY, "backward", ("full",)),
+        (ROLE_SUPERVISOR, "forward", ("full",)),
+    ):
+        forward = direction == "forward"
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_LEASE_ACQUIRE,
+                checkpoint=SYNC_LEASE_ACQUIRED,
+                fault="clock-fwd" if forward else "clock-back",
+                lane=LANE_PORTABLE,
+                profiles=profiles,
+                arms={role: (f"{OPERATION_LEASE_ACQUIRE}@{SYNC_LEASE_ACQUIRED}:1",)},
+                restart_after=False,
+                release_after_barrier=not forward,
+                # Forward skew is the cross-role shape: a claimant on the same
+                # resource whose clock has crossed the holder's expiry takes the
+                # lease over while the holder is frozen at its barrier.
+                claimant=(
+                    {"role": role, "holder_suffix": "b", "clock": "forward",
+                     "observation": "sibling"}
+                    if forward
+                    else None
+                ),
+                # Backward skew is the same-role shape: the offset lands while
+                # the process is blocked, and the *next* operation observes it.
+                skew=(
+                    None
+                    if forward
+                    else {"role": role, "direction": "backward", "observation": "next-operation"}
+                ),
+                expected={
+                    "queries": _TAKEOVER_QUERIES if forward else (
+                        contract.INVARIANT_LEASE_SINGLE_HOLDER,
+                        contract.INVARIANT_LINEAR_WRITER_HISTORY,
+                    ),
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+            )
+        )
+
+    # -- SIGSTOP: pause a holder, let its lease lapse, resume it ------------
+    #
+    # Anchored at a sync point, never at a bare sleep: the controller sends
+    # SIGSTOP only while the holder is provably blocked at that barrier, already
+    # holding its lease and between operations. Being stopped, it cannot consume
+    # the ``continue`` until it is resumed, so pause / takeover / return is a
+    # deterministic sequence rather than a scheduling accident (design 4.1).
+    for role, profiles in ((ROLE_DISPATCHER, ("fast", "full")), (ROLE_SUPERVISOR, ("full",))):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_LEASE_ACQUIRE,
+                checkpoint=SYNC_LEASE_ACQUIRED,
+                fault="sigstop-expire",
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={role: (f"{OPERATION_LEASE_ACQUIRE}@{SYNC_LEASE_ACQUIRED}:1",)},
+                restart_after=False,
+                claimant={
+                    "role": role,
+                    "holder_suffix": "b",
+                    "clock": "forward",
+                    "observation": "sibling",
+                },
+                expected={
+                    "queries": _TAKEOVER_QUERIES,
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+            )
+        )
+
+    # -- delivery-surface faults --------------------------------------------
+    #
+    # Anchored like every other fault, but the fault is at the delivery surface
+    # rather than at the process: the barrier is a pass-through here, used to
+    # pin the moment rather than to kill.
+    for role, checkpoint, fault, behaviour, messages in (
+        (ROLE_DISPATCHER, CHECKPOINT_BEFORE_DURABLE_WRITE, "drop-delivery", "drop-delivery", 1),
+        (ROLE_SECRETARY, CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT, "dup-delivery", "dup-delivery", 2),
+        (ROLE_SUPERVISOR, CHECKPOINT_DELIVERED_BEFORE_ACK, "lost-ack", "lost-ack", 1),
+    ):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_ATTEMPT,
+                checkpoint=checkpoint,
+                fault=fault,
+                lane=LANE_PORTABLE,
+                profiles=("fast", "full"),
+                arms={role: (f"{OPERATION_ATTEMPT}@{checkpoint}:1",)},
+                messages=messages,
+                behaviours=(behaviour,),
+                release_after_barrier=True,
+                expected={
+                    "queries": (
+                        contract.INVARIANT_NO_UNOWNED_OUTBOX,
+                        contract.INVARIANT_RETRY_COUNT_DURABLE,
+                        contract.INVARIANT_SINGLE_ACKED_STATE,
+                    ),
+                    "destination": _KILL_DESTINATION,
+                    "recovery_owner": role,
+                },
+                # Q-0002 (incident collapse semantics) and Q-0003 (reconcile
+                # interval) stay open: the schema carries the parameters and S9
+                # fixes no value (design 10).
+                incident_params={"collapse": None, "reconcile_interval_ms": None},
+            )
+        )
+
+    # -- staggered kills -----------------------------------------------------
+    #
+    # Not barrier-simultaneous: A is killed at its checkpoint, B keeps operating
+    # against the survivor state, then B is killed at a later armed checkpoint.
+    # Strictly enumerated, each naming its full sequence (design 5).
+    cases.append(
+        _case(
+            targets=(ROLE_DISPATCHER, ROLE_SECRETARY),
+            operation=OPERATION_ATTEMPT,
+            checkpoint=CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD,
+            fault="staggered-sigkill",
+            variant="killorder-ds",
+            lane=LANE_LINUX,
+            profiles=("full",),
+            barrier=BARRIER_STAGGERED,
+            arms={
+                ROLE_DISPATCHER: (
+                    f"{OPERATION_ATTEMPT}@{CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD}:1",
+                ),
+                ROLE_SECRETARY: (f"{OPERATION_ACK}@{CHECKPOINT_BEFORE_DURABLE_WRITE}:1",),
+            },
+            kill_order=(ROLE_DISPATCHER, ROLE_SECRETARY),
+            restart_order=(ROLE_DISPATCHER, ROLE_SECRETARY),
+            staggered=(
+                {"wait": ROLE_DISPATCHER, "kill": ROLE_DISPATCHER},
+                {"wait": ROLE_SECRETARY, "kill": ROLE_SECRETARY},
+            ),
+            expected={
+                "queries": _KILL_QUERIES,
+                "destination": _KILL_DESTINATION,
+                "recovery_owner": ROLE_SECRETARY,
+            },
+        )
+    )
+    cases.append(
+        _case(
+            targets=(ROLE_SUPERVISOR, ROLE_DISPATCHER),
+            operation=OPERATION_LEASE_ACQUIRE,
+            checkpoint=CHECKPOINT_BEFORE_DURABLE_WRITE,
+            fault="staggered-sigkill",
+            variant="killorder-sd",
+            lane=LANE_LINUX,
+            profiles=("full",),
+            barrier=BARRIER_STAGGERED,
+            arms={
+                ROLE_SUPERVISOR: (
+                    f"{OPERATION_LEASE_ACQUIRE}@{CHECKPOINT_BEFORE_DURABLE_WRITE}:1",
+                ),
+                ROLE_DISPATCHER: (f"{OPERATION_ENQUEUE}@{CHECKPOINT_BEFORE_DURABLE_WRITE}:1",),
+            },
+            kill_order=(ROLE_SUPERVISOR, ROLE_DISPATCHER),
+            restart_order=(ROLE_SUPERVISOR, ROLE_DISPATCHER),
+            staggered=(
+                {"wait": ROLE_SUPERVISOR, "kill": ROLE_SUPERVISOR},
+                {"wait": ROLE_DISPATCHER, "kill": ROLE_DISPATCHER},
+            ),
+            expected={
+                "queries": _KILL_QUERIES,
+                "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                "recovery_owner": ROLE_DISPATCHER,
+            },
+        )
+    )
+
+    # -- aligned combinations ------------------------------------------------
+    for targets in (
+        (ROLE_SUPERVISOR, ROLE_DISPATCHER),
+        (ROLE_DISPATCHER, ROLE_SECRETARY),
+        (ROLE_SUPERVISOR, ROLE_SECRETARY),
+        (ROLE_SUPERVISOR, ROLE_DISPATCHER, ROLE_SECRETARY),
+    ):
+        for checkpoint in (
+            CHECKPOINT_BEFORE_DURABLE_WRITE,
+            CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD,
+        ):
+            cases.append(
+                _case(
+                    targets=targets,
+                    operation=OPERATION_ATTEMPT,
+                    checkpoint=checkpoint,
+                    fault="sigkill",
+                    lane=LANE_LINUX,
+                    profiles=("full",),
+                    arms={
+                        role: (f"{OPERATION_ATTEMPT}@{checkpoint}:1",) for role in targets
+                    },
+                    expected={
+                        "queries": _KILL_QUERIES,
+                        "destination": _KILL_DESTINATION,
+                        "recovery_owner": targets[-1],
+                    },
+                )
+            )
+
+    return cases
+
+
+def build_manifest() -> dict:
+    return {
+        "manifest_version": MANIFEST_VERSION,
+        "contract_version": contract.FAULT_RUNNER_CONTRACT_VERSION,
+        "clock_base_ms": CLOCK_BASE_MS,
+        "ttl_ms": TTL_MS,
+        "clock_guard_ms": contract.CLOCK_GUARD_MS,
+        "pruning_rule": PRUNING_RULE,
+        "profiles": {name: dict(values) for name, values in PROFILES.items()},
+        "cases": build_cases(),
+    }
+
+
+def load_manifest() -> dict:
+    """Read the frozen matrix. Validation runs at collection, never at run."""
+
+    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    validate_manifest(manifest)
+    return manifest
+
+
+def profile_cases(manifest: Mapping[str, Any], *, profile: str, lanes: Sequence[str]) -> list[dict]:
+    """The cases a run of ``profile`` on ``lanes`` executes."""
+
+    if profile not in manifest["profiles"]:
+        raise ContractViolation(f"{profile!r} is not a manifest profile")
+    return [
+        case
+        for case in manifest["cases"]
+        if profile in case["profiles"] and case["lane"] in lanes
+    ]
+
+
+# ---------------------------------------------------------------------------
+# validation -- refused at collection, never as a timeout in CI
+# ---------------------------------------------------------------------------
+
+def validate_case(case: Mapping[str, Any]) -> None:
+    """Every rule design section 4/5/6/7 states as manifest-enforced."""
+
+    case_id = case.get("case_id", "<unnamed>")
+
+    targets = tuple(case["targets"])
+    if not targets:
+        raise ContractViolation(f"{case_id}: a case names at least one target")
+    if any(role not in ROLES for role in targets):
+        raise ContractViolation(f"{case_id}: {targets} is not a subset of {ROLES}")
+    if list(targets) != [role for role in ROLES if role in targets]:
+        raise ContractViolation(
+            f"{case_id}: targets are written in the contract's role order so a "
+            "subset has one canonical spelling"
+        )
+
+    if case["lane"] not in contract.LANES:
+        raise ContractViolation(f"{case_id}: {case['lane']!r} is not a lane")
+    if case["fault"] not in contract.FAULT_KINDS:
+        raise ContractViolation(f"{case_id}: {case['fault']!r} is not a fault kind")
+    if case["barrier"] not in contract.BARRIER_MODES:
+        raise ContractViolation(f"{case_id}: {case['barrier']!r} is not a barrier mode")
+
+    # SIGSTOP is Linux-only, and what does not run on an OS is enumerable
+    # (design 8.1) -- so the lane is checked against the fault, not inferred.
+    if case["fault"] == "sigstop-expire" and case["lane"] != LANE_LINUX:
+        raise ContractViolation(
+            f"{case_id}: SIGSTOP cases are Linux-lane only (design 8.1)"
+        )
+    if case["fault"] == "staggered-sigkill" and case["barrier"] != BARRIER_STAGGERED:
+        raise ContractViolation(f"{case_id}: a staggered kill declares staggered mode")
+
+    for role, anchors in case["arms"].items():
+        if role not in ROLES:
+            raise ContractViolation(f"{case_id}: {role!r} is not a role")
+        if not anchors:
+            raise ContractViolation(
+                f"{case_id}: {role} is armed with nothing; every fault is "
+                "anchored (design 4.1)"
+            )
+        for wire in anchors:
+            armed = ArmedAnchor.parse(wire)
+            if armed.anchor in contract.SYNC_POINTS:
+                continue
+            operation = armed.operation
+            if operation is None:
+                raise ContractViolation(
+                    f"{case_id}: a checkpoint arming names its operation, so "
+                    "the applicability matrix can be checked"
+                )
+            applicable = contract.CHECKPOINT_APPLICABILITY[operation]
+            if armed.anchor not in applicable:
+                raise ContractViolation(
+                    f"{case_id}: {operation} has no {armed.anchor} window "
+                    f"(it has {applicable}); a barrier that cannot be reached "
+                    "is a manifest error, not a CI timeout"
+                )
+
+    if set(case["arms"]) != set(targets) and case["claimant"] is None:
+        raise ContractViolation(f"{case_id}: every target is armed and only targets are")
+    if any(role not in targets for role in case["kill_order"]):
+        raise ContractViolation(f"{case_id}: kill_order names a non-target")
+    if case["restart_order"] != "concurrent" and any(
+        role not in targets for role in case["restart_order"]
+    ):
+        raise ContractViolation(f"{case_id}: restart_order names a non-target")
+
+    expected = case["expected"]
+    for name in expected["queries"]:
+        if name not in SQL_INVARIANTS:
+            raise ContractViolation(f"{case_id}: {name!r} is not a SQL invariant")
+    for name in expected["destination"]:
+        if name not in DESTINATION_INVARIANTS:
+            raise ContractViolation(f"{case_id}: {name!r} is not a destination invariant")
+    if not expected["queries"] and not expected["destination"]:
+        raise ContractViolation(f"{case_id}: a case asserts something")
+
+    # ACCEPTANCE.md section 2: a case that asserts exactly-once for an external
+    # effect using only our own rows does not pass. So a case anchored inside or
+    # after an effect window must name a destination assertion.
+    if case["checkpoint"] in EFFECT_BEARING_CHECKPOINTS and not expected["destination"]:
+        raise ContractViolation(
+            f"{case_id}: anchored at {case['checkpoint']}, where SQLite alone "
+            "cannot tell a completed effect from one that never started -- name "
+            "a destination assertion"
+        )
+
+    if expected["recovery_owner"] is not None and expected["recovery_owner"] not in ROLES:
+        raise ContractViolation(f"{case_id}: {expected['recovery_owner']!r} is not a role")
+    if case["restart_after"] and expected["recovery_owner"] is None:
+        raise ContractViolation(
+            f"{case_id}: a case that restarts names the role whose recovery it "
+            "asserts; 'somebody recovered it' is not an assertion (design 5)"
+        )
+
+    skew = case["skew"]
+    if skew is not None and skew.get("observation") != "next-operation":
+        raise ContractViolation(
+            f"{case_id}: a same-role skew is observed by the script's next "
+            "operation; an expectation that depends on an in-flight call seeing "
+            "a mid-call skew is invalid by construction (design 7)"
+        )
+    claimant = case["claimant"]
+    if claimant is not None and claimant.get("observation") != "sibling":
+        raise ContractViolation(
+            f"{case_id}: a cross-role skew is observed by the sibling acting "
+            "under its new clock (design 7)"
+        )
+
+    if case["ttl_ms"] <= 0 or case["clock_base_ms"] <= 0:
+        raise ContractViolation(f"{case_id}: the lease geometry is positive")
+    for profile in case["profiles"]:
+        if profile not in PROFILES:
+            raise ContractViolation(f"{case_id}: {profile!r} is not a profile")
+
+
+def validate_manifest(manifest: Mapping[str, Any]) -> None:
+    """Whole-matrix rules: identity, versions and the profile budgets."""
+
+    if manifest["contract_version"] != contract.FAULT_RUNNER_CONTRACT_VERSION:
+        raise ContractViolation(
+            f"the manifest targets fault-runner contract "
+            f"{manifest['contract_version']}, this build is "
+            f"{contract.FAULT_RUNNER_CONTRACT_VERSION}"
+        )
+
+    seen: set[str] = set()
+    for case in manifest["cases"]:
+        if case["case_id"] in seen:
+            # A duplicate fails the run before any case executes, because the
+            # case id is the re-run key, the manifest key and the failure-report
+            # key all at once (design 4.1).
+            raise ContractViolation(f"duplicate case_id {case['case_id']!r}")
+        seen.add(case["case_id"])
+        validate_case(case)
+
+    # Growth in I-11's matrix forces an explicit budget diff instead of silent
+    # CI creep (design 9).
+    for name, profile in manifest["profiles"].items():
+        count = len([case for case in manifest["cases"] if name in case["profiles"]])
+        if count > profile["max_cases"]:
+            raise ContractViolation(
+                f"profile {name!r} holds {count} cases, over its "
+                f"{profile['max_cases']}-case budget: raise the budget in an "
+                "explicit diff or prune the matrix"
+            )
+
+    # The off-Linux add-on is its own budget (design 9).
+    portable = len([case for case in manifest["cases"] if case["lane"] == LANE_PORTABLE])
+    if portable > 20:
+        raise ContractViolation(
+            f"the portable lane holds {portable} cases, over its 20-case "
+            "off-Linux budget"
+        )
+
+    # Coverage the design requires S9 to seed: one case per fault kind, per
+    # checkpoint, per lane.
+    faults = {case["fault"] for case in manifest["cases"]}
+    if faults != set(contract.FAULT_KINDS):
+        raise ContractViolation(
+            f"the seed set misses fault kinds {sorted(set(contract.FAULT_KINDS) - faults)}"
+        )
+    anchors = {case["checkpoint"] for case in manifest["cases"]}
+    if not set(CHECKPOINTS) <= anchors:
+        raise ContractViolation(
+            f"the seed set misses checkpoints {sorted(set(CHECKPOINTS) - anchors)}"
+        )
+    lanes = {case["lane"] for case in manifest["cases"]}
+    if lanes != set(contract.LANES):
+        raise ContractViolation(f"the seed set misses lanes {sorted(set(contract.LANES) - lanes)}")

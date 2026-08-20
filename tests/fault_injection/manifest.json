@@ -1,0 +1,1900 @@
+{
+  "cases": [
+    {
+      "arms": {
+        "sup": [
+          "attempt@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__attempt__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "attempt@after_record_before_effect:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__attempt__after_record_before_effect__sigkill",
+      "checkpoint": "after_record_before_effect",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "attempt@after_effect_before_record:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__attempt__after_effect_before_record__sigkill",
+      "checkpoint": "after_effect_before_record",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "attempt@delivered_before_ack:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__attempt__delivered_before_ack__sigkill",
+      "checkpoint": "delivered_before_ack",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__attempt__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@after_record_before_effect:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__attempt__after_record_before_effect__sigkill",
+      "checkpoint": "after_record_before_effect",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@after_effect_before_record:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__attempt__after_effect_before_record__sigkill",
+      "checkpoint": "after_effect_before_record",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@delivered_before_ack:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__attempt__delivered_before_ack__sigkill",
+      "checkpoint": "delivered_before_ack",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "attempt@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sec__attempt__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "attempt@after_record_before_effect:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sec__attempt__after_record_before_effect__sigkill",
+      "checkpoint": "after_record_before_effect",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "attempt@after_effect_before_record:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sec__attempt__after_effect_before_record__sigkill",
+      "checkpoint": "after_effect_before_record",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "attempt@delivered_before_ack:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sec__attempt__delivered_before_ack__sigkill",
+      "checkpoint": "delivered_before_ack",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "bind@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__bind__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "bind",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "enqueue@after_record_before_effect:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sec__enqueue__after_record_before_effect__sigkill",
+      "checkpoint": "after_record_before_effect",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "enqueue",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "lease-acquire@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__lease-acquire__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "lease-acquire",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@before_durable_write:2"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__attempt__before_durable_write__sigkill__occ2",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 2,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": "occ2"
+    },
+    {
+      "arms": {
+        "sup": [
+          "lease-acquire@lease-acquired:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__lease-acquire__lease-acquired__clock-back",
+      "checkpoint": "lease-acquired",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "lease-single-holder",
+          "linear-writer-history"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "clock-back",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "lease-acquire",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": {
+        "direction": "backward",
+        "observation": "next-operation",
+        "role": "sup"
+      },
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "lease-acquire@lease-acquired:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__lease-acquire__lease-acquired__clock-fwd",
+      "checkpoint": "lease-acquired",
+      "claimant": {
+        "clock": "forward",
+        "holder_suffix": "b",
+        "observation": "sibling",
+        "role": "disp"
+      },
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "linear-writer-history",
+          "recorded-refusals",
+          "lease-single-holder"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "clock-fwd",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "lease-acquire",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": false,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "lease-acquire@lease-acquired:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sec__lease-acquire__lease-acquired__clock-back",
+      "checkpoint": "lease-acquired",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "lease-single-holder",
+          "linear-writer-history"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "clock-back",
+      "incident_params": null,
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "lease-acquire",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": false,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": {
+        "direction": "backward",
+        "observation": "next-operation",
+        "role": "sec"
+      },
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "lease-acquire@lease-acquired:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__lease-acquire__lease-acquired__clock-fwd",
+      "checkpoint": "lease-acquired",
+      "claimant": {
+        "clock": "forward",
+        "holder_suffix": "b",
+        "observation": "sibling",
+        "role": "sup"
+      },
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "linear-writer-history",
+          "recorded-refusals",
+          "lease-single-holder"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "clock-fwd",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "lease-acquire",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "lease-acquire@lease-acquired:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp__lease-acquire__lease-acquired__sigstop-expire",
+      "checkpoint": "lease-acquired",
+      "claimant": {
+        "clock": "forward",
+        "holder_suffix": "b",
+        "observation": "sibling",
+        "role": "disp"
+      },
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "linear-writer-history",
+          "recorded-refusals",
+          "lease-single-holder"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "sigstop-expire",
+      "incident_params": null,
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "lease-acquire",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": false,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "lease-acquire@lease-acquired:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__lease-acquire__lease-acquired__sigstop-expire",
+      "checkpoint": "lease-acquired",
+      "claimant": {
+        "clock": "forward",
+        "holder_suffix": "b",
+        "observation": "sibling",
+        "role": "sup"
+      },
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "linear-writer-history",
+          "recorded-refusals",
+          "lease-single-holder"
+        ],
+        "recovery_owner": null
+      },
+      "fault": "sigstop-expire",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "lease-acquire",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": false,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "drop-delivery"
+      ],
+      "case_id": "disp__attempt__before_durable_write__drop-delivery",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "single-acked-state"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "drop-delivery",
+      "incident_params": {
+        "collapse": null,
+        "reconcile_interval_ms": null
+      },
+      "kill_order": [
+        "disp"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": true,
+      "restart_order": [
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "attempt@after_record_before_effect:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "dup-delivery"
+      ],
+      "case_id": "sec__attempt__after_record_before_effect__dup-delivery",
+      "checkpoint": "after_record_before_effect",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "single-acked-state"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "dup-delivery",
+      "incident_params": {
+        "collapse": null,
+        "reconcile_interval_ms": null
+      },
+      "kill_order": [
+        "sec"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 2,
+      "operation": "attempt",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": true,
+      "restart_order": [
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sup": [
+          "attempt@delivered_before_ack:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [
+        "lost-ack"
+      ],
+      "case_id": "sup__attempt__delivered_before_ack__lost-ack",
+      "checkpoint": "delivered_before_ack",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "single-acked-state"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "lost-ack",
+      "incident_params": {
+        "collapse": null,
+        "reconcile_interval_ms": null
+      },
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "portable",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "fast",
+        "full"
+      ],
+      "release_after_barrier": true,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@after_effect_before_record:1"
+        ],
+        "sec": [
+          "ack@before_durable_write:1"
+        ]
+      },
+      "barrier": "staggered",
+      "behaviours": [],
+      "case_id": "disp+sec__attempt__after_effect_before_record__staggered-sigkill__killorder-ds",
+      "checkpoint": "after_effect_before_record",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "staggered-sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "disp",
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp",
+        "sec"
+      ],
+      "skew": null,
+      "staggered": [
+        {
+          "kill": "disp",
+          "wait": "disp"
+        },
+        {
+          "kill": "sec",
+          "wait": "sec"
+        }
+      ],
+      "targets": [
+        "disp",
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": "killorder-ds"
+    },
+    {
+      "arms": {
+        "disp": [
+          "enqueue@before_durable_write:1"
+        ],
+        "sup": [
+          "lease-acquire@before_durable_write:1"
+        ]
+      },
+      "barrier": "staggered",
+      "behaviours": [],
+      "case_id": "sup+disp__lease-acquire__before_durable_write__staggered-sigkill__killorder-sd",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "staggered-sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup",
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "lease-acquire",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup",
+        "disp"
+      ],
+      "skew": null,
+      "staggered": [
+        {
+          "kill": "sup",
+          "wait": "sup"
+        },
+        {
+          "kill": "disp",
+          "wait": "disp"
+        }
+      ],
+      "targets": [
+        "sup",
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": "killorder-sd"
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@before_durable_write:1"
+        ],
+        "sup": [
+          "attempt@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup+disp__attempt__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup",
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup",
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup",
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@after_effect_before_record:1"
+        ],
+        "sup": [
+          "attempt@after_effect_before_record:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup+disp__attempt__after_effect_before_record__sigkill",
+      "checkpoint": "after_effect_before_record",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "disp"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup",
+        "disp"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup",
+        "disp"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup",
+        "disp"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@before_durable_write:1"
+        ],
+        "sec": [
+          "attempt@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp+sec__attempt__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "disp",
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp",
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp",
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@after_effect_before_record:1"
+        ],
+        "sec": [
+          "attempt@after_effect_before_record:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "disp+sec__attempt__after_effect_before_record__sigkill",
+      "checkpoint": "after_effect_before_record",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "disp",
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "disp",
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "disp",
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "attempt@before_durable_write:1"
+        ],
+        "sup": [
+          "attempt@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup+sec__attempt__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup",
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup",
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup",
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "sec": [
+          "attempt@after_effect_before_record:1"
+        ],
+        "sup": [
+          "attempt@after_effect_before_record:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup+sec__attempt__after_effect_before_record__sigkill",
+      "checkpoint": "after_effect_before_record",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup",
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup",
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup",
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@before_durable_write:1"
+        ],
+        "sec": [
+          "attempt@before_durable_write:1"
+        ],
+        "sup": [
+          "attempt@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup+disp+sec__attempt__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup",
+        "disp",
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup",
+        "disp",
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup",
+        "disp",
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    },
+    {
+      "arms": {
+        "disp": [
+          "attempt@after_effect_before_record:1"
+        ],
+        "sec": [
+          "attempt@after_effect_before_record:1"
+        ],
+        "sup": [
+          "attempt@after_effect_before_record:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup+disp+sec__attempt__after_effect_before_record__sigkill",
+      "checkpoint": "after_effect_before_record",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "one-effect-per-key",
+          "delivered-implies-effect"
+        ],
+        "queries": [
+          "no-unowned-outbox",
+          "retry-count-durable",
+          "linear-writer-history",
+          "no-pending-action"
+        ],
+        "recovery_owner": "sec"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup",
+        "disp",
+        "sec"
+      ],
+      "lane": "linux",
+      "manifest_version": 1,
+      "messages": 1,
+      "operation": "attempt",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup",
+        "disp",
+        "sec"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup",
+        "disp",
+        "sec"
+      ],
+      "ttl_ms": 30000,
+      "variant": null
+    }
+  ],
+  "clock_base_ms": 1700000000000,
+  "clock_guard_ms": 1000,
+  "contract_version": 1,
+  "manifest_version": 1,
+  "profiles": {
+    "fast": {
+      "barrier_timeout_s": 10,
+      "combination_case_timeout_s": 15,
+      "max_cases": 25,
+      "per_case_timeout_s": 15,
+      "runs_on": "every PR push, Linux job only (plus the portable lane everywhere)",
+      "suite_timeout_s": 240
+    },
+    "full": {
+      "barrier_timeout_s": 20,
+      "combination_case_timeout_s": 60,
+      "max_cases": 200,
+      "per_case_timeout_s": 30,
+      "runs_on": "nightly and gate runs (I-11/I-13/I-15), Linux conformance lane",
+      "suite_timeout_s": 1500
+    }
+  },
+  "pruning_rule": "Aligned combination cases cover the multi-role subsets against a curated set of (operation, checkpoint) pairs -- the delivery loop's windows where roles genuinely interact -- and not the full cross-product. Pruned deliberately: (a) the 7-subset x 4-checkpoint x 7-operation product, of which only the pairs listed here are kept; (b) single-role sigkill cases on operations other than the three named non-attempt seeds; (c) staggered sequences beyond the two the acceptance surface cares most about. I-11 extends this set deliberately, never by product.",
+  "ttl_ms": 30000
+}

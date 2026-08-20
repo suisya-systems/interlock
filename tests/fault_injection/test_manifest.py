@@ -1,0 +1,297 @@
+"""The matrix is an enumeration, and the enumeration is checked.
+
+Design section 4. Issue ``#15``'s wording ("the same seed hits the same point")
+reads as if the seed selected injection points; it does not, and these tests are
+where that is nailed down. The seed's authority is payload and schedule only.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+from typing import Any, Mapping
+
+import pytest
+
+from tests.fault_injection import contract, manifest as manifest_module
+from tests.fault_injection.contract import ContractViolation
+from tests.fault_injection.controller import repro_line
+
+
+def test_the_generator_reproduces_the_frozen_matrix_exactly() -> None:
+    """No generation at collection time (design 4.2).
+
+    A helper may *produce* candidate products, but the manifest is the frozen
+    literal. Adding or pruning a case is therefore always an explicit, reviewable
+    diff and never a side effect of an enumeration change -- which is what stops
+    a reordering from silently changing what every seed means.
+
+    Regenerate after an intentional change with::
+
+        python -c "import json,sys; sys.path[:0]=['.','src']; \\
+          from tests.fault_injection import manifest as m; \\
+          m.MANIFEST_PATH.write_text(json.dumps(m.build_manifest(), indent=2, \\
+          sort_keys=True) + chr(10), encoding='utf-8')"
+    """
+
+    frozen = json.loads(manifest_module.MANIFEST_PATH.read_text(encoding="utf-8"))
+    assert frozen == manifest_module.build_manifest()
+
+
+def test_the_frozen_matrix_validates() -> None:
+    manifest_module.validate_manifest(manifest_module.load_manifest())
+
+
+def test_every_case_id_is_unique_and_parses_back_to_its_classification() -> None:
+    """``case_id`` is the re-run key, the manifest key and the report key."""
+
+    manifest = manifest_module.load_manifest()
+    ids = [case["case_id"] for case in manifest["cases"]]
+    assert len(ids) == len(set(ids))
+    for case in manifest["cases"]:
+        segments = case["case_id"].split("__")
+        assert segments[0] == "+".join(case["targets"])
+        assert segments[1] == case["operation"]
+        assert segments[2] == case["checkpoint"]
+        assert segments[3] == case["fault"]
+        assert (segments[4] if len(segments) > 4 else None) == case["variant"]
+        # The seed is never part of the identity (design 4.1).
+        assert "seed" not in case["case_id"]
+
+
+def test_the_seed_set_covers_every_fault_kind_checkpoint_and_lane() -> None:
+    """What S9 ships: at least one case per fault kind, per checkpoint, per lane.
+
+    Populating the full ``ACCEPTANCE.md`` section 2 matrix is I-11's deliverable,
+    on this schema -- so this asserts the seed set, not the matrix.
+    """
+
+    manifest = manifest_module.load_manifest()
+    assert {case["fault"] for case in manifest["cases"]} == set(contract.FAULT_KINDS)
+    assert set(contract.CHECKPOINTS) <= {case["checkpoint"] for case in manifest["cases"]}
+    assert {case["lane"] for case in manifest["cases"]} == set(contract.LANES)
+
+
+def test_every_role_is_killed_at_every_mandated_window() -> None:
+    """Gate item 4: each of the three components, separately, at each window."""
+
+    manifest = manifest_module.load_manifest()
+    singles = {
+        (case["targets"][0], case["checkpoint"])
+        for case in manifest["cases"]
+        if len(case["targets"]) == 1 and case["fault"] == "sigkill"
+    }
+    for role in contract.ROLES:
+        for checkpoint in contract.CHECKPOINTS:
+            assert (role, checkpoint) in singles, (role, checkpoint)
+
+
+def test_the_combination_subsets_are_covered() -> None:
+    """"In combination" is enumerated, not implied (design 5)."""
+
+    manifest = manifest_module.load_manifest()
+    combinations = {
+        tuple(case["targets"])
+        for case in manifest["cases"]
+        if len(case["targets"]) > 1
+    }
+    assert ("sup", "disp") in combinations
+    assert ("disp", "sec") in combinations
+    assert ("sup", "sec") in combinations
+    assert ("sup", "disp", "sec") in combinations
+
+
+def test_the_pruning_rule_is_recorded_in_the_header() -> None:
+    """Scale is controlled by policy, not by product; what is pruned is listed."""
+
+    manifest = manifest_module.load_manifest()
+    assert manifest["pruning_rule"].strip()
+    assert "cross-product" in manifest["pruning_rule"]
+
+
+# ---------------------------------------------------------------------------
+# the seed -- design 4.3
+# ---------------------------------------------------------------------------
+
+def test_the_per_case_seed_is_order_and_platform_independent() -> None:
+    """Adding a case does not shift any other case's stream.
+
+    Derived by sha256 over ``manifest_version || case_id || suite_seed``, so
+    Python's hash randomisation and OS differences are irrelevant by
+    construction -- there is no ``hash()`` anywhere in the derivation.
+    """
+
+    first = contract.case_seed(manifest_version=1, case_id="a__b__c__d", suite_seed=7)
+    again = contract.case_seed(manifest_version=1, case_id="a__b__c__d", suite_seed=7)
+    assert first == again
+    # Pinned: the derivation is part of the contract, so a change to it is a
+    # contract-version bump and not a quiet re-shuffle of every case's stream.
+    assert first == 0x574FF7BDD408EA49
+
+    # A different case, a different manifest version and a different suite seed
+    # each give a different stream, and none of them disturbs the others.
+    assert first != contract.case_seed(
+        manifest_version=1, case_id="a__b__c__e", suite_seed=7
+    )
+    assert first != contract.case_seed(
+        manifest_version=2, case_id="a__b__c__d", suite_seed=7
+    )
+    assert first != contract.case_seed(
+        manifest_version=1, case_id="a__b__c__d", suite_seed=8
+    )
+
+
+def test_the_seed_never_appears_in_a_cases_identity() -> None:
+    """The seed selects payload and schedule; the manifest selects everything else."""
+
+    manifest = manifest_module.load_manifest()
+    for case in manifest["cases"]:
+        assert "suite_seed" not in case
+        assert "seed" not in case
+
+
+def test_the_reproduction_line_carries_everything_a_re_run_needs() -> None:
+    line = repro_line(
+        case_id="disp__attempt__before_durable_write__sigkill",
+        suite_seed=99,
+        manifest_version=manifest_module.MANIFEST_VERSION,
+        resolved_skew_ms=31_000,
+    )
+    assert line.startswith("S9-REPRO ")
+    for field in ("case_id=", "suite_seed=", "manifest_version=", "contract_version=", "resolved_skew_ms="):
+        assert field in line
+
+
+# ---------------------------------------------------------------------------
+# validation refuses what the design says it must refuse
+# ---------------------------------------------------------------------------
+
+def _a_case() -> dict:
+    return copy.deepcopy(manifest_module.load_manifest()["cases"][0])
+
+
+def test_a_barrier_that_cannot_be_reached_is_refused_at_collection() -> None:
+    """Never a timeout in CI (design 3.1).
+
+    ``enqueue`` has no after-effect window -- it has no effect -- so arming one
+    is a manifest error, and it is caught before any process is spawned.
+    """
+
+    case = _a_case()
+    case["arms"] = {case["targets"][0]: ["enqueue@after_effect_before_record:1"]}
+    with pytest.raises(ContractViolation, match="has no after_effect_before_record window"):
+        manifest_module.validate_case(case)
+
+
+def test_an_effect_window_case_must_name_a_destination_assertion() -> None:
+    """``ACCEPTANCE.md`` section 2: our own rows are not enough there."""
+
+    case = _a_case()
+    case["checkpoint"] = contract.CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD
+    case["expected"]["destination"] = []
+    with pytest.raises(ContractViolation, match="name a destination assertion"):
+        manifest_module.validate_case(case)
+
+
+def test_a_restarting_case_must_name_its_recovery_owner() -> None:
+    """"Somebody recovered it" is not an assertion (design 5)."""
+
+    case = _a_case()
+    case["restart_after"] = True
+    case["expected"]["recovery_owner"] = None
+    with pytest.raises(ContractViolation, match="names the role whose recovery"):
+        manifest_module.validate_case(case)
+
+
+def test_a_same_role_skew_observed_in_flight_is_invalid_by_construction() -> None:
+    """An in-flight call captured its ``now_ms`` at the call boundary (design 7)."""
+
+    case = _a_case()
+    case["skew"] = {"role": case["targets"][0], "direction": "backward", "observation": "in-flight"}
+    with pytest.raises(ContractViolation, match="next operation"):
+        manifest_module.validate_case(case)
+
+
+def test_a_sigstop_case_off_the_linux_lane_is_refused() -> None:
+    case = _a_case()
+    case["fault"] = "sigstop-expire"
+    case["lane"] = contract.LANE_PORTABLE
+    with pytest.raises(ContractViolation, match="Linux-lane only"):
+        manifest_module.validate_case(case)
+
+
+def test_a_duplicate_case_id_fails_the_run_before_any_case_executes() -> None:
+    manifest = manifest_module.load_manifest()
+    manifest["cases"] = list(manifest["cases"]) + [copy.deepcopy(manifest["cases"][0])]
+    with pytest.raises(ContractViolation, match="duplicate case_id"):
+        manifest_module.validate_manifest(manifest)
+
+
+def test_growth_past_a_profile_budget_fails_collection() -> None:
+    """CI creep has to become an explicit budget diff (design 9)."""
+
+    manifest = manifest_module.load_manifest()
+    manifest["profiles"]["full"] = dict(manifest["profiles"]["full"], max_cases=1)
+    with pytest.raises(ContractViolation, match="over its 1-case budget"):
+        manifest_module.validate_manifest(manifest)
+
+
+def test_a_manifest_targeting_another_contract_version_is_refused() -> None:
+    manifest = manifest_module.load_manifest()
+    manifest["contract_version"] = contract.FAULT_RUNNER_CONTRACT_VERSION + 1
+    with pytest.raises(ContractViolation, match="fault-runner contract"):
+        manifest_module.validate_manifest(manifest)
+
+
+# ---------------------------------------------------------------------------
+# the budgets, as numbers (design 9)
+# ---------------------------------------------------------------------------
+
+def test_the_profiles_carry_the_budgets_the_watchdogs_enforce() -> None:
+    """These are harness engineering parameters, not acceptance thresholds.
+
+    They are revisable by an ordinary reviewed diff and require no ``D-`` entry.
+    Reading one *as* gate evidence would be a ruling, and goes to the secretary.
+    """
+
+    manifest = manifest_module.load_manifest()
+    fast = manifest["profiles"]["fast"]
+    full = manifest["profiles"]["full"]
+    assert fast["max_cases"] == 25 and fast["per_case_timeout_s"] == 15
+    assert fast["suite_timeout_s"] == 240
+    assert full["max_cases"] == 200 and full["per_case_timeout_s"] == 30
+    assert full["combination_case_timeout_s"] == 60
+    assert full["suite_timeout_s"] == 1500
+
+    fast_cases = [case for case in manifest["cases"] if "fast" in case["profiles"]]
+    assert fast_cases, "the fast profile is the smoke subset, not an empty set"
+    assert len(fast_cases) <= fast["max_cases"]
+    # The fast profile is singles only and carries no staggered case: the 9-job
+    # PR matrix never pays for the full matrix.
+    assert all(len(case["targets"]) == 1 for case in fast_cases)
+    assert all(case["fault"] != "staggered-sigkill" for case in fast_cases)
+
+
+def test_the_off_linux_add_on_stays_inside_its_own_budget() -> None:
+    manifest = manifest_module.load_manifest()
+    portable = [case for case in manifest["cases"] if case["lane"] == contract.LANE_PORTABLE]
+    assert len(portable) <= 20
+    # Nothing signal-shaped runs on the portable lane (design 8.1).
+    assert all(case["fault"] != "sigstop-expire" for case in portable)
+
+
+def test_the_clock_programme_is_symbolic_and_resolves_against_the_lease_geometry() -> None:
+    """Skew magnitudes are boundary-relative, not raw numbers (design 7)."""
+
+    manifest = manifest_module.load_manifest()
+    ttl = manifest["ttl_ms"]
+    guard = manifest["clock_guard_ms"]
+    assert contract.resolve_skew_ms("forward", ttl_ms=ttl, elapsed_ms=0) == ttl + guard
+    assert contract.resolve_skew_ms("backward", ttl_ms=ttl, elapsed_ms=ttl) == -(ttl + guard)
+    with pytest.raises(ContractViolation, match="never a raw millisecond count"):
+        contract.resolve_skew_ms("42ms", ttl_ms=ttl, elapsed_ms=0)
+
+    for case in manifest["cases"]:
+        for programme in (case["skew"], case["claimant"]):
+            if programme and "direction" in programme:
+                assert programme["direction"] in ("forward", "backward")
