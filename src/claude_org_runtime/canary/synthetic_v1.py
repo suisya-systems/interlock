@@ -21,6 +21,13 @@ finishing a run appends a ``run_finished`` record rather than editing the
 Every write path of the synthetic system lands in this file. That closure is
 what makes the writer audit's enumeration of the store a capture of *all*
 synthetic-side writes rather than a sample (see :mod:`.audit`).
+
+The store is **single-writer**, like the rehearsal that drives it: the
+start-once check is a read followed by an append, which two concurrent
+writers could interleave. The stand-in does not pretend to solve v1's
+concurrency -- a stand-in that quietly did would be one more thing the
+rehearsal appeared to prove and had not -- and the real counterparty's own
+store discipline is among the things only the canary exercises.
 """
 
 from __future__ import annotations

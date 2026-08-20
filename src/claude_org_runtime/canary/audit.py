@@ -29,6 +29,15 @@ present in a store whose ledger row names the *other* system is misrouted
 evidence, and a run present in a store with no ledger row at all is a write
 that bypassed the routing point.
 
+**The audit is defined over quiescent stores.** Its three enumerations are
+sequential reads, so a write landing between them could hide from one read
+what another already missed; the caller provides the quiet window (the
+rehearsal audits stores nothing else is writing). How an audit window is
+carved out of a *live* canary -- quiesce, snapshot, or an explicit
+boundary -- is part of the canary's own design and is deliberately not
+pre-empted by a synthetic rehearsal, exactly as Q-0005's numeric criteria
+are not.
+
 **The rollback comparison.** "Rollback is a routing change, not a data
 migration" is asserted as: across the rollback, both run stores are
 **byte-identical** and so is the run ledger; only ``routing_decision`` rows
@@ -72,16 +81,36 @@ __all__ = [
 
 
 def canonical_sqlite_bytes(connection: sqlite3.Connection, *, exclude_tables: tuple[str, ...] = ()) -> bytes:
-    """A canonical byte stream of every user table's rows.
+    """A canonical byte stream of the database's schema objects and rows.
 
-    Tables in name order, rows in the order of their own canonical encoding,
-    values as sorted-keys JSON: two databases holding the same facts
-    serialise to the same bytes regardless of insertion order, page layout or
-    vacuum history. *exclude_tables* is how the rollback comparison excludes
-    exactly the routing relation and nothing else.
+    Schema objects first (a rollback that only created, dropped or altered
+    an object must move the digest even when no row does), then tables in
+    name order, rows in the order of their own canonical encoding, values as
+    sorted-keys JSON: two databases holding the same facts serialise to the
+    same bytes regardless of insertion order, page layout or vacuum history.
+    *exclude_tables* is how the rollback comparison excludes exactly the
+    routing relation -- rows and schema objects alike -- and nothing else.
     """
 
-    lines = []
+    # The schema objects come first: a stream of rows alone cannot see a
+    # rollback that created or dropped an EMPTY table, or touched only an
+    # index or a trigger -- a mutation with no rows is still a mutation.
+    # Objects belonging to an excluded table are excluded with it.
+    schema_sql = (
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE name NOT LIKE 'sqlite_%' "
+        + (f"AND tbl_name NOT IN ({','.join('?' * len(exclude_tables))}) " if exclude_tables else "")
+        + "ORDER BY type, name"
+    )
+    lines = [
+        json.dumps(
+            {"schema": {"type": kind, "name": name, "sql": sql or ""}},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        for kind, name, sql in connection.execute(schema_sql, exclude_tables)
+    ]
     for table in _user_tables(connection):
         if table in exclude_tables:
             continue

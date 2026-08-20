@@ -176,6 +176,21 @@ def test_exclusion_excludes_exactly_the_named_table(ledger, routing):
     assert canonical_sqlite_bytes(ledger, exclude_tables=("routing_decision",)) == without
 
 
+def test_a_schema_only_mutation_moves_the_canonical_bytes(ledger, routing, interlock, synthetic):
+    # A rollback that created or dropped an EMPTY table -- or touched only
+    # an index or trigger -- writes no row; the canonical stream must see
+    # it anyway, or "byte-identical" would be blind to exactly the class of
+    # store surgery a migration starts with.
+    routing.route_new_runs_to(INTERLOCK, now_ms=T0, reason="canary")
+    before = snapshot_stores(ledger, interlock, synthetic)
+    with interlock:
+        interlock.execute("CREATE TABLE migration_scaffold (x TEXT)")  # empty, rowless
+    after = snapshot_stores(ledger, interlock, synthetic)
+    comparison = compare_across_rollback(before, after)
+    assert not comparison.interlock_identical
+    assert not comparison.only_the_routing_decision_changed
+
+
 def test_a_blob_value_is_canonicalised_not_crashed_on(interlock):
     # S5's outbox payload carries no typeof CHECK, so a store can legally
     # hold bytes -- and the store the canonicaliser most needs to see, one

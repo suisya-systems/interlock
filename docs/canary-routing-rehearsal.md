@@ -94,6 +94,12 @@ to account against what it found: a run in a store whose ledger row names the ot
 **misrouted**; a run in a store with no ledger row at all is a write that **bypassed the routing
 point**. Reports carry the runs found, not a bare verdict.
 
+The audit is defined over **quiescent stores** — its enumerations are sequential reads, and the
+caller provides the quiet window (the rehearsal audits stores nothing else is writing). How an
+audit window is carved out of a *live* canary — quiesce, snapshot, or an explicit boundary — is
+part of the canary's own design, deliberately not pre-empted here, exactly as Q-0005's numeric
+criteria are not.
+
 ## The rollback comparison
 
 "Changes only the routing decision" is asserted as: across the rollback, both run stores are

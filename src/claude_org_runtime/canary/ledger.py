@@ -22,7 +22,7 @@ control-plane database. Three reasons, each load-bearing:
 
 The discipline is S5's, inherited deliberately: corrupt state is refused,
 never recovered as empty (R3); creation is explicit and separate from
-opening; verification runs read-only so a refused file is left exactly as it
+opening; verification only reads, so a refused file is left exactly as it
 was found; and a database at another revision is refused, never migrated.
 """
 
@@ -151,6 +151,13 @@ def create_routing_ledger(path: str | Path) -> sqlite3.Connection:
 def open_routing_ledger(path: str | Path) -> sqlite3.Connection:
     """Open an existing ledger, or refuse. Never creates, migrates or repairs.
 
+    Verification runs on the **same connection that is returned**, opened in
+    a mode that cannot create the file: verifying one connection and then
+    opening a second would leave a window in which the verified file is
+    replaced -- or deleted, in which case a plain ``connect`` would create
+    the empty database this function promises never to make. Verification
+    only reads, so a refused file is left exactly as it was found.
+
     :raises MissingLedgerRefused: if there is no file at *path*.
     :raises CorruptLedgerRefused: if the file is not a ledger this revision
         wrote and can verify.
@@ -165,26 +172,23 @@ def open_routing_ledger(path: str | Path) -> sqlite3.Connection:
     if not target.is_file():
         raise CorruptLedgerRefused(f"{target} is not a regular file")
 
-    _verify_readonly(target)
-
-    connection = sqlite3.connect(target)
-    _configure(connection)
-    return connection
-
-
-def _verify_readonly(target: Path) -> None:
-    uri = target.resolve().as_uri() + "?mode=ro"
+    uri = target.resolve().as_uri() + "?mode=rw"
     try:
         connection = sqlite3.connect(uri, uri=True)
-    except sqlite3.Error as error:  # pragma: no cover - platform dependent
+    except sqlite3.Error as error:
         raise CorruptLedgerRefused(f"{target} could not be opened: {error}") from error
 
     try:
         _verify(target, connection)
     except sqlite3.DatabaseError as error:
-        raise CorruptLedgerRefused(f"{target} is not a readable database: {error}") from error
-    finally:
         connection.close()
+        raise CorruptLedgerRefused(f"{target} is not a readable database: {error}") from error
+    except BaseException:
+        connection.close()
+        raise
+
+    _configure(connection)
+    return connection
 
 
 def _verify(target: Path, connection: sqlite3.Connection) -> None:
