@@ -479,6 +479,77 @@ def test_no_sql_text_crosses_the_builder_boundary(cp):
         )
     with pytest.raises(UnfencedStatement):  # a raw VALUES clause on an insert
         fenced_insert("action", values="(:a, :fence_epoch)")
+    with pytest.raises(UnfencedStatement):  # a raw value inside an insert mapping
+        fenced_insert(
+            "action",
+            values={"action_id": "'x' WHERE 1 --", "writer_epoch": fence_epoch},
+        )
+
+
+def test_a_subclass_is_not_a_str_however_equal_it_compares(cp):
+    """Escaping and formatting dispatch through the object's own methods.
+
+    A str subclass passes every text check while its ``replace`` or
+    ``__format__`` stays its author's code -- the one way left to hand the
+    builder text it did not render itself. So an exact built-in str is required
+    everywhere a string is rendered: constants, identifiers, and the table
+    name, which is canonicalised to the closed set's own string rather than
+    formatted from the caller's object.
+    """
+
+    class Sneaky(str):
+        def replace(self, *args, **kwargs):  # pragma: no cover - never called
+            return "'x' WHERE 1 --"
+
+        def __format__(self, spec):  # pragma: no cover - never called
+            return "action (x) SELECT 1 WHERE 1 --"
+
+    with pytest.raises(LeaseUsageError):
+        value(Sneaky("harmless"))
+    with pytest.raises(LeaseUsageError):
+        param(Sneaky("p"))
+    with pytest.raises(LeaseUsageError):
+        eq(Sneaky("c"), value(1))
+    with pytest.raises(LeaseUsageError):
+        fenced_update(
+            "run",
+            set={Sneaky("status"): value("done")},
+            where=eq("run_id", param("r")),
+            stamps_writer_epoch=False,
+        )
+    # The table name is the one caller string that survives: it comes back out
+    # of PROTECTED_TABLES, so the statement carries our constant, not the
+    # caller's object.
+    statement = fenced_update(
+        "run",
+        set={"status": value("done")},
+        where=eq("run_id", param("r")),
+        stamps_writer_epoch=False,
+    )
+    assert statement.startswith("UPDATE run\n")
+    sneaky_table = fenced_update(
+        Sneaky("run"),
+        set={"status": value("done")},
+        where=eq("run_id", param("r")),
+        stamps_writer_epoch=False,
+    )
+    assert sneaky_table == statement
+
+
+def test_a_null_comparison_is_refused_in_favour_of_is_null():
+    """``= NULL`` matches no row in SQL; the write would be a silent no-op."""
+
+    for compose in (eq, ne):
+        with pytest.raises(LeaseUsageError):
+            compose("resolved_at_ms", value(None))
+    # ...while assigning NULL is meaningful and stays allowed.
+    statement = fenced_update(
+        "run",
+        set={"status": value(None)},
+        where=eq("run_id", param("r")),
+        stamps_writer_epoch=False,
+    )
+    assert "SET status = NULL" in statement
 
 
 def test_a_hostile_constant_is_rendered_as_an_inert_literal(cp):

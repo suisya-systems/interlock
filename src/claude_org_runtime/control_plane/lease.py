@@ -642,11 +642,14 @@ _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _require_column(field: str, name: object) -> str:
-    if not isinstance(name, str) or not _IDENTIFIER.match(name):
+    # type() and not isinstance(): a str *subclass* passes every text check and
+    # then renders through its own __format__, which is its author's code, not
+    # this builder's. A name is an exact built-in str or it is not a name.
+    if type(name) is not str or not _IDENTIFIER.match(name):
         raise LeaseUsageError(
-            f"{field} must be a bare column name (an identifier), got {name!r}; "
-            "the builder renders every character of SQL itself, so a name is a "
-            "name and never a fragment"
+            f"{field} must be a bare column name (a built-in str identifier), "
+            f"got {name!r}; the builder renders every character of SQL itself, "
+            "so a name is a name and never a fragment"
         )
     return name
 
@@ -704,13 +707,27 @@ class Value:
                 f"{self.constant!r}; anything richer is bound as a param() at "
                 "execution time instead of rendered into the statement"
             )
-        if isinstance(self.constant, str) and "\x00" in self.constant:
-            raise LeaseUsageError(
-                "a value() constant may not contain a NUL character: the SQL "
-                "text is NUL-terminated on its way into SQLite, so the refusal "
-                "belongs here, where it names the constant, rather than at "
-                "execution time where it names the whole statement"
-            )
+        if isinstance(self.constant, int):
+            # Canonicalised through int(), which reads the integer value an int
+            # subclass carries -- an IntEnum member is the live case, whose
+            # str() may spell its *name* (Python 3.10), and a name is not a
+            # number the statement can carry.
+            object.__setattr__(self, "constant", int(self.constant))
+        elif isinstance(self.constant, str):
+            if type(self.constant) is not str:
+                raise LeaseUsageError(
+                    f"a value() constant must be a built-in str, got the "
+                    f"subclass {type(self.constant).__name__}; escaping "
+                    "dispatches through the object's own methods, which are "
+                    "its author's code rather than this builder's"
+                )
+            if "\x00" in self.constant:
+                raise LeaseUsageError(
+                    "a value() constant may not contain a NUL character: the "
+                    "SQL text is NUL-terminated on its way into SQLite, so the "
+                    "refusal belongs here, where it names the constant, rather "
+                    "than at execution time where it names the whole statement"
+                )
 
 
 @dataclass(frozen=True)
@@ -763,6 +780,14 @@ class Comparison:
                 f"the operand for {self.column!r} must be param(...), value(...) "
                 f"or fence_epoch, got {self.operand!r}; a predicate is composed "
                 "from typed objects, never from SQL text"
+            )
+        if isinstance(self.operand, Value) and self.operand.constant is None:
+            # "= NULL" and "<> NULL" are UNKNOWN for every row in SQL: the
+            # predicate would match nothing, and the protected write would
+            # silently become a no-op rather than the null test it looks like.
+            raise LeaseUsageError(
+                f"comparing {self.column!r} against value(None) never matches "
+                "any row in SQL; use is_null() for the null test"
             )
 
 
@@ -829,7 +854,16 @@ def _require_predicate(field: str, predicate: object) -> None:
         )
 
 
-def _render_operand(expression: "Param | Value | _FenceEpoch") -> str:
+def _render_operand(expression: object) -> str:
+    # The gate every rendering path shares, so no shape -- the insert values in
+    # particular -- can reach the f-strings below with an object whose own
+    # methods would decide what the statement says.
+    if not isinstance(expression, (Param, Value, _FenceEpoch)):
+        raise UnfencedStatement(
+            f"a rendered value must be param(...), value(...) or fence_epoch, "
+            f"got {expression!r}. The builders take no SQL text from a caller: "
+            "a raw fragment is exactly the surface #42 retired"
+        )
     if isinstance(expression, _FenceEpoch):
         return ":fence_epoch"
     if isinstance(expression, Param):
@@ -838,10 +872,7 @@ def _render_operand(expression: "Param | Value | _FenceEpoch") -> str:
     if constant is None:
         return "NULL"
     if isinstance(constant, int):
-        # Through int(), not str(): an int *subclass* -- an IntEnum member is
-        # the live case -- may render its name rather than its value, and a
-        # name is not a number the statement can carry.
-        return str(int(constant))
+        return str(constant)  # canonicalised to a built-in int at construction
     # SQLite's own escape: the quote is doubled, and nothing else in a string
     # literal is structural. Rendered here, by the builder, so the constant is
     # data however it is spelled.
@@ -905,7 +936,7 @@ def fenced_update(
     single-writer property becomes unprovable after the fact rather than false.
     """
 
-    _require_table(table)
+    table = _require_table(table)
     _require_predicate("where", where)
     assignments = _require_assignments(table, set, stamps_writer_epoch)
     forbidden = sorted(column for column in assignments if column in _EVIDENCE_COLUMNS)
@@ -953,7 +984,7 @@ def fenced_insert(
     :func:`fenced_update`.
     """
 
-    _require_table(table)
+    table = _require_table(table)
     assignments = _require_assignments(table, values, stamps_writer_epoch)
     for column, expression in assignments.items():
         if isinstance(expression, Increment):
@@ -998,7 +1029,10 @@ def _require_table(table: str) -> str:
             "closed set rather than validated as text -- a name carrying its own "
             "SQL can comment the builder's fence out of the statement entirely"
         )
-    return table
+    # The closed set's own string, not the caller's object: a str subclass that
+    # compares equal to a protected name would otherwise be the thing the
+    # f-string formats, through methods that are its author's, not ours.
+    return PROTECTED_TABLES[PROTECTED_TABLES.index(table)]
 
 
 def _require_assignments(
