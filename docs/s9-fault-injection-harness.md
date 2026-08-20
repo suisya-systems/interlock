@@ -123,8 +123,27 @@ two-phase barrier; the kill is phase two, and it is a real signal from outside t
 
 Controller and role process communicate over two inherited pipes dedicated to the protocol
 (control in, events out — line-oriented JSON, one object per line). At spawn the controller tells
-the role process which checkpoints are **armed** for this case (checkpoint name × occurrence
-index, since a loop passes the same point repeatedly).
+the role process which checkpoints are **armed** for this case (operation × checkpoint name ×
+occurrence index, since a loop passes the same point repeatedly).
+
+**Checkpoints are per-operation windows, not an `Outbox.attempt` internal.** The four S7
+constants name *kinds of window*, and every operation a role script performs exposes the windows
+that exist for it, through the same hook: the driver invokes the hook at the write boundaries of
+**each** API call — `before_durable_write` immediately before the call that commits, the
+after-write windows where they exist — so Supervisor and Secretary scripts (lease acquire/renew,
+`enqueue`, ack recording) can reach a barrier exactly like the delivery loop can. Inside
+`Outbox.attempt` the adapter binds the hook to S7's own `checkpoint` callback, which is the only
+place the two mid-call windows (`after_record_before_effect`, `after_effect_before_record`)
+physically exist; operations with no side effect (enqueue, ack) have only the before/after-write
+windows. The contract carries this **applicability matrix** (operation × checkpoint) as data, and
+manifest validation refuses a case that arms a window its operation does not have — a barrier
+that cannot be reached is a manifest error caught at collection, never a timeout in CI.
+
+In addition to checkpoints, scripts may declare named **sync points**
+(`{"event": "sync", "name": ...}`, e.g. `lease-acquired`) — barrier-capable like checkpoints but
+marking script progress rather than a durable-write window. They exist so a fault can be anchored
+to a known state ("the holder has its lease and is between operations") when no write window is
+the right anchor; §8's SIGSTOP cases require one.
 
 - **Unarmed checkpoint:** the hook returns immediately. No protocol round-trip, no timing
   perturbation on windows the case is not about.
@@ -183,8 +202,14 @@ Every case has a stable identifier with the grammar
   `sup+disp+sec`.
 - `operation` — which operation script step the checkpoint is armed on (e.g. `attempt`,
   `enqueue`, `ack`, `lease-renew`).
-- `checkpoint` — one of the four contract checkpoint names (§6.2), or `none` for faults that are
-  not checkpoint-anchored (pure clock-skew cases, SIGSTOP-expiry cases).
+- `checkpoint` — the anchor the fault is injected at: one of the four contract checkpoint names
+  (§6.2) or a named script **sync point** (§3.1). **Every fault is anchored**; there is no
+  unanchored kind. In particular `sigstop-expire` anchors at a sync point such as
+  `lease-acquired`: the controller sends SIGSTOP only while the holder is provably blocked at
+  that barrier (already holding its lease, between operations), then drives the claimant, then
+  `SIGCONT` + `continue` releases the holder — the process, being stopped, cannot consume the
+  `continue` until it is resumed, so the pause/takeover/return race is a deterministic sequence,
+  not a scheduling accident. Pure clock-skew cases anchor the same way (§7).
 - `fault` — the fault kind: `sigkill`, `sigstop-expire`, `clock-fwd`, `clock-back`,
   `drop-delivery`, `dup-delivery`, `lost-ack`, `staggered-sigkill` (§5).
 - `variant` — a short slug, present **whenever two cases would otherwise share the first four
@@ -279,11 +304,19 @@ conventions:
   recovery-complete (a protocol event), so each case pins which component recovers into which
   intermediate state. Concurrent-restart cases, if I-11 wants them, are a distinct
   `restart_order: concurrent` value, not an ambiguity.
-- `expected` — the invariant queries this case asserts (by name, from the contract's query set:
-  the unowned-outbox query, single-active-holder-per-resource, one-effect-per-dedup-key,
-  linear-writer-history), plus the **expected recovery owner**: which restarted role's recovery is
-  asserted to have driven each invariant back to health. "Somebody recovered it" is not an
-  assertion.
+- `expected` — the invariant observables this case asserts (by name, from the contract's set,
+  §6.2), plus the **expected recovery owner**: which restarted role's recovery is asserted to
+  have driven each invariant back to health. "Somebody recovered it" is not an assertion. A note
+  on the lease invariant: the spike schema keeps **one mutable lease row per resource and no
+  history table** (see `docs/lease-fencing.md`), so "at most one live holder across the whole
+  timeline" is **not provable by a final-state lease query**, and the contract does not pretend
+  it is. The timeline property is asserted through what *is* durable: the epoch attribution the
+  fenced writes leave on the rows they touched (`linear-writer-history`: per resource, applied
+  writes carry a non-interleaved epoch sequence), the required **recorded refusal** of the stale
+  writer's attempt (a fenced write that matched zero rows, surfaced as `StaleWriterRefused`-class
+  evidence the driver reports and the controller persists in the case's event trace), and the
+  destination observer where the write had an external effect. No lease-history table is added —
+  that would be a schema decision touching `Q-0001`, which stays open (§10).
 
 Scale is controlled by policy, not by product: aligned combination cases cover all 7 subsets ×
 a curated set of (operation, checkpoint) pairs chosen where roles genuinely interact (the delivery
@@ -330,10 +363,22 @@ harness tree), so the coupling cannot spread by convenience.
   occurrence list), `--clock-base-ms`, `--clock-offset-ms`, `--restart-generation`, plus the two
   protocol file descriptors.
 - The **protocol messages** (§3.1) and the recovery-complete event.
-- The **invariant queries** as named SQL data (in the same spirit as S5's reconstruction queries
-  and S7's unowned-outbox query): the durable tests assert through these names; the adapter maps
-  them to the schema of the day. When the schema is thrown away with S5, the queries are re-bound,
-  the assertions are not rewritten.
+- The **invariant observables**, in two kinds, both named and both required:
+  1. **Named SQL queries** over the control-plane store (in the same spirit as S5's
+     reconstruction queries and S7's unowned-outbox query): the durable tests assert through
+     these names; the adapter maps them to the schema of the day. When the schema is thrown away
+     with S5, the queries are re-bound, the assertions are not rewritten.
+  2. **A destination observer.** `ACCEPTANCE.md` §2 is explicit that for an external effect,
+     SQLite alone cannot prove exactly-once — the `after_effect_before_record` window is exactly
+     the window where our rows are silent. The contract therefore includes a destination-side
+     interface (`effect_count(idempotency_key)`, `attempt_count(idempotency_key)`, mirroring
+     S7's `Destination` protocol), and every case that kills inside or after an effect window
+     **must** name a destination assertion, not only SQL — manifest validation enforces it. The
+     harness destination must be **durable across the role kill and out-of-process relative to
+     the killed role**: today's in-process `KeyedDropbox` does not qualify; the spike adapter
+     supplies a file- or separate-SQLite-backed dropbox whose store the controller reads
+     directly after the kill, so the evidence is the destination's own record, never a re-derivation
+     from control-plane rows.
 
 ### 6.3 The conformance battery
 
