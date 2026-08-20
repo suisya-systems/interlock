@@ -1038,14 +1038,20 @@ def test_the_fence_is_one_statement_and_not_a_check_then_write(cp, dropbox):
     """The property the race depends on, asserted against the SQL itself.
 
     A test that only exercises behaviour cannot tell a fenced UPDATE from a
-    SELECT followed by an UPDATE that happens not to have raced yet.
+    SELECT followed by an UPDATE that happens not to have raced yet. The
+    statements below are issued by the typed builders (#42), not hand-written
+    SQL text, so the assertion is both that the fence is present *and* that it
+    came from the one place able to produce a :class:`FencedStatement`.
     """
 
     from claude_org_runtime.control_plane import outbox as module
+    from claude_org_runtime.control_plane.lease import FencedStatement
 
-    fence = module._FENCE_PREDICATE
-    assert "EXISTS (SELECT 1" in fence and "expires_at_ms > :now_ms" in fence
-    assert "writer_epoch = :epoch" in fence
+    for statement in (module._COUNT_ATTEMPT, module._MARK_DELIVERED):
+        assert isinstance(statement, FencedStatement)
+        assert "EXISTS (SELECT 1" in statement
+        assert "expires_at_ms > :fence_now_ms" in statement
+        assert "writer_epoch = :fence_epoch" in statement
 
 
 def test_an_outbox_writer_must_name_its_lease_resource_and_holder(cp, dropbox):
@@ -1299,16 +1305,18 @@ def test_the_effect_intent_insert_is_one_statement_and_not_a_check_then_write():
     """Same property as the protected updates, asserted against the SQL.
 
     A behavioural test cannot tell a fenced INSERT from a SELECT followed by an
-    INSERT that happens not to have raced yet.
+    INSERT that happens not to have raced yet. ``_PENDING_ACTION`` is issued by
+    the typed builder (#42) rather than written inline, so the assertion reads
+    the statement it produced instead of scanning the method's source text.
     """
 
-    import inspect
-
     from claude_org_runtime.control_plane import outbox as module
+    from claude_org_runtime.control_plane.lease import FencedStatement
 
-    source = inspect.getsource(module.Outbox._ensure_pending_action)
-    assert "INSERT INTO action" in source
-    assert "WHERE EXISTS (SELECT 1" in source and "expires_at_ms > :now_ms" in source
+    statement = module._PENDING_ACTION
+    assert isinstance(statement, FencedStatement)
+    assert "INSERT INTO action" in statement
+    assert "EXISTS (SELECT 1" in statement and "expires_at_ms > :fence_now_ms" in statement
 
 
 def test_a_stale_writer_cannot_park_a_human_gated_action(cp, dropbox):

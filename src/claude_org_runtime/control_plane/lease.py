@@ -23,8 +23,9 @@ lease epoch and validates it **inside the write**, as one statement:
                     WHERE resource = :fence_resource AND holder = :fence_holder
                       AND epoch = :fence_epoch AND expires_at_ms > :fence_now_ms)
 
-:func:`protected_write` refuses any statement that does not carry
-:data:`FENCE_SQL` verbatim, so the unfenced shape cannot reach the database
+:func:`protected_write` accepts only a :class:`FencedStatement`, which the
+typed builders alone can issue and which always carries :data:`FENCE_SQL` in
+the write's own predicate, so the unfenced shape cannot reach the database
 through this module at all.
 
 **Why the epoch and not the expiry is what a write validates.** Time is the
@@ -71,6 +72,7 @@ from typing import Any, Iterator, Mapping, Sequence
 __all__ = [
     "DESTINATIONS",
     "EXACTLY_ONCE_MECHANISMS",
+    "FENCE_PARAMS",
     "FENCE_SQL",
     "WRITE_HISTORY_QUERY",
     "Authority",
@@ -91,27 +93,38 @@ __all__ = [
     "StaleWriterRefused",
     "UnfencedStatement",
     "acquire",
+    "and_",
     "applied_epoch_regressions",
     "authority_timeline",
     "claimed_timeline",
     "effect_kind",
     "epoch_regressions",
+    "eq",
+    "fence_epoch",
     "fenced_insert",
     "fenced_update",
+    "increment",
+    "is_null",
+    "ne",
     "overlapping_claims",
+    "param",
+    "protected_write",
     "read_lease",
     "resource_of_kind",
     "release",
     "renew",
+    "value",
     "write_history",
 ]
 
 
-#: The fence, as the exact text a protected statement must carry. It is a
-#: constant rather than a template because the check in :func:`protected_write`
-#: is a substring test: a fence assembled by string surgery at the call site is a
-#: fence that can be assembled slightly wrong, and the failure would be invisible
-#: in the row that results.
+#: The fence, as the exact text every builder-issued statement carries. It is a
+#: constant rather than a template because the builders splice it in verbatim:
+#: a fence assembled by string surgery would be a fence that can be assembled
+#: slightly wrong, and the failure would be invisible in the row that results.
+#: What :func:`protected_write` enforces is the :class:`FencedStatement` type,
+#: not a scan for this text -- see that class for why a substring test cannot
+#: tell a fence that gates a write from one parked somewhere harmless.
 FENCE_SQL = (
     "EXISTS (SELECT 1 FROM lease\n"
     "                    WHERE resource = :fence_resource\n"
@@ -607,45 +620,385 @@ class ProtectedWrite:
 #: nowhere else.
 _BUILDER = object()
 
-#: What "stamps the writer epoch" has to look like: the column assigned the
-#: fence's own epoch parameter. Merely *mentioning* ``writer_epoch`` -- in a
-#: predicate, or assigned a constant -- leaves a row whose epoch nothing
-#: guarantees, and :func:`write_history` would then be reading a number that
-#: does not mean what it says.
-_STAMP = re.compile(r"\bwriter_epoch\s*=\s*:fence_epoch\b")
 
-#: Every mention of the column, so a second assignment cannot hide behind the
-#: first one matching.
-_WRITER_EPOCH = re.compile(r"\bwriter_epoch\b")
+# --------------------------------------------------------------------------
+# the typed predicate builder -- no raw SQL crosses this line
+# --------------------------------------------------------------------------
+#
+# S6 shipped the builders taking SQL text fragments and grew three rounds of
+# defence around them: a substring scan, then builder-issued types, then a
+# literal-stripping lexer with a closed table set. Each round hardened the
+# synthesis without removing the recurring surface itself -- caller-supplied
+# SQL text. What follows is the residual `docs/lease-fencing.md` recorded as
+# the fully structural answer (#42): callers compose statements from typed
+# column / operator / value objects, the builder renders every character of
+# SQL itself, and the lexer-based defences are unnecessary by construction
+# because there is no caller text left to scan.
+
+#: What a column or parameter name may look like. An identifier is a name, not
+#: a fragment: nothing matching this pattern can close a parenthesis, open a
+#: comment, or smuggle a quote, so identity checks replace the retired lexer.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _require_column(field: str, name: object) -> str:
+    # type() and not isinstance(): a str *subclass* passes every text check and
+    # then renders through its own __format__, which is its author's code, not
+    # this builder's. A name is an exact built-in str or it is not a name.
+    if type(name) is not str or not _IDENTIFIER.match(name):
+        raise LeaseUsageError(
+            f"{field} must be a bare column name (a built-in str identifier), "
+            f"got {name!r}; the builder renders every character of SQL itself, "
+            "so a name is a name and never a fragment"
+        )
+    return name
+
+
+class _FenceEpoch:
+    """The fence's own epoch, as an assignable value. See :data:`fence_epoch`."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - repr only
+        return "fence_epoch"
+
+
+#: The one way a statement refers to the fence's epoch. A caller cannot name
+#: ``:fence_epoch`` directly -- :class:`Param` refuses every name in
+#: :data:`FENCE_PARAMS` -- so the stamp is a sentinel the builder recognises
+#: structurally rather than a spelling a regex has to find.
+fence_epoch = _FenceEpoch()
+
+
+@dataclass(frozen=True)
+class Param:
+    """A named placeholder, bound at execution time. Build with :func:`param`."""
+
+    name: str
+
+    def __post_init__(self) -> None:
+        _require_column("a parameter name", self.name)
+        if self.name in FENCE_PARAMS:
+            raise LeaseUsageError(
+                f"parameter {self.name!r} is bound by the fence itself; use "
+                "fence_epoch to stamp the writer epoch, and never bind the "
+                "fence's resource, holder or clock from a caller value"
+            )
+
+
+@dataclass(frozen=True)
+class Value:
+    """A constant the builder renders as a SQL literal. Build with :func:`value`.
+
+    Only ``str``, ``int`` and ``None`` are accepted. The rendering is the
+    builder's, by SQLite's own quoting rules, so a constant containing quotes,
+    parentheses or comment markers is inert text in the statement -- there is
+    no structural scan left for it to walk past.
+    """
+
+    constant: str | int | None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.constant, bool) or not isinstance(
+            self.constant, (str, int, type(None))
+        ):
+            raise LeaseUsageError(
+                f"a value() constant must be a str, an int or None, got "
+                f"{self.constant!r}; anything richer is bound as a param() at "
+                "execution time instead of rendered into the statement"
+            )
+        if isinstance(self.constant, int):
+            # Canonicalised through int(), which reads the integer value an int
+            # subclass carries -- an IntEnum member is the live case, whose
+            # str() may spell its *name* (Python 3.10), and a name is not a
+            # number the statement can carry.
+            object.__setattr__(self, "constant", int(self.constant))
+        elif isinstance(self.constant, str):
+            if type(self.constant) is not str:
+                raise LeaseUsageError(
+                    f"a value() constant must be a built-in str, got the "
+                    f"subclass {type(self.constant).__name__}; escaping "
+                    "dispatches through the object's own methods, which are "
+                    "its author's code rather than this builder's"
+                )
+            if "\x00" in self.constant:
+                raise LeaseUsageError(
+                    "a value() constant may not contain a NUL character: the "
+                    "SQL text is NUL-terminated on its way into SQLite, so the "
+                    "refusal belongs here, where it names the constant, rather "
+                    "than at execution time where it names the whole statement"
+                )
+
+
+@dataclass(frozen=True)
+class Increment:
+    """``column = column + by``, for counters. Build with :func:`increment`."""
+
+    column: str
+    by: int
+
+    def __post_init__(self) -> None:
+        _require_column("increment() column", self.column)
+        if not isinstance(self.by, int) or isinstance(self.by, bool):
+            raise LeaseUsageError(f"increment() by must be an int, got {self.by!r}")
+
+
+def param(name: str) -> Param:
+    """A named placeholder: renders as ``:name``, bound at execution time."""
+
+    return Param(name)
+
+
+def value(constant: str | int | None) -> Value:
+    """A constant, rendered as a SQL literal by the builder itself."""
+
+    return Value(constant)
+
+
+def increment(column: str, by: int = 1) -> Increment:
+    """An assignment value of ``column + by``, for durable counters."""
+
+    return Increment(column, by)
+
+
+@dataclass(frozen=True)
+class Comparison:
+    """``column = operand`` or ``column <> operand``. Build with :func:`eq` / :func:`ne`."""
+
+    column: str
+    operator: str
+    operand: "Param | Value | _FenceEpoch"
+
+    def __post_init__(self) -> None:
+        _require_column("a comparison column", self.column)
+        if self.operator not in ("=", "<>"):
+            raise LeaseUsageError(
+                f"a comparison operator is '=' or '<>', got {self.operator!r}"
+            )
+        if type(self.operand) not in (Param, Value) and self.operand is not fence_epoch:
+            raise UnfencedStatement(
+                f"the operand for {self.column!r} must be param(...), value(...) "
+                f"or fence_epoch itself, got {self.operand!r}; a predicate is "
+                "composed from the builder's own typed objects, never from a "
+                "subclass of them and never from SQL text"
+            )
+        if type(self.operand) is Value and self.operand.constant is None:
+            # "= NULL" and "<> NULL" are UNKNOWN for every row in SQL: the
+            # predicate would match nothing, and the protected write would
+            # silently become a no-op rather than the null test it looks like.
+            raise LeaseUsageError(
+                f"comparing {self.column!r} against value(None) never matches "
+                "any row in SQL; use is_null() for the null test"
+            )
+
+
+@dataclass(frozen=True)
+class IsNull:
+    """``column IS NULL``. Build with :func:`is_null`."""
+
+    column: str
+
+    def __post_init__(self) -> None:
+        _require_column("an IS NULL column", self.column)
+
+
+@dataclass(frozen=True)
+class Conjunction:
+    """Predicates ANDed together. Build with :func:`and_`."""
+
+    predicates: "tuple[Predicate, ...]"
+
+    def __post_init__(self) -> None:
+        if not self.predicates:
+            raise LeaseUsageError(
+                "and_() needs at least one predicate; a write whose own WHERE "
+                "matches everything should say so with an explicit predicate, "
+                "not with an empty conjunction"
+            )
+        for predicate in self.predicates:
+            _require_predicate("a conjunct", predicate)
+
+
+Predicate = Comparison | IsNull | Conjunction
+
+
+def eq(column: str, operand: "Param | Value | _FenceEpoch") -> Comparison:
+    """The predicate ``column = operand``."""
+
+    return Comparison(column, "=", operand)
+
+
+def ne(column: str, operand: "Param | Value | _FenceEpoch") -> Comparison:
+    """The predicate ``column <> operand``."""
+
+    return Comparison(column, "<>", operand)
+
+
+def is_null(column: str) -> IsNull:
+    """The predicate ``column IS NULL``."""
+
+    return IsNull(column)
+
+
+def and_(*predicates: Predicate) -> Conjunction:
+    """*predicates*, all of which must hold."""
+
+    return Conjunction(tuple(predicates))
+
+
+def _require_predicate(field: str, predicate: object) -> None:
+    # Exact types, not isinstance: a predicate subclass would pass every
+    # construction-time check and still render through its author's own
+    # attribute reads.
+    if type(predicate) not in (Comparison, IsNull, Conjunction):
+        raise UnfencedStatement(
+            f"{field} must be composed with eq(), ne(), is_null() and and_(), "
+            f"got {predicate!r}. The builders take no SQL text from a caller -- "
+            "and no subclass either: a raw fragment is exactly the surface #42 "
+            "retired"
+        )
+
+
+def _render_operand(expression: object) -> str:
+    # The gate every rendering path shares, so no shape -- the insert values in
+    # particular -- can reach the f-strings below with an object whose own
+    # methods would decide what the statement says. Exact types, and for the
+    # sentinel identity, never isinstance: a *subclass* of Param or Value is
+    # its author's code wearing the builder's name, free to answer
+    # construction-time validation with one text and rendering with another.
+    if type(expression) not in (Param, Value) and expression is not fence_epoch:
+        raise UnfencedStatement(
+            f"a rendered value must be param(...), value(...) or fence_epoch "
+            f"itself, got {expression!r}. The builders take no SQL text from a "
+            "caller -- and no subclass either: a raw fragment is exactly the "
+            "surface #42 retired"
+        )
+    if expression is fence_epoch:
+        return ":fence_epoch"
+    # Construction-time validation is repeated here, on the field as it stands
+    # at rendering: frozen=True yields to object.__setattr__, and a node
+    # mutated between the two observations would otherwise carry whatever the
+    # mutation wrote straight into the statement. What is validated is what is
+    # rendered, at the moment it is rendered.
+    if type(expression) is Param:
+        name = _require_column("a parameter name", expression.name)
+        if name in FENCE_PARAMS:
+            raise LeaseUsageError(
+                f"parameter {name!r} is bound by the fence itself and cannot "
+                "be rendered from a caller node"
+            )
+        return f":{name}"
+    constant = expression.constant
+    if constant is None:
+        return "NULL"
+    if isinstance(constant, bool) or (
+        not isinstance(constant, int) and type(constant) is not str
+    ):
+        raise LeaseUsageError(
+            f"a value() constant must be a built-in str, an int or None at "
+            f"rendering time, got {constant!r}"
+        )
+    if isinstance(constant, int):
+        return str(int(constant))
+    if "\x00" in constant:
+        raise LeaseUsageError("a value() constant may not contain a NUL character")
+    # SQLite's own escape: the quote is doubled, and nothing else in a string
+    # literal is structural. Rendered here, by the builder, so the constant is
+    # data however it is spelled.
+    escaped = constant.replace("'", "''")
+    return f"'{escaped}'"
+
+
+def _render_assignment(column: str, expression: object) -> str:
+    if type(expression) is Increment:
+        if _require_column("increment() column", expression.column) != column:
+            raise LeaseUsageError(
+                f"increment({expression.column!r}) assigned to {column!r}: a "
+                "counter is incremented in place, so the two names must agree"
+            )
+        by = expression.by
+        if not isinstance(by, int) or isinstance(by, bool):
+            raise LeaseUsageError(f"increment() by must be an int, got {by!r}")
+        rendered = f"{column} + {int(by)}"
+    else:
+        # _render_operand's own exact-type gate refuses everything else,
+        # subclasses of the builder's types included.
+        rendered = _render_operand(expression)
+    return f"{column} = {rendered}"
+
+
+def _render_predicate(predicate: object) -> str:
+    # Exact-type dispatch with the fields revalidated as they are rendered --
+    # see _render_operand for why construction-time validation is not enough.
+    if type(predicate) is Conjunction:
+        conjuncts = tuple(predicate.predicates)
+        if not conjuncts:
+            raise LeaseUsageError("and_() needs at least one predicate")
+        return " AND ".join(_render_predicate(p) for p in conjuncts)
+    if type(predicate) is IsNull:
+        return f"{_require_column('an IS NULL column', predicate.column)} IS NULL"
+    if type(predicate) is not Comparison:
+        raise UnfencedStatement(
+            f"a predicate must be composed with eq(), ne(), is_null() and "
+            f"and_(), got {predicate!r}"
+        )
+    column = _require_column("a comparison column", predicate.column)
+    operator = predicate.operator
+    if operator not in ("=", "<>"):
+        raise LeaseUsageError(
+            f"a comparison operator is '=' or '<>', got {operator!r}"
+        )
+    operand = predicate.operand
+    if type(operand) is Value and operand.constant is None:
+        raise LeaseUsageError(
+            f"comparing {column!r} against value(None) never matches any row "
+            "in SQL; use is_null() for the null test"
+        )
+    return f"{column} {operator} {_render_operand(operand)}"
 
 
 def fenced_update(
-    table: str, *, set_clause: str, where: str, stamps_writer_epoch: bool = True
+    table: str,
+    *,
+    set: Mapping[str, object],
+    where: Predicate,
+    stamps_writer_epoch: bool = True,
 ) -> FencedStatement:
     """An UPDATE whose own WHERE ends in the fence. See :data:`FENCE_SQL`.
 
-    The caller's *where* is parenthesised and ANDed with the fence, so the fence
-    decides whether the row changes -- it is not merely present in the text.
+    *set* maps column names to typed values -- :func:`param`, :func:`value`,
+    :func:`increment` or :data:`fence_epoch` -- and *where* is a typed
+    predicate from :func:`eq`, :func:`ne`, :func:`is_null` and :func:`and_`.
+    No SQL text crosses the boundary: the builder renders every character, so
+    the fence gates the write by construction rather than by a scan over
+    caller-supplied fragments.
 
-    *stamps_writer_epoch* requires ``writer_epoch = :fence_epoch`` in
-    *set_clause*. Turn it off only for a target that genuinely has no such
-    column, and expect to say why: without the stamp the row leaves no trace of
-    the epoch it was written under, and the single-writer property becomes
-    unprovable after the fact rather than false.
+    The caller's predicate is parenthesised and ANDed with the fence, so the
+    fence decides whether the row changes -- it is not merely present in the
+    text.
+
+    *stamps_writer_epoch* requires ``writer_epoch`` to be assigned
+    :data:`fence_epoch`, and nothing else. Turn it off only for a target that
+    genuinely has no such column, or for an update that must leave a row's
+    existing stamp in place, and expect to say which: without the stamp the
+    row leaves no trace of the epoch it was written under, and the
+    single-writer property becomes unprovable after the fact rather than false.
     """
 
-    _require_table(table)
-    _require_fragment("set_clause", set_clause)
-    _require_fragment("where", where)
-    _require_stamp(table, set_clause, stamps_writer_epoch)
-    assigned = _assigned_columns(set_clause)
-    forbidden = sorted(assigned & set(_EVIDENCE_COLUMNS))
+    table = _require_table(table)
+    _require_predicate("where", where)
+    assignments = _require_assignments(table, set, stamps_writer_epoch)
+    forbidden = sorted(column for column in assignments if column in _EVIDENCE_COLUMNS)
     if forbidden:
         raise UnfencedStatement(
             f"a protected write may not assign {forbidden} on {table}: those columns "
             "are what a row in the history is attributed by, and a write that "
             "rewrites them replaces evidence rather than adding to it"
         )
+    rendered = ", ".join(
+        _render_assignment(column, expression)
+        for column, expression in assignments.items()
+    )
     # An applied action row is finished evidence. Without this an update could
     # land on one and restamp its epoch under a later lease, which would rewrite
     # the very attribution write_history() reads the single-writer property out
@@ -654,8 +1007,8 @@ def fenced_update(
     guard = " AND applied_at_ms IS NULL" if table == "action" else ""
     return FencedStatement(
         f"UPDATE {table}\n"
-        f"   SET {set_clause}\n"
-        f" WHERE ({where}){guard}\n"
+        f"   SET {rendered}\n"
+        f" WHERE ({_render_predicate(where)}){guard}\n"
         f"   AND {FENCE_SQL}",
         issued_by=_BUILDER,
     )
@@ -664,8 +1017,7 @@ def fenced_update(
 def fenced_insert(
     table: str,
     *,
-    columns: Sequence[str],
-    values: Sequence[str],
+    values: Mapping[str, object],
     stamps_writer_epoch: bool = True,
 ) -> FencedStatement:
     """An INSERT ... SELECT whose WHERE is the fence. See :data:`FENCE_SQL`.
@@ -674,23 +1026,24 @@ def fenced_insert(
     ``INSERT ... SELECT``: the row is produced only if the token is live, in the
     same statement that inserts it.
 
-    *stamps_writer_epoch* requires a ``writer_epoch`` column whose value
-    expression is exactly ``:fence_epoch`` -- see :func:`fenced_update`.
+    *values* maps column names to typed values, exactly as
+    :func:`fenced_update`'s *set* does (:func:`increment` excepted -- a new row
+    has no prior value to count from). *stamps_writer_epoch* requires a
+    ``writer_epoch`` column whose value is :data:`fence_epoch` -- see
+    :func:`fenced_update`.
     """
 
-    _require_table(table)
-    if len(columns) != len(values):
-        raise LeaseUsageError(
-            f"{len(columns)} column(s) but {len(values)} value expression(s)"
-        )
-    for index, (column, value) in enumerate(zip(columns, values)):
-        _require_fragment(f"columns[{index}]", column)
-        _require_fragment(f"values[{index}]", value)
-    pairs = [f"{column.strip()} = {value.strip()}" for column, value in zip(columns, values)]
-    _require_stamp(table, ", ".join(pairs), stamps_writer_epoch)
+    table = _require_table(table)
+    assignments = _require_assignments(table, values, stamps_writer_epoch)
+    for column, expression in assignments.items():
+        if isinstance(expression, Increment):
+            raise LeaseUsageError(
+                f"increment() is not a value for an INSERT ({column!r}): a new "
+                "row has no prior value to add to; use value() or param()"
+            )
     return FencedStatement(
-        f"INSERT INTO {table} ({', '.join(columns)})\n"
-        f"SELECT {', '.join(values)}\n"
+        f"INSERT INTO {table} ({', '.join(assignments)})\n"
+        f"SELECT {', '.join(_render_operand(v) for v in assignments.values())}\n"
         f" WHERE {FENCE_SQL}",
         issued_by=_BUILDER,
     )
@@ -725,121 +1078,62 @@ def _require_table(table: str) -> str:
             "closed set rather than validated as text -- a name carrying its own "
             "SQL can comment the builder's fence out of the statement entirely"
         )
-    return table
+    # The closed set's own string, not the caller's object: a str subclass that
+    # compares equal to a protected name would otherwise be the thing the
+    # f-string formats, through methods that are its author's, not ours.
+    return PROTECTED_TABLES[PROTECTED_TABLES.index(table)]
 
 
-def _assigned_columns(set_clause: str) -> set[str]:
-    """The column names *set_clause* assigns to, read off its structure."""
+def _require_assignments(
+    table: str, assignments: object, stamps_writer_epoch: bool
+) -> Mapping[str, object]:
+    """Validate one typed column-to-value mapping, and the writer-epoch stamp.
 
-    return {
-        match.group(1)
-        for match in re.finditer(r"(?:^|,)\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", _outside_literals(set_clause))
-    }
-
-
-def _require_stamp(table: str, assignments: str, stamps_writer_epoch: bool) -> None:
-    if not stamps_writer_epoch:
-        return
-    # Exactly one, not at least one: SQLite accepts "SET writer_epoch =
-    # :fence_epoch, writer_epoch = 1" and applies the *last* assignment, so a
-    # statement can satisfy a "contains the stamp" check and still store an
-    # epoch the caller chose.
-    mentions = len(_WRITER_EPOCH.findall(assignments))
-    if mentions != 1 or not _STAMP.search(assignments):
-        raise UnfencedStatement(
-            f"a protected write to {table} must assign writer_epoch = :fence_epoch "
-            f"exactly once; this one names the column {mentions} time(s). The "
-            "single-writer property is read back out of the epoch each row was "
-            "written under, so a row that carries no epoch -- or one a caller chose "
-            "-- is refused here rather than found unprovable later. Pass "
-            "stamps_writer_epoch=False if the target genuinely has no such column"
-        )
-
-
-def _outside_literals(fragment: str) -> str:
-    """*fragment* with every quoted literal replaced by a blank of equal length.
-
-    A parenthesis inside ``'('`` is text, not structure, and a scan that cannot
-    tell the two apart is a scan that can be walked past: ``'(' = '(') OR 1 = 1
-    AND ')' = ')'`` balances character for character while genuinely closing the
-    wrapper the fence is ANDed onto. So the literals come out first, by SQLite's
-    own rules -- ``'...'`` for strings with ``''`` as the escape, ``"..."`` and
-    ``[...]`` for identifiers -- and the structural check then runs on what is
-    left, which is all and only structure.
-
-    :raises UnfencedStatement: if a quote is never closed, which would swallow
-        the fence into a string literal.
+    A mapping, not clause text: duplicate assignment -- SQLite's "SET
+    writer_epoch = :fence_epoch, writer_epoch = 1" applies the *last* one -- is
+    impossible by construction, because a mapping holds one value per key.
     """
 
-    closers = {"'": "'", '"': '"', "[": "]"}
-    out = []
-    quote: str | None = None
-    index = 0
-    while index < len(fragment):
-        character = fragment[index]
-        if quote is None:
-            if character in closers:
-                quote = closers[character]
-                out.append(" ")
-            else:
-                out.append(character)
-            index += 1
-            continue
-        if character == quote:
-            # Doubling is SQLite's escape inside a quoted token, so a pair is
-            # content and a single one ends it.
-            if quote != "]" and fragment[index + 1 : index + 2] == quote:
-                out.append("  ")
-                index += 2
-                continue
-            quote = None
-        out.append(" ")
-        index += 1
-    if quote is not None:
+    if isinstance(assignments, (str, bytes)) or not isinstance(assignments, Mapping):
         raise UnfencedStatement(
-            f"a quoted token is never closed; the rest of the statement -- the "
-            f"fence included -- would be swallowed into it"
+            f"a protected write to {table} takes a mapping of column names to "
+            f"typed values, got {assignments!r}. The builders take no SQL text "
+            "from a caller: a raw fragment is exactly the surface #42 retired"
         )
-    return "".join(out)
+    # Snapshotted into a dict of our own before anything is checked: the
+    # caller's mapping is the caller's object, and one that answered the
+    # validation differently from the rendering would carry an unvalidated
+    # name or an unstamped epoch into the statement. Everything below -- and
+    # the rendering in the builders -- reads only this copy.
+    assignments = dict(assignments)
+    if not assignments:
+        raise LeaseUsageError(f"a protected write to {table} assigns no column at all")
+    for column in assignments:
+        _require_column(f"a column assigned on {table}", column)
 
-
-def _require_fragment(field: str, fragment: str) -> None:
-    """Refuse a SQL fragment that could reach outside the shape it is placed in.
-
-    The builders compose the fence into the statement by text, so a fragment that
-    closes a parenthesis it did not open, or opens a comment, can put the fence
-    somewhere it no longer gates the write: ``where="id = :id) OR 1 = 1 --"``
-    renders as ``WHERE (id = :id) OR 1 = 1 --) AND <fence>``, and every row
-    matching ``1 = 1`` changes under a stale token. Nothing about that is
-    hypothetical once the fence is claimed to be structural rather than
-    conventional, so the structural characters are refused outright -- after the
-    quoted literals have been taken out, so that neither a comment nor a
-    parenthesis can hide inside a string.
-
-    A protected write's predicate is a predicate, not an opportunity to
-    restructure the statement.
-    """
-
-    if not isinstance(fragment, str) or not fragment.strip():
-        raise LeaseUsageError(f"{field} must be a non-empty SQL fragment")
-    structure = _outside_literals(fragment)
-    for token in ("--", "/*", "*/", ";"):
-        if token in structure:
+    stamp = assignments.get("writer_epoch")
+    if stamps_writer_epoch:
+        # The single-writer property is read back out of the epoch each row was
+        # written under, so a row that carries no epoch -- or one a caller
+        # chose -- is refused here rather than found unprovable later. Identity
+        # with the sentinel, not isinstance: a foreign _FenceEpoch instance is
+        # an object of the caller's, and the caller does not get to mint the
+        # stamp.
+        if stamp is not fence_epoch:
             raise UnfencedStatement(
-                f"{field} contains {token!r}. A comment or statement separator in a "
-                "fragment the fence is composed into can move the fence out of the "
-                "write's predicate, so it is refused rather than rendered"
+                f"a protected write to {table} must assign fence_epoch to "
+                f"writer_epoch, and this one assigns {stamp!r}. Pass "
+                "stamps_writer_epoch=False if the target genuinely has no such "
+                "column"
             )
-    depth = 0
-    for character in structure:
-        depth += (character == "(") - (character == ")")
-        if depth < 0:
-            raise UnfencedStatement(
-                f"{field} closes a parenthesis it did not open, which would let the "
-                "fragment escape the parentheses the fence is ANDed onto"
-            )
-    if depth:
-        raise UnfencedStatement(f"{field} leaves {depth} parenthesis(es) unclosed")
+    elif "writer_epoch" in assignments:
+        raise UnfencedStatement(
+            f"stamps_writer_epoch=False declares that this write to {table} "
+            "leaves writer_epoch alone -- a target without the column, or a row "
+            "keeping the stamp it was written under -- and the statement "
+            "assigns one anyway; the two claims cannot both be true"
+        )
+    return assignments
 
 
 def effect_kind(resource: str, effect: str) -> str:
