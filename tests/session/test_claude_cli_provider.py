@@ -818,8 +818,14 @@ def test_a_garbage_line_before_a_valid_result_is_surfaced_not_swallowed(
 
 @pytest.mark.parametrize(
     "cli_args",
-    [["--session-id", "5"*8], ["--resume=abc"], ["-p", "another prompt"], ["--continue"]],
-    ids=["session-id", "resume-eq", "print", "continue"],
+    [
+        ["--session-id", "5" * 8],
+        ["--resume=abc"],
+        ["-p", "another prompt"],
+        ["--continue"],
+        ["-r00000000-0000-0000-0000-000000000000"],
+    ],
+    ids=["session-id", "resume-eq", "print", "continue", "resume-attached"],
 )
 def test_provider_owned_flags_in_role_arguments_are_refused(
     provider, tmp_path, spawn_log, cli_args
@@ -953,6 +959,12 @@ def test_provider_owned_flags_in_base_cli_args_are_a_construction_error(
         ClaudeCliSessionProvider(
             tmp_path / "state", claude_command=fake_cli, base_cli_args=("--session-id", "x")
         )
+    with pytest.raises(ValueError):
+        ClaudeCliSessionProvider(
+            tmp_path / "state",
+            claude_command=fake_cli,
+            base_cli_args=("-r00000000-0000-0000-0000-000000000000",),
+        )
     # The seam still exists for what it is for.
     ClaudeCliSessionProvider(
         tmp_path / "state", claude_command=fake_cli, base_cli_args=("--model", "haiku")
@@ -1004,6 +1016,42 @@ def test_a_child_whose_pid_cannot_be_recorded_is_not_left_running(
     assert "terminated" in result.detail
     assert provider.list_sessions() == Ok(())
     assert not (tmp_path / "state" / "sess-1").exists()
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="the emergency-kill path signals a POSIX group")
+def test_a_child_that_outlives_the_emergency_kill_is_not_abandoned(
+    fake_cli, tmp_path, monkeypatch
+):
+    """If the pid cannot be recorded AND the child survives the SIGKILL, the
+    spawn must not claim a clean termination: the child keeps its in-memory
+    supervision, the state stays reserved, and the caller hears TIMED_OUT."""
+
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider = ClaudeCliSessionProvider(
+        tmp_path / "state", claude_command=fake_cli, stop_timeout=0.3
+    )
+    original_write = ClaudeCliSessionProvider._write_record
+
+    def failing_second_write(self, record):
+        if record.pid is not None:
+            raise OSError(28, "No space left on device")
+        return original_write(self, record)
+
+    monkeypatch.setattr(ClaudeCliSessionProvider, "_write_record", failing_second_write)
+    # The "SIGKILL" is made a no-op, so the child genuinely survives it.
+    monkeypatch.setattr(s2, "_signal_group", lambda pgid, signum: None)
+
+    result = provider.start(_request(tmp_path))
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.TIMED_OUT
+    assert "in-memory supervision" in result.detail
+    # Still supervised and still reserved, not abandoned.
+    assert isinstance(provider.read_state("sess-1"), Ok)
+    assert (tmp_path / "state" / "sess-1").exists()
+
+    monkeypatch.undo()
+    stopped = provider.stop("sess-1")
+    assert isinstance(stopped, Ok)
 
 
 def test_a_broken_records_identity_stays_reserved(provider, tmp_path):

@@ -208,6 +208,24 @@ _PROVIDER_OWNED_FLAGS = (
     "--verbose",
 )
 
+def _matches_owned_flag(part: str) -> str | None:
+    """The provider-owned flag *part* would reach the CLI as, or ``None``.
+
+    Three spellings reach the parser as the same option: the exact form, the
+    ``--flag=value`` form, and -- for the single-dash short forms -- the
+    attached-value form (``-r<uuid>``), which the CLI's option parser
+    accepts. All three are recognised, because a rejection that knew two of
+    the three would be a rejection with a doorway in it.
+    """
+
+    for flag in _PROVIDER_OWNED_FLAGS:
+        if part == flag or part.startswith(flag + "="):
+            return flag
+        if not flag.startswith("--") and part.startswith(flag):
+            return flag
+    return None
+
+
 #: How much of a session's captured stderr a readout carries. A tail, because
 #: the messages that matter (the refusal, a fatal startup error) are last, and
 #: a readout that embedded megabytes of stderr would itself be unreadable.
@@ -429,14 +447,7 @@ class ClaudeCliSessionProvider(SessionProvider):
                 raise ValueError("claude_command must name at least one argument")
         self._base_cli_args = tuple(str(part) for part in base_cli_args)
         for part in self._base_cli_args:
-            owned = next(
-                (
-                    flag
-                    for flag in _PROVIDER_OWNED_FLAGS
-                    if part == flag or part.startswith(flag + "=")
-                ),
-                None,
-            )
+            owned = _matches_owned_flag(part)
             if owned is not None:
                 # Programmer error, so it raises at construction rather than
                 # surfacing per-spawn: a provider-wide argument overriding the
@@ -958,7 +969,30 @@ class ClaudeCliSessionProvider(SessionProvider):
             try:
                 process.wait(timeout=self._stop_timeout)
             except subprocess.TimeoutExpired:
-                pass
+                # It outlived even the SIGKILL. Claiming it was terminated --
+                # and for a fresh start, deleting its state -- would abandon
+                # a still-running writer with no supervision anywhere. The
+                # only supervision it has is this instance's in-memory one,
+                # so that is kept, the state directory is kept so the id
+                # stays reserved, and the caller is told the truth.
+                self._sessions[record.session_id] = _Supervised(
+                    record=record,
+                    process=process,
+                    provider_detail={
+                        "pid": process.pid,
+                        "generation": record.generation,
+                        "record_update_failed": str(exc),
+                    },
+                )
+                return Failure(
+                    FailureKind.TIMED_OUT,
+                    f"the pid of session {record.session_id!r}'s child could "
+                    f"not be durably recorded ({exc}), and the child (pid "
+                    f"{process.pid}) survived {self._stop_timeout}s past the "
+                    "SIGKILL; it stays under this instance's in-memory "
+                    "supervision, but the durable record carries no pid",
+                    {"errno": exc.errno, "pid": process.pid},
+                )
             if fresh:
                 self._remove_session_dir(record.session_id)
             return Failure(
@@ -1032,14 +1066,7 @@ class ClaudeCliSessionProvider(SessionProvider):
                         f"{request.session_id!r} contains a NUL, which no "
                         "operating system can carry in an argv",
                     )
-                owned = next(
-                    (
-                        flag
-                        for flag in _PROVIDER_OWNED_FLAGS
-                        if part == flag or part.startswith(flag + "=")
-                    ),
-                    None,
-                )
+                owned = _matches_owned_flag(part)
                 if owned is not None:
                     return Failure(
                         FailureKind.REFUSED_BY_PROVIDER,
