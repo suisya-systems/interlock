@@ -191,6 +191,24 @@ def test_a_schema_only_mutation_moves_the_canonical_bytes(ledger, routing, inter
     assert not comparison.only_the_routing_decision_changed
 
 
+def test_the_exclusion_does_not_take_the_routing_schema_with_it(ledger, routing):
+    # Excluding the routing relation excludes its ROWS only. A rollback that
+    # dropped the append-only trigger and then appended the expected row
+    # must still move the excluded-form digest -- otherwise the exclusion
+    # that licenses the rollback would also be its hiding place.
+    routing.route_new_runs_to(INTERLOCK, now_ms=T0, reason="canary")
+    before = canonical_sqlite_bytes(ledger, exclude_tables=("routing_decision",))
+    ledger.execute("DROP TRIGGER routing_decision_is_never_edited")
+    after = canonical_sqlite_bytes(ledger, exclude_tables=("routing_decision",))
+    assert before != after
+
+
+def test_a_changed_revision_stamp_is_a_changed_store(interlock):
+    before = canonical_sqlite_bytes(interlock)
+    interlock.execute("PRAGMA user_version = 999")
+    assert canonical_sqlite_bytes(interlock) != before
+
+
 def test_a_blob_value_is_canonicalised_not_crashed_on(interlock):
     # S5's outbox payload carries no typeof CHECK, so a store can legally
     # hold bytes -- and the store the canonicaliser most needs to see, one

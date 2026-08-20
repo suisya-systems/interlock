@@ -83,34 +83,55 @@ __all__ = [
 def canonical_sqlite_bytes(connection: sqlite3.Connection, *, exclude_tables: tuple[str, ...] = ()) -> bytes:
     """A canonical byte stream of the database's schema objects and rows.
 
-    Schema objects first (a rollback that only created, dropped or altered
-    an object must move the digest even when no row does), then tables in
-    name order, rows in the order of their own canonical encoding, values as
-    sorted-keys JSON: two databases holding the same facts serialise to the
-    same bytes regardless of insertion order, page layout or vacuum history.
-    *exclude_tables* is how the rollback comparison excludes exactly the
-    routing relation -- rows and schema objects alike -- and nothing else.
+    Identity metadata first (``application_id`` and ``user_version`` -- a
+    changed revision stamp is a changed store), then every schema object (a
+    rollback that only created, dropped or altered an object must move the
+    digest even when no row does), then tables in name order, rows in the
+    order of their own canonical encoding, values as sorted-keys JSON: two
+    databases holding the same facts serialise to the same bytes regardless
+    of insertion order, page layout or vacuum history. *exclude_tables* is
+    how the rollback comparison excludes exactly the routing relation's
+    **rows** and nothing else -- pragmas and schema objects, the excluded
+    table's own included, stay in the stream, so a rollback cannot hide a
+    mutation behind the very exclusion that licenses it.
     """
 
-    # The schema objects come first: a stream of rows alone cannot see a
-    # rollback that created or dropped an EMPTY table, or touched only an
-    # index or a trigger -- a mutation with no rows is still a mutation.
-    # Objects belonging to an excluded table are excluded with it.
-    schema_sql = (
-        "SELECT type, name, sql FROM sqlite_master "
-        "WHERE name NOT LIKE 'sqlite_%' "
-        + (f"AND tbl_name NOT IN ({','.join('?' * len(exclude_tables))}) " if exclude_tables else "")
-        + "ORDER BY type, name"
-    )
+    # The store's identity metadata comes first: application_id and
+    # user_version are how this codebase tells one store's revision from
+    # another, so a write that changed either is a changed store even though
+    # neither lives in a table.
     lines = [
+        json.dumps(
+            {
+                "pragma": {
+                    "application_id": connection.execute("PRAGMA application_id").fetchone()[0],
+                    "user_version": connection.execute("PRAGMA user_version").fetchone()[0],
+                }
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+    ]
+    # Then every schema object: a stream of rows alone cannot see a rollback
+    # that created or dropped an EMPTY table, or touched only an index or a
+    # trigger -- a mutation with no rows is still a mutation. *exclude_tables*
+    # deliberately does NOT reach in here: it excludes an excluded table's
+    # ROWS, never its schema, because a rollback that dropped the routing
+    # relation's own append-only trigger and then appended the expected row
+    # must not read as "only the routing decision changed".
+    lines.extend(
         json.dumps(
             {"schema": {"type": kind, "name": name, "sql": sql or ""}},
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
         )
-        for kind, name, sql in connection.execute(schema_sql, exclude_tables)
-    ]
+        for kind, name, sql in connection.execute(
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        )
+    )
     for table in _user_tables(connection):
         if table in exclude_tables:
             continue
