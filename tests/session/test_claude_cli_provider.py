@@ -124,7 +124,8 @@ emit({{"type": "system", "subtype": "init", "session_id": reported,
       "unknown_field": {{"nested": ["tolerated"]}}}})
 
 if mode == "shielded-grandchild":
-    time.sleep(sleep_for)
+    if os.environ.get("FAKE_LEADER_EXITS") != "1":
+        time.sleep(sleep_for)
     sys.exit(0)
 
 if mode == "garbage-then-hang":
@@ -916,6 +917,46 @@ def test_stop_reaps_a_group_member_that_outlived_the_leader(
             f"the shielded grandchild (pid {grandchild}) survived the stop"
         )
         time.sleep(0.02)
+
+
+@pytest.mark.skipif(not HAS_PROC, reason="the after-exit sweep proves ownership via /proc")
+def test_stop_reaps_the_group_even_when_the_leader_already_exited(
+    provider, tmp_path, monkeypatch
+):
+    """The leader being gone does not end the stop: the group member is
+    still swept -- and only because its environment provably carries this
+    session's marker, so a recycled pgid is never signalled."""
+
+    monkeypatch.setenv("FAKE_MODE", "shielded-grandchild")
+    monkeypatch.setenv("FAKE_LEADER_EXITS", "1")
+    pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setenv("FAKE_GRANDCHILD_PID_FILE", str(pid_file))
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    grandchild = int(pid_file.read_text(encoding="utf-8"))
+    assert s2._pid_running(grandchild), "the scenario needs a surviving group member"
+
+    result = provider.stop("sess-1")
+    assert isinstance(result, Ok)
+    deadline = time.monotonic() + 10.0
+    while s2._pid_running(grandchild):
+        assert time.monotonic() < deadline, (
+            f"the grandchild (pid {grandchild}) survived a stop after the leader's exit"
+        )
+        time.sleep(0.02)
+
+
+def test_provider_owned_flags_in_base_cli_args_are_a_construction_error(
+    fake_cli, tmp_path
+):
+    with pytest.raises(ValueError):
+        ClaudeCliSessionProvider(
+            tmp_path / "state", claude_command=fake_cli, base_cli_args=("--session-id", "x")
+        )
+    # The seam still exists for what it is for.
+    ClaudeCliSessionProvider(
+        tmp_path / "state", claude_command=fake_cli, base_cli_args=("--model", "haiku")
+    )
 
 
 def test_the_probes_raw_answers_are_durably_recorded(provider, tmp_path):

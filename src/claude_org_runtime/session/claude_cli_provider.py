@@ -181,6 +181,13 @@ _CAPABILITY_FLAGS: Mapping[str, tuple[str, ...]] = {
     "session.structured-readout": ("--output-format", "--verbose"),
 }
 
+#: Environment variable stamped into every spawned child -- and inherited by
+#: everything the child starts, MCP servers included. It is the marker that
+#: lets a *later* group sweep prove a process group is still this session's:
+#: after the leader is reaped its pid (and so the pgid) is recyclable, and a
+#: sweep that signalled an unverified group could kill strangers.
+CHILD_ENV_SESSION_UUID = "INTERLOCK_SESSION_UUID"
+
 #: Flags this provider renders itself. A per-role ``cli_args`` carrying one of
 #: these would be appended *after* the provider's own and could override the
 #: committed identity or the structured-output invocation -- ``--session-id``
@@ -421,6 +428,25 @@ class ClaudeCliSessionProvider(SessionProvider):
             if not self._command:
                 raise ValueError("claude_command must name at least one argument")
         self._base_cli_args = tuple(str(part) for part in base_cli_args)
+        for part in self._base_cli_args:
+            owned = next(
+                (
+                    flag
+                    for flag in _PROVIDER_OWNED_FLAGS
+                    if part == flag or part.startswith(flag + "=")
+                ),
+                None,
+            )
+            if owned is not None:
+                # Programmer error, so it raises at construction rather than
+                # surfacing per-spawn: a provider-wide argument overriding the
+                # committed identity or the structured readout is never a
+                # per-session condition to report.
+                raise ValueError(
+                    f"base_cli_args carries {owned!r}, which this provider "
+                    "renders itself; provider-wide arguments must not override "
+                    "the committed identity or the structured readout"
+                )
         self._stop_timeout = stop_timeout
         self._probe_timeout = probe_timeout
         self._sessions: dict[str, _Supervised] = {}
@@ -867,6 +893,9 @@ class ClaudeCliSessionProvider(SessionProvider):
             popen_kwargs["creationflags"] = getattr(
                 subprocess, "CREATE_NEW_PROCESS_GROUP", 0
             )
+        # The marker every descendant inherits; see CHILD_ENV_SESSION_UUID.
+        environment = dict(os.environ)
+        environment[CHILD_ENV_SESSION_UUID] = record.claude_session_uuid
         try:
             with open(events_path, "wb") as events_file, open(
                 stderr_path, "wb"
@@ -874,6 +903,7 @@ class ClaudeCliSessionProvider(SessionProvider):
                 process = subprocess.Popen(
                     list(record.argv),
                     cwd=record.workspace,
+                    env=environment,
                     stdin=subprocess.DEVNULL,
                     stdout=events_file,
                     stderr=stderr_file,
@@ -1096,7 +1126,11 @@ class ClaudeCliSessionProvider(SessionProvider):
         if isinstance(liveness, Failure):
             return liveness
         if not liveness:
-            return None
+            # The leader's being gone does not end the stop: an MCP child that
+            # ignored its parent's death is still running in the group (H1),
+            # and reporting done over it would be the supervision promise
+            # quietly not kept.
+            return self._sweep_after_exit(session)
         record = session.record
         if session.process is not None:
             process = session.process
@@ -1155,6 +1189,39 @@ class ClaudeCliSessionProvider(SessionProvider):
                 )
             time.sleep(0.05)
         return self._reap_group_remnants(record.pgid or record.pid, record.session_id)
+
+    def _sweep_after_exit(self, session: _Supervised) -> Failure | None:
+        """The H1 sweep for a leader that is already gone -- proven, then done.
+
+        Once the leader is reaped its pid, and with it the pgid, is
+        recyclable, so a group under that number is signalled **only when at
+        least one of its live members provably carries this session's
+        environment marker** (:data:`CHILD_ENV_SESSION_UUID`). A group with
+        members none of which can be verified is left untouched: killing what
+        cannot be proven ours is the worse failure, and on a platform without
+        ``/proc`` there is nothing to prove with.
+        """
+
+        record = session.record
+        pgid = record.pgid or record.pid
+        if os.name != "posix" or pgid is None:
+            return None
+        marker = f"{CHILD_ENV_SESSION_UUID}={record.claude_session_uuid}".encode()
+        if not _group_member_carries_marker(pgid, marker):
+            return None
+        _signal_group(pgid, signal.SIGKILL)
+        deadline = time.monotonic() + self._stop_timeout
+        while _group_member_carries_marker(pgid, marker):
+            if time.monotonic() >= deadline:
+                return Failure(
+                    FailureKind.TIMED_OUT,
+                    f"process group {pgid} of session "
+                    f"{record.session_id!r} still has members carrying its "
+                    f"marker {self._stop_timeout}s after SIGKILL",
+                    {"pgid": pgid},
+                )
+            time.sleep(0.05)
+        return None
 
     def _reap_group_remnants(self, pgid: int, session_id: str) -> Failure | None:
         """Confirm the whole process group is gone, killing what remains (H1).
@@ -1622,6 +1689,37 @@ def _pid_cmdline(pid: int) -> str | None:
     except OSError:
         return None
     return raw.replace(b"\x00", b" ").decode("utf-8", "replace")
+
+
+def _group_member_carries_marker(pgid: int, marker: bytes) -> bool:
+    """Any live member of the group whose environment carries *marker*?
+
+    Requires ``/proc``: both the group roster and each member's environment
+    are read from it, and where it does not exist the honest answer is that
+    nothing can be verified -- returned as ``False`` so no unverified group
+    is ever signalled.
+    """
+
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return False
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            text = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        fields = text.rpartition(")")[2].split()
+        if len(fields) < 3 or fields[2] != str(pgid) or fields[0] == "Z":
+            continue
+        try:
+            environ = (entry / "environ").read_bytes()
+        except OSError:
+            continue
+        if marker in environ:
+            return True
+    return False
 
 
 def _group_has_live_members(pgid: int) -> bool:
