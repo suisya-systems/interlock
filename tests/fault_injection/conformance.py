@@ -47,6 +47,7 @@ __all__ = [
     "check_clock_is_injected",
     "check_driver_cli",
     "check_identical_traces",
+    "check_invariant_queries_are_not_vacuous",
     "check_no_host_clock",
     "check_restart_is_idempotent",
     "check_sigkill_exit_status",
@@ -461,6 +462,71 @@ def check_invariant_queries_bind_the_contract_parameters(adapter: Any) -> None:
             )
 
 
+def check_invariant_queries_are_not_vacuous(adapter: Any, workdir: Path, *, role: str) -> None:
+    """Every named query can actually see the rows its role wrote.
+
+    The failure this exists for is the quietest one a harness has. A query whose
+    scoping does not match the schema returns zero rows on every run, and an
+    invariant of the shape "this result set is empty" then passes forever --
+    including on the day the property it names is violated. It is not a test
+    failure, it is the *absence* of one.
+
+    So the battery runs a clean case and asserts the positive direction: the
+    write history is non-empty, the lease is held at the instant the run
+    reached, and the role's outbox rows are visible. An adapter that cannot show
+    these has not bound the invariants, whatever its SQL says.
+    """
+
+    case = synthetic_case(
+        case_id=f"conformance-vacuity-{role}", role=role, arms={}
+    )
+    with _controller(adapter, workdir, case) as controller:
+        controller.bootstrap()
+        controller.spawn(role, armed=())
+        controller.run_to_completion(role)
+
+        now_ms = controller.last_reported_now_ms(default=CONFORMANCE_CLOCK_BASE_MS)
+        params = adapter.query_parameters(role, now_ms=now_ms)
+
+        def rows(name: str) -> list:
+            wanted = contract.INVARIANT_PARAMETERS[name]
+            return controller.query(name, **{key: params[key] for key in wanted})
+
+        history = rows(contract.INVARIANT_LINEAR_WRITER_HISTORY)
+        if not history:
+            raise ContractViolation(
+                f"{adapter.driver_module}: linear-writer-history sees none of "
+                f"{role}'s writes, so 'no epoch regression' would pass over an "
+                "empty set forever"
+            )
+        outbox_rows = rows(contract.INVARIANT_RETRY_COUNT_DURABLE)
+        if not outbox_rows:
+            raise ContractViolation(
+                f"{adapter.driver_module}: retry-count-durable sees none of "
+                f"{role}'s outbox rows"
+            )
+        if contract.OPERATION_LEASE_RELEASE not in contract.ROLE_SCRIPTS[role]:
+            held = [
+                row
+                for row in rows(contract.INVARIANT_LEASE_SINGLE_HOLDER)
+                if row["resource"] == params["resource"]
+            ]
+            if not held:
+                raise ContractViolation(
+                    f"{adapter.driver_module}: no live holder on "
+                    f"{params['resource']!r} at now_ms={now_ms}, so "
+                    "'at most one live holder' would assert nothing"
+                )
+
+        observer = controller.observer(role)
+        for key in adapter.effect_keys(role, case):
+            if observer.effect_count(key) != 1:
+                raise ContractViolation(
+                    f"{adapter.driver_module}: the destination observer cannot "
+                    f"see the effect for {key!r}"
+                )
+
+
 #: The battery, as data, so a report can name what ran.
 BATTERY = (
     "checkpoint-blocks",
@@ -473,4 +539,5 @@ BATTERY = (
     "vocabulary-matches",
     "driver-cli",
     "invariant-queries",
+    "invariant-queries-not-vacuous",
 )

@@ -135,3 +135,19 @@ def test_the_driver_accepts_the_contract_cli(adapter: Any) -> None:
 @pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)
 def test_the_invariant_queries_bind_the_contract_parameters(adapter: Any) -> None:
     conformance.check_invariant_queries_bind_the_contract_parameters(adapter)
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)
+@pytest.mark.parametrize("role", contract.ROLES)
+def test_the_invariant_queries_can_see_the_rows_they_are_asserted_over(
+    adapter: Any, role: str, tmp_path: Path
+) -> None:
+    """The guard against the quietest harness failure there is.
+
+    An invariant of the form "this result set is empty" is satisfied both by a
+    healthy system and by a query that matches nothing. The second is not a
+    weaker test, it is no test -- and it does not announce itself, because the
+    run stays green. So each query is also asserted in the positive direction.
+    """
+
+    conformance.check_invariant_queries_are_not_vacuous(adapter, tmp_path, role=role)

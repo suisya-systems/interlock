@@ -18,10 +18,10 @@ from tests.fault_injection.controller import (
     Controller,
     assert_invariants,
     execute_case,
+    repro_line,
 )
 
-_CASES = policy.selected_cases()
-_SKIPPED = policy.skipped_cases()
+_CASES = policy.profile_selected_cases()
 
 
 def _timeout(case: Mapping[str, Any], profile: Mapping[str, Any]) -> float:
@@ -40,9 +40,16 @@ def test_manifest_case(
 ) -> None:
     """Run one manifest case and assert exactly what it declared.
 
-    Re-run a single failure with ``pytest tests/fault_injection -k <case_id>``
-    and the suite seed from the ``S9-REPRO`` line the failure prints.
+    Every failure -- an invariant, a barrier that was never reached, a case that
+    outran its budget, a role that exited some way other than by the signal --
+    carries the ``S9-REPRO`` line and the ``S9-RERUN`` command that reproduces
+    exactly this case. The harness-fault paths need it most: they are the ones
+    that happen on a runner nobody has a shell on.
     """
+
+    reason = policy.lane_skip_reason(case)
+    if reason is not None:
+        pytest.skip(reason)
 
     with Controller(
         workdir=tmp_path / "case",
@@ -51,23 +58,43 @@ def test_manifest_case(
         suite_seed=policy.suite_seed(),
         barrier_timeout_s=float(profile["barrier_timeout_s"]),
         case_timeout_s=_timeout(case, profile),
+        profile=str(profile["name"]),
     ) as controller:
-        outcome = execute_case(controller, case)
-        assert_invariants(
-            controller, case, resolved_skew_ms=outcome["resolved_skew_ms"]
-        )
+        try:
+            outcome = execute_case(controller, case)
+            assert_invariants(
+                controller,
+                case,
+                resolved_skew_ms=outcome["resolved_skew_ms"],
+                at_kill=outcome["at_kill"],
+                unresolved_at_kill=outcome["unresolved_at_kill"],
+            )
+        except BaseException as error:
+            line = repro_line(
+                case_id=case["case_id"],
+                suite_seed=policy.suite_seed(),
+                manifest_version=case["manifest_version"],
+                profile=str(profile["name"]),
+            )
+            if line.splitlines()[0] not in str(error):
+                raise type(error)(f"{error}\n{line}") from error
+            raise
 
 
-def test_the_cases_this_os_skips_are_enumerable() -> None:
+def test_what_this_os_does_not_run_is_enumerable() -> None:
     """What does not run on an OS is listed, never silent (design 8.1).
 
-    The assertion is not that the list is empty -- on macOS and Windows it is
-    not -- but that every skipped case names the lane that excluded it, so a
-    gate reader can tell "did not run here" from "passed".
+    Every profile case is collected as a test item on every OS. The ones this
+    host cannot run skip with the lane named in the reason, so a gate reader can
+    tell "did not run here" from "passed" by reading the report alone. This test
+    asserts the *rule*: nothing is ever excluded for a reason other than a lane.
     """
 
-    for case in _SKIPPED:
-        assert case["lane"] not in policy.active_lanes(), case["case_id"]
+    for case in _CASES:
+        reason = policy.lane_skip_reason(case)
+        if reason is None:
+            continue
         assert case["lane"] == "linux", (
-            f"{case['case_id']} was skipped for a reason other than the lane"
+            f"{case['case_id']} is skipped for a reason other than its lane"
         )
+        assert case["lane"] in reason and "design 8.1" in reason

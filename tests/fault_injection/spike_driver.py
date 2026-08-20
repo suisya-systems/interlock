@@ -323,6 +323,22 @@ class _DroppingDropbox:
         return self._inner.attempt_count(idempotency_key)
 
 
+def _deliverable(ctx: "Context") -> int:
+    """How many of this role's messages this generation may deliver.
+
+    Only ``dup-delivery`` narrows it, and only in the first generation:
+    ``ACCEPTANCE.md`` section 2's dedup row asks for a **restart between the
+    duplicate arrivals**, so the first copy is delivered and acked before the
+    kill-free restart and the duplicate arrives afterwards, into a destination
+    that has already seen the key. Delivering both before the restart would make
+    the restart a no-op and the recovery assertion vacuous.
+    """
+
+    if BEHAVIOUR_DUP_DELIVERY in ctx.behaviours and ctx.restart_generation == 0:
+        return 1
+    return ctx.messages
+
+
 def _dropbox_root(workdir: Path, role: str) -> Path:
     """One destination directory per role: its *own* destination (design 2.1)."""
 
@@ -769,17 +785,31 @@ def op_enqueue(ctx: Context, outbox: Outbox) -> None:
 
 
 def op_attempt(ctx: Context, outbox: Outbox) -> None:
-    """The record -> effect -> result path: where all four windows live."""
+    """The record -> effect -> result path: where all four windows live.
+
+    Scoped to **this role's own rows**, by the message ids this role derives
+    from its own holder identity. That scoping is load-bearing rather than
+    tidy: ``Outbox.due()`` returns every unacked row in the database, not the
+    rows of the outbox object's own ``(resource, holder)``, and the fence it
+    validates is ``writer_epoch = :epoch`` against *this* writer's live lease --
+    so with every role sitting at epoch 1 (which is the normal case, since each
+    holds a different resource) one role's delivery loop will happily deliver
+    another role's messages into its own destination. Disjoint write-sets are
+    what makes a combination case a cross-role interleaving rather than three
+    processes doing each other's work (design 2.1 item 5), so the driver scopes
+    what the API does not.
+    """
 
     assert ctx.lease is not None
-    for message in outbox.due(ctx.clock.now_ms()):
-        if message.status == "acked":
+    due = {message.message_id: message for message in outbox.due(ctx.clock.now_ms())}
+    for index in range(_deliverable(ctx)):
+        message_id = ctx.message_id(index)
+        message = due.get(message_id)
+        if message is None or message.status == "acked":
             continue
         now_ms = ctx.clock.advance()
         try:
-            result = outbox.attempt(
-                message.message_id, now_ms=now_ms, epoch=ctx.lease.epoch
-            )
+            result = outbox.attempt(message_id, now_ms=now_ms, epoch=ctx.lease.epoch)
             outcome = "delivered"
             deduplicated = result.deduplicated
         except DestinationRefusal as error:
@@ -800,7 +830,7 @@ def op_attempt(ctx: Context, outbox: Outbox) -> None:
                 "event": EVENT_STEP,
                 "operation": OPERATION_ATTEMPT,
                 "outcome": outcome,
-                "message_id": message.message_id,
+                "message_id": message_id,
                 "deduplicated": deduplicated,
                 "now_ms": now_ms,
             }
@@ -997,7 +1027,25 @@ _INVARIANT_QUERIES: Mapping[str, str] = {
     # The applied-write history for one resource, in the database's own
     # insertion order -- never in the caller's skewed clock order. A non-empty
     # epoch regression here is the interleaving ACCEPTANCE.md section 2 forbids.
-    contract.INVARIANT_LINEAR_WRITER_HISTORY: lease_module.WRITE_HISTORY_QUERY,
+    # The applied-write history for one role's own write scope, in the
+    # database's own insertion order -- never in the caller's skewed clock
+    # order. A non-empty epoch regression here is the interleaving
+    # ACCEPTANCE.md section 2 forbids.
+    #
+    # Scoped by ``run_id`` and not by resource, because ``action`` has no
+    # resource column (docs/lease-fencing.md records the limit) and S6's
+    # workaround -- encoding the resource in ``action.kind`` via
+    # ``effect_kind`` -- only reaches the rows S6 itself writes. S7's delivery
+    # rows carry the handler's bare ``kind`` ("notify"), so a resource-suffix
+    # filter would silently match nothing and this invariant would be vacuous.
+    # Every role has its own run, so ``run_id`` is per-resource in practice.
+    contract.INVARIANT_LINEAR_WRITER_HISTORY: """
+        SELECT rowid AS write_seq, action_id, kind, status, writer_epoch,
+               refusal_reason, created_at_ms, applied_at_ms
+          FROM action
+         WHERE run_id = :scope
+         ORDER BY write_seq
+    """,
     # The refusal of a stale writer, durable and query-answerable. This is a
     # SQL query over a persisted row, not a harness event-trace line: the trace
     # would only prove the harness saw an exception (design 5).
@@ -1012,9 +1060,8 @@ _INVARIANT_QUERIES: Mapping[str, str] = {
     contract.INVARIANT_NO_PENDING_ACTION: """
         SELECT action_id, kind, idempotency_key, writer_epoch, created_at_ms
           FROM action
-         WHERE status = 'pending'
-           AND (:resource IS NULL
-                OR substr(kind, -(length(:resource) + 1)) = '@' || :resource)
+         WHERE run_id = :scope
+           AND status = 'pending'
          ORDER BY rowid
     """,
     # One live holder per resource at the observation instant. The spike schema
@@ -1124,7 +1171,7 @@ class SpikeAdapter:
             # suffix, and a looser pattern would sweep the claimant's rows into
             # assertions scoped to this role.
             "holder_prefix": f"{holder_of(role)}-m%",
-            "kind": None,
+            "scope": run_id_of(role),
             "now_ms": int(now_ms),
         }
 

@@ -40,6 +40,13 @@ PROFILE_ENV = "S9_PROFILE"
 DEFAULT_SUITE_SEED = 20_260_820
 
 
+#: Wall-clock seconds spent inside this package's own tests, accumulated by the
+#: report hook below.
+_SPENT_S = {"total": 0.0}
+
+_PACKAGE = "tests/fault_injection"
+
+
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "fault_injection: a case from the S9 manifest (Issue #15)"
@@ -47,6 +54,20 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers", "linux_lane: needs the Linux conformance lane (design 8.1)"
     )
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Charge only this package's time to this package's budget.
+
+    The suite budget (design 9) is a budget for the fault-injection suite. CI
+    runs the whole repository in one session, so measuring from the first case to
+    session teardown would charge every unrelated test -- and every slow
+    subprocess test that happens to sort after this package -- to the S9 number,
+    turning an unrelated slowdown into a red S9 build.
+    """
+
+    if report.nodeid.startswith(_PACKAGE):
+        _SPENT_S["total"] += float(getattr(report, "duration", 0.0) or 0.0)
 
 
 def suite_seed() -> int:
@@ -95,37 +116,53 @@ def profile(manifest: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _suite_watchdog(profile: Mapping[str, Any]) -> Any:
-    """The outermost of the three watchdogs (design 8.2), on monotonic time."""
+def _suite_budget(profile: Mapping[str, Any]) -> Any:
+    """The outermost of the three budgets (design 9).
 
-    started = time.monotonic()
+    It is a budget check and not a hang detector, deliberately: a hang is caught
+    by the per-barrier and per-case deadlines inside the controller, which run on
+    host monotonic time and convert a wedged case into an attributable failure
+    with its trace attached. This one exists so that *growth* -- a matrix that
+    creeps past its runtime allowance without ever hanging -- becomes an explicit
+    budget diff.
+    """
+
     yield
-    elapsed = time.monotonic() - started
+    elapsed = _SPENT_S["total"]
     budget = float(profile["suite_timeout_s"])
     if elapsed > budget:
         pytest.fail(
-            f"the S9 {profile['name']} profile took {elapsed:.0f}s, over its "
-            f"{budget:.0f}s budget (design 9): prune the matrix or raise the "
-            "budget in an explicit diff"
+            f"the S9 {profile['name']} profile spent {elapsed:.0f}s in "
+            f"{_PACKAGE}, over its {budget:.0f}s budget (design 9): prune the "
+            "matrix or raise the budget in an explicit diff"
         )
 
 
-def selected_cases() -> list[dict]:
-    """The cases this run executes, after profile and lane selection."""
+def profile_selected_cases() -> list[dict]:
+    """Every case this profile declares, on every lane.
+
+    Lane selection is deliberately **not** applied here. Design section 8.1 asks
+    for a ``pytest`` skip elsewhere, "so what does not run on an OS is
+    enumerable, never silent" -- and a case filtered out before parametrisation
+    produces no test id at all, which reads in a report exactly like a case that
+    passed. Every profile case therefore becomes a test item; the ones this OS
+    cannot run skip with their lane named.
+    """
 
     loaded = manifest_module.load_manifest()
-    return manifest_module.profile_cases(
-        loaded, profile=profile_name(), lanes=active_lanes()
-    )
+    name = profile_name()
+    return [case for case in loaded["cases"] if name in case["profiles"]]
 
 
-def skipped_cases() -> list[dict]:
-    """Cases this OS cannot run, so what did not run stays enumerable."""
+def lane_skip_reason(case: Mapping[str, Any]) -> str | None:
+    """Why this OS does not run ``case``, or ``None`` if it does."""
 
-    loaded = manifest_module.load_manifest()
     lanes = active_lanes()
-    return [
-        case
-        for case in loaded["cases"]
-        if profile_name() in case["profiles"] and case["lane"] not in lanes
-    ]
+    if case["lane"] in lanes:
+        return None
+    return (
+        f"case is on the {case['lane']} lane; this host ({sys.platform}) runs "
+        f"{'/'.join(lanes)}. macOS would run the signal cases and deliberately "
+        "does not: a single-lane conformance claim means a macOS scheduler "
+        "flake can never block the gate (design 8.1)"
+    )

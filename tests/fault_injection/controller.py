@@ -66,6 +66,16 @@ class CaseTimeout(AssertionError):
     """A case outran its budget (design 9). Converted from a CI hang."""
 
 
+#: The node id template a reproduction line hands the reader.
+#:
+#: A node id and not ``-k <case_id>``: ``-k`` is a substring match and the
+#: manifest's grammar makes case ids substrings of one another
+#: (``disp__attempt__before_durable_write__sigkill`` is inside both
+#: ``...__occ2`` and ``sup+disp__attempt__...``), so the documented "re-run this
+#: one case" would quietly run three. The node id selects exactly one.
+CASE_NODE_ID = "tests/fault_injection/test_cases.py::test_manifest_case[{case_id}]"
+
+
 def repro_line(
     *,
     case_id: str,
@@ -73,18 +83,28 @@ def repro_line(
     manifest_version: int,
     contract_version: int = contract.FAULT_RUNNER_CONTRACT_VERSION,
     resolved_skew_ms: int | None = None,
+    profile: str | None = None,
 ) -> str:
     """The single reproduction line a failing case prints (design 4.4).
 
-    Re-run with ``pytest tests/fault_injection -k <case_id>`` and the suite seed
-    in ``S9_SUITE_SEED``. Same case id, same suite seed, same manifest version
-    give the same armed windows, the same payloads and the same schedule.
+    It carries the profile as well as the seed, because the profile is a third
+    input to *selection*: two thirds of the matrix is ``full``-only, and the
+    re-run of a nightly failure under the default ``fast`` profile would collect
+    no tests at all and report success by collecting nothing.
+
+    Same case id, same suite seed, same manifest version give the same armed
+    windows, the same payloads and the same schedule decisions.
     """
 
+    command = (
+        f"S9_PROFILE={profile or 'fast'} S9_SUITE_SEED={suite_seed} "
+        f"pytest '{CASE_NODE_ID.format(case_id=case_id)}'"
+    )
     return (
         f"S9-REPRO case_id={case_id} suite_seed={suite_seed} "
         f"manifest_version={manifest_version} contract_version={contract_version} "
-        f"resolved_skew_ms={resolved_skew_ms}"
+        f"resolved_skew_ms={resolved_skew_ms} profile={profile or 'fast'}\n"
+        f"S9-RERUN {command}"
     )
 
 
@@ -306,7 +326,9 @@ class Controller:
         suite_seed: int,
         barrier_timeout_s: float,
         case_timeout_s: float,
+        profile: str | None = None,
     ) -> None:
+        self.profile = profile
         self.workdir = Path(workdir)
         self.adapter = adapter
         self.case = dict(case)
@@ -323,6 +345,7 @@ class Controller:
     # -- lifecycle ---------------------------------------------------------
 
     def bootstrap(self) -> None:
+        self._check_deadline()
         self.adapter.bootstrap(
             self.db_path,
             roles=tuple(self.case["targets"]),
@@ -495,26 +518,60 @@ class Controller:
 
     # -- faults ------------------------------------------------------------
 
-    def kill(self, role: str, *, assert_exit_status: bool) -> int:
+    def kill(self, role: str, *, assert_exit_status: bool = _POSIX) -> int:
         """Phase two: a real, uncatchable kill of a process inside its window.
 
-        On the Linux conformance lane the exit status is asserted to be
-        ``-SIGKILL``: a role process that exited any other way did not
-        experience the crash the case is about, and that is a harness error.
-        On the portable lane the same effect is produced by ``Popen.kill()``
-        (``TerminateProcess`` on Windows) and only the invariants are asserted.
+        The exit status is asserted to be ``-SIGKILL`` **wherever the platform
+        can report it**, which is every POSIX host regardless of the case's
+        lane. Keying that check on the lane instead would have left the twelve
+        (role x window) cells that gate item 4 is read from -- all on the
+        portable lane -- accepting a role process that exited any other way,
+        including one that was never killed at all. The lane governs where
+        *gate evidence* is read from (design 8.1); it does not govern whether
+        the harness checks its own work. Windows produces the same no-unwind
+        crash through ``TerminateProcess`` and reports no signal, so there the
+        invariants are the whole assertion.
         """
 
         process = self.processes[role]
+        if process.reaped:
+            # Already exited and reaped: its pid may have been recycled, and
+            # signalling a recycled id is the one thing design section 8.2
+            # forbids outright. The recorded exit status is the answer, and for
+            # a kill case it is the wrong one -- which is the point.
+            status = process.popen.returncode
+            if assert_exit_status and status != -signal.SIGKILL:
+                raise ContractViolation(
+                    f"{role} exited {status}, not -SIGKILL: the case did not "
+                    "inject the crash it claims to have injected"
+                )
+            return status
         if _POSIX:
-            os.kill(process.pid, signal.SIGKILL)
+            try:
+                os.kill(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                # It died on its own between the barrier and the kill. Not an
+                # error here: the exit-status assertion below is what decides
+                # whether the case still means anything.
+                pass
+            # The leader is dead but deliberately **not yet reaped**, so its pid
+            # -- and therefore the group's pgid -- cannot have been recycled.
+            # That is the only window in which it is safe to sweep the group,
+            # and sweeping it is not optional: a role process that forked a
+            # child (which is exactly what the I-12/I-14 real-component adapters
+            # will do) would otherwise leave that grandchild running, holding
+            # the controller's pipe open, after every kill case. The reap stays
+            # last (design 8.2).
+            if process.pgid is not None:
+                try:
+                    os.killpg(process.pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
         else:  # pragma: no cover - Windows jobs only
             process.popen.kill()
-        # The reap is what releases the pid, and therefore the pgid, for reuse;
-        # nothing may signal this group afterwards (design 8.2).
         status = process.popen.wait(timeout=self._remaining(self.barrier_timeout_s))
         process.reaped = True
-        if assert_exit_status and _POSIX and status != -signal.SIGKILL:
+        if assert_exit_status and status != -signal.SIGKILL:
             raise ContractViolation(
                 f"{role} exited {status}, not -SIGKILL: the case did not inject "
                 "the crash it claims to have injected"
@@ -530,6 +587,28 @@ class Controller:
         process = self.processes[role]
         os.kill(process.pid, signal.SIGSTOP)
         process.stopped = True
+
+    def assert_no_progress_while_stopped(self, role: str, *, settle_s: float = 0.5) -> None:
+        """A stopped process consumes nothing. Checked, not assumed.
+
+        The controller has already written ``continue`` to the control pipe. A
+        running process would answer it within microseconds; a stopped one
+        cannot answer it at all until ``SIGCONT``. If an event arrives here the
+        pause did not take, and the case's whole determinism argument -- that
+        pause / takeover / return is a sequence rather than a race -- is void.
+        """
+
+        process = self.processes[role]
+        if not process.stopped:
+            raise ContractViolation(f"{role} was never stopped")
+        try:
+            event = process.events.get(timeout=settle_s)
+        except queue.Empty:
+            return
+        raise ContractViolation(
+            f"{role} produced {event!r} while stopped: SIGSTOP did not take, so "
+            "the pause/takeover/return order was a scheduling accident"
+        )
 
     def sigcont(self, role: str) -> None:
         process = self.processes[role]
@@ -604,6 +683,17 @@ class Controller:
             return [dict(zip(columns, row)) for row in cursor.fetchall()]
         finally:
             connection.close()
+
+    def last_reported_now_ms(self, *, default: int) -> int:
+        """The latest instant any role reported, in the injected frame."""
+
+        instants = [
+            int(event["now_ms"])
+            for entry in self.all_traces()
+            for event in entry["trace"]
+            if isinstance(event.get("now_ms"), int)
+        ]
+        return max(instants) if instants else default
 
     def traces(self) -> Mapping[str, Sequence[Mapping[str, Any]]]:
         return {role: tuple(process.trace) for role, process in self.processes.items()}
@@ -777,43 +867,59 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
     the clock programme. Nothing here decides anything a case did not declare --
     that is what makes ``case_id + manifest_version`` denote one fully-specified
     case (design 4.1).
+
+    Two observations are taken *during* the run and returned, because they
+    cannot be reconstructed afterwards:
+
+    ``at_kill``
+        the destination's effect count for each target, read between phase two
+        and the restart. This is what proves the window was the window: a kill
+        at ``after_effect_before_record`` must find the effect already present,
+        and a kill at ``before_durable_write`` must find it absent. Read only at
+        the end of the case, both look identical -- recovery has re-attempted by
+        then -- and the harness would be certifying the third ACCEPTANCE.md
+        section 2 window without ever having entered it.
+
+    ``unresolved_at_kill``
+        the outbox rows still unacked at the same moment, so a restart case can
+        assert that recovery had something to recover.
     """
 
     targets: Sequence[str] = case["targets"]
     fault = case["fault"]
-    linux_lane = case["lane"] == contract.LANE_LINUX
+    barrier_mode = case["barrier"]
     resolved_skew_ms: int | None = None
 
     controller.bootstrap()
     for role in targets:
         controller.spawn(role, armed=_armed(case, role))
 
-    if fault == "staggered-sigkill":
+    if barrier_mode == contract.BARRIER_STAGGERED:
         # Kills are not barrier-simultaneous: A dies at its checkpoint, B keeps
         # operating against the survivor state, then B dies at a later armed
-        # checkpoint (design 5).
+        # checkpoint (design 5). Dispatch is on the *barrier mode*, which is the
+        # field design section 5 defines combination semantics on -- not on the
+        # fault string, which would leave the declared mode unread.
         for step in case["staggered"]:
             controller.wait_at_anchor(step["wait"])
-            controller.kill(step["kill"], assert_exit_status=linux_lane)
-    elif fault == "sigkill":
+            controller.kill(step["kill"])
+    elif fault in ("sigkill", "staggered-sigkill"):
         # Aligned mode: every target is frozen inside its window before any kill
         # is issued, so the kill set is applied to a known joint state.
         controller.barrier_aligned(targets)
         for role in case["kill_order"]:
-            controller.kill(role, assert_exit_status=linux_lane)
+            controller.kill(role)
     elif fault in ("clock-fwd", "clock-back", "sigstop-expire"):
         role = targets[0]
         controller.wait_at_anchor(role)
         if fault == "sigstop-expire":
             # Only while the holder is provably blocked at its sync point:
-            # already holding its lease and between operations. Being stopped it
-            # cannot consume the ``continue`` until it is resumed, which is what
-            # makes pause / takeover / return a sequence rather than a race.
+            # already holding its lease and between operations.
             controller.sigstop(role)
         claimant = case["claimant"]
         if claimant is not None:
             resolved_skew_ms = contract.resolve_skew_ms(
-                "forward", ttl_ms=case["ttl_ms"], elapsed_ms=0
+                claimant["clock"], ttl_ms=case["ttl_ms"], elapsed_ms=case["ttl_ms"]
             )
             controller.spawn_claimant(
                 claimant["role"],
@@ -822,27 +928,58 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
             )
             controller.run_to_completion(_claimant_key(claimant["role"]))
         if fault == "sigstop-expire":
+            # The design's determinism argument for this case is that a stopped
+            # process *cannot consume the continue until it is resumed*, so the
+            # pause / takeover / return order is a sequence and not a scheduling
+            # accident. That argument is only worth anything if it is checked:
+            # the release is issued while the holder is still stopped, and the
+            # holder must make no progress on it. Without this the signal is
+            # decoration -- the process was already blocked on its control pipe.
+            controller.release(role)
+            controller.assert_no_progress_while_stopped(role)
             controller.sigcont(role)
-        skew = case["skew"]
-        if skew is not None:
-            # Same-role skew: the offset lands while the process is blocked and
-            # the *next* operation observes it. An expectation depending on an
-            # in-flight call seeing a mid-call skew is refused at validation.
-            resolved_skew_ms = contract.resolve_skew_ms(
-                skew["direction"],
-                ttl_ms=case["ttl_ms"],
-                elapsed_ms=case["ttl_ms"],
-            )
-            controller.set_clock_offset(role, resolved_skew_ms)
-        controller.release(role)
+        else:
+            skew = case["skew"]
+            if skew is not None:
+                # Same-role skew: the offset lands while the process is blocked
+                # and the *next* operation observes it.
+                resolved_skew_ms = contract.resolve_skew_ms(
+                    skew["direction"],
+                    ttl_ms=case["ttl_ms"],
+                    elapsed_ms=case["ttl_ms"],
+                )
+                controller.set_clock_offset(role, resolved_skew_ms)
+            controller.release(role)
         controller.run_to_completion(role)
     elif fault in ("drop-delivery", "dup-delivery", "lost-ack"):
         role = targets[0]
         controller.wait_at_anchor(role)
+        if not case["release_after_barrier"]:  # pragma: no cover - all seeds release
+            raise ContractViolation(
+                f"{case['case_id']}: a delivery-surface fault anchors at a "
+                "pass-through barrier and must declare release_after_barrier"
+            )
         controller.release(role)
         controller.run_to_completion(role)
     else:  # pragma: no cover - FAULT_KINDS is closed and validated
         raise ContractViolation(f"unknown fault kind {fault!r}")
+
+    at_kill = {
+        role: {
+            key: controller.observer(role).effect_count(key)
+            for key in controller.adapter.effect_keys(role, case)
+        }
+        for role in targets
+    }
+    unresolved_at_kill = {
+        role: controller.query(
+            contract.INVARIANT_RETRY_COUNT_DURABLE,
+            holder_prefix=controller.adapter.query_parameters(
+                role, now_ms=case["clock_base_ms"]
+            )["holder_prefix"],
+        )
+        for role in targets
+    }
 
     if case["restart_after"]:
         order = case["restart_order"]
@@ -858,11 +995,20 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
             controller.restart(role, armed=())
             controller.run_to_completion(role)
 
-    return {"resolved_skew_ms": resolved_skew_ms}
+    return {
+        "resolved_skew_ms": resolved_skew_ms,
+        "at_kill": at_kill,
+        "unresolved_at_kill": unresolved_at_kill,
+    }
 
 
 def assert_invariants(
-    controller: "Controller", case: Mapping[str, Any], *, resolved_skew_ms: int | None
+    controller: "Controller",
+    case: Mapping[str, Any],
+    *,
+    resolved_skew_ms: int | None,
+    at_kill: Mapping[str, Mapping[str, int]] | None = None,
+    unresolved_at_kill: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> None:
     """Assert exactly what the case declared, by name, and nothing else.
 
@@ -875,12 +1021,22 @@ def assert_invariants(
         suite_seed=controller.suite_seed,
         manifest_version=case["manifest_version"],
         resolved_skew_ms=resolved_skew_ms,
+        profile=controller.profile,
     )
 
     def fail(message: str) -> None:
         raise AssertionError(f"{message}\n{repro}\ntraces: {json.dumps(controller.all_traces())}")
 
-    now_ms = int(case["clock_base_ms"]) + int(case["ttl_ms"]) * 4
+    # The instant the final state is read at, in the injected frame: the latest
+    # ``now_ms`` any participant reported.
+    #
+    # A fixed ``base + 4 * ttl`` was the obvious choice and it is wrong: it sits
+    # past every lease's expiry, so ``lease-single-holder`` returns nothing on
+    # every case and ``no-unowned-outbox``'s liveness arm is false for every row
+    # -- two invariants that can then only ever pass. Reading at the last instant
+    # the run actually reached keeps both meaningful, and it is exactly the
+    # instant a recovering process would see.
+    now_ms = controller.last_reported_now_ms(default=int(case["clock_base_ms"]))
     expected = case["expected"]
 
     for role in case["targets"]:
@@ -911,10 +1067,35 @@ def assert_invariants(
                     if row["acked_rows"] != row["rows_total"]:
                         fail(f"{role}: dedup key {row['dedup_key']!r} is half-acked: {row}")
             elif name == contract.INVARIANT_LINEAR_WRITER_HISTORY:
+                # Non-vacuity first. "No epoch regression" over an empty history
+                # is true of a database nobody ever wrote to, and a query that
+                # silently matches nothing would report exactly that -- which is
+                # how this invariant was vacuous before the scope parameter
+                # existed. A history that cannot see a write cannot see an
+                # interleaving either.
+                if not rows:
+                    fail(
+                        f"{role}: the write history is empty, so 'no interleaving' "
+                        "asserts nothing; the query is not seeing this role's writes"
+                    )
                 regressions = epoch_regressions(rows)
                 if regressions:
                     fail(f"{role}: a rejected writer interleaved: {regressions}")
             elif name == contract.INVARIANT_RECORDED_REFUSALS:
+                if case["fault"] == "clock-back":
+                    # The backward-skew row of ACCEPTANCE.md section 2 is about
+                    # the refusal, not about the absence of a symptom: a renewal
+                    # whose new expiry lands at or before its own acquisition is
+                    # refused outright rather than silently clamped, and that
+                    # refusal is what this case exists to observe.
+                    skew_refusals = [
+                        row for row in rows if row["refusal"] == "ClockSkewRefused"
+                    ]
+                    if not skew_refusals:
+                        fail(
+                            f"{role}: no ClockSkewRefused was recorded, so the "
+                            "backward skew never reached the expiry boundary"
+                        )
                 # The returning holder's write attempt is refused and that
                 # refusal is recorded, not silently dropped. This is a SQL query
                 # over a persisted row on purpose: an event-trace line would only
@@ -926,16 +1107,32 @@ def assert_invariants(
                     fail(f"{role}: recovery left {len(rows)} action(s) pending: {rows}")
             elif name == contract.INVARIANT_LEASE_SINGLE_HOLDER:
                 held = [row for row in rows if row["resource"] == params["resource"]]
+                if not held and case["fault"] != "sigstop-expire":
+                    # Same non-vacuity rule: "at most one live holder" over a
+                    # resource nobody holds is a statement about nothing. A
+                    # Secretary case is the one exception -- its script ends by
+                    # releasing, which is the point of the release step.
+                    if contract.OPERATION_LEASE_RELEASE not in contract.ROLE_SCRIPTS[role]:
+                        fail(
+                            f"{role}: no live holder on {params['resource']!r} at "
+                            f"now_ms={now_ms}, so the single-holder assertion is vacuous"
+                        )
                 if len(held) > 1:
                     fail(f"{role}: {len(held)} live holders on one resource: {held}")
                 if case["fault"] == "clock-back" and held:
-                    # A holder whose clock ran backwards shortens its own lease:
-                    # its authority ends earlier, never later (docs/lease-fencing.md).
-                    ceiling = int(case["clock_base_ms"]) + int(case["ttl_ms"])
-                    if held[0]["expires_at_ms"] >= ceiling:
+                    # A holder whose clock ran backwards never gains authority:
+                    # a renewal landing at or before the acquisition is refused
+                    # outright, and one that is accepted only ever shortens. So
+                    # the expiry may never exceed what the acquisition itself
+                    # bought (docs/lease-fencing.md, "Holder's clock slow on
+                    # renewal"). The ceiling is measured against the row's own
+                    # acquisition rather than against the clock base, because the
+                    # acquisition instant is what the TTL was added to.
+                    ceiling = int(held[0]["acquired_at_ms"]) + int(case["ttl_ms"])
+                    if held[0]["expires_at_ms"] > ceiling:
                         fail(
                             f"{role}: a backward-skewed renewal extended the lease "
-                            f"to {held[0]['expires_at_ms']} (>= {ceiling})"
+                            f"to {held[0]['expires_at_ms']} (> {ceiling})"
                         )
 
         observer = controller.observer(role)
@@ -972,17 +1169,72 @@ def assert_invariants(
                     if count != 1:
                         fail(f"{role}: {key!r} produced {count} effects, not one")
             elif name == contract.INVARIANT_DELIVERED_IMPLIES_EFFECT:
+                # One effect *record* per delivery dedup key, counted over the
+                # destination's whole store and not only over the keys we
+                # expected: a per-key existence test cannot see an extra effect
+                # published under a key nobody asked about.
+                published = list(getattr(observer, "effects", lambda: ())())
+                if published and len(published) != len(set(keys)) and not superseded:
+                    fail(
+                        f"{role}: the destination holds {len(published)} effect "
+                        f"records for {len(set(keys))} dedup key(s): {published}"
+                    )
                 for key in keys:
                     if observer.attempt_count(key) < 1:
                         fail(f"{role}: {key!r} was never attempted at the destination")
                     if observer.effect_count(key) < 1:
                         fail(f"{role}: {key!r} is delivered in our rows but absent at the destination")
 
+    # -- the window was the window ----------------------------------------
+    #
+    # ACCEPTANCE.md section 2 calls the after-effect window "the one that proves
+    # idempotency rather than luck". Proving it requires knowing the effect was
+    # already at the destination when the process died -- which is only
+    # observable between the kill and the restart, because recovery re-attempts
+    # and both windows look identical afterwards.
+    if at_kill is not None and case["fault"] in ("sigkill", "staggered-sigkill"):
+        for role in case["targets"]:
+            anchors = [ArmedAnchor.parse(wire) for wire in case["arms"].get(role, ())]
+            counted = at_kill.get(role, {})
+            if not counted or not anchors:
+                continue
+            anchor = anchors[0].anchor
+            if anchor not in contract.CHECKPOINTS:
+                continue
+            if anchors[0].operation != contract.OPERATION_ATTEMPT:
+                # Only the delivery path has effect windows. A kill armed on
+                # ``ack`` sits *after* that role's delivery by construction, so
+                # counting effects against the anchor's name would be reading a
+                # window that operation does not have.
+                continue
+            occurrence = anchors[0].occurrence
+            present = sum(counted.values())
+            # Occurrence N means N-1 earlier deliveries have already completed,
+            # so the expected count is stated against the occurrence rather than
+            # against zero -- otherwise the ``occ2`` variant, which exists
+            # precisely to arm a later pass through the loop, would look like a
+            # kill that landed too late.
+            expected_effects = (
+                occurrence
+                if anchor in contract.EFFECT_BEARING_CHECKPOINTS
+                else occurrence - 1
+            )
+            if present != expected_effects:
+                fail(
+                    f"{role}: killed at occurrence {occurrence} of {anchor}, "
+                    f"where the destination should hold {expected_effects} "
+                    f"effect(s); it held {present}. The kill did not land inside "
+                    "the window this case claims to prove"
+                )
+
     owner = expected["recovery_owner"]
     if case["restart_after"] and owner is not None:
-        # "Somebody recovered it" is not an assertion (design 5): the case names
-        # which restarted role's recovery it holds responsible, and the evidence
-        # is that role's own recovery-complete event in a later generation.
+        # "Somebody recovered it" is not an assertion (design 5). Two things are
+        # checked, because the recovery-complete event alone is emitted by every
+        # restart and would be tautological: the named role signalled it, *and*
+        # there was unfinished work at the moment of the kill for its recovery to
+        # have driven to resolution. A case that left nothing unresolved proves
+        # nothing about recovery and is a manifest error, not a pass.
         recovered = [
             entry
             for entry in controller.all_traces()
@@ -992,3 +1244,21 @@ def assert_invariants(
         ]
         if not recovered:
             fail(f"{owner} never signalled recovery-complete after its restart")
+
+        if unresolved_at_kill is not None:
+            pending = [
+                row
+                for role in case["targets"]
+                for row in unresolved_at_kill.get(role, ())
+                if row.get("status") != "acked"
+            ]
+            missing = [
+                role
+                for role in case["targets"]
+                if not unresolved_at_kill.get(role)
+            ]
+            if not pending and not missing:
+                fail(
+                    "the kill left no unresolved work, so the restart recovered "
+                    "nothing and this case asserts recovery vacuously"
+                )

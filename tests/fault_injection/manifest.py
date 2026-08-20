@@ -159,7 +159,15 @@ def _case(
         "barrier": barrier,
         "arms": {role: list(anchors) for role, anchors in arms.items()},
         "kill_order": list(kill_order if kill_order is not None else targets),
-        "restart_order": list(restart_order if restart_order is not None else targets),
+        # Design section 5: "restart_order -- explicit ordered list (default:
+        # same as kill_order)". Defaulting to targets instead would silently
+        # give a case with an explicit kill order a restart order its author
+        # never declared.
+        "restart_order": list(
+            restart_order
+            if restart_order is not None
+            else (kill_order if kill_order is not None else targets)
+        ),
         "expected": {
             "queries": list(expected.get("queries", ())),
             "destination": list(expected.get("destination", ())),
@@ -285,11 +293,14 @@ def build_cases() -> list[dict]:
     # new clock; and same-role skew, observed by the script's *next* operation.
     # A case whose expectation depends on an in-flight call seeing a mid-call
     # skew is invalid by construction and refused at validation.
+    # Backward skew is observed by a *renewal* being refused, so a backward case
+    # is only meaningful for a role whose script renews. The Secretary's does
+    # not -- it releases instead -- so it carries a forward case.
     for role, direction, profiles in (
         (ROLE_SUPERVISOR, "backward", ("fast", "full")),
         (ROLE_DISPATCHER, "forward", ("fast", "full")),
-        (ROLE_SECRETARY, "backward", ("full",)),
-        (ROLE_SUPERVISOR, "forward", ("full",)),
+        (ROLE_DISPATCHER, "backward", ("full",)),
+        (ROLE_SECRETARY, "forward", ("full",)),
     ):
         forward = direction == "forward"
         cases.append(
@@ -323,6 +334,10 @@ def build_cases() -> list[dict]:
                     "queries": _TAKEOVER_QUERIES if forward else (
                         contract.INVARIANT_LEASE_SINGLE_HOLDER,
                         contract.INVARIANT_LINEAR_WRITER_HISTORY,
+                        # The backward direction's whole observable: the renewal
+                        # that would have landed at or before its own
+                        # acquisition is refused, and the refusal is recorded.
+                        contract.INVARIANT_RECORDED_REFUSALS,
                     ),
                     "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
                     "recovery_owner": None,
@@ -565,6 +580,16 @@ def validate_case(case: Mapping[str, Any]) -> None:
         )
     if case["fault"] == "staggered-sigkill" and case["barrier"] != BARRIER_STAGGERED:
         raise ContractViolation(f"{case_id}: a staggered kill declares staggered mode")
+    if case["barrier"] == BARRIER_STAGGERED and not case["staggered"]:
+        # The controller dispatches on the barrier mode, so a case that declares
+        # staggered without naming its sequence would have no sequence to run.
+        raise ContractViolation(
+            f"{case_id}: staggered mode names its full sequence (design 5)"
+        )
+    if case["staggered"] and case["barrier"] != BARRIER_STAGGERED:
+        raise ContractViolation(
+            f"{case_id}: a staggered sequence is only run in staggered mode"
+        )
 
     for role, anchors in case["arms"].items():
         if role not in ROLES:
@@ -614,11 +639,18 @@ def validate_case(case: Mapping[str, Any]) -> None:
     # ACCEPTANCE.md section 2: a case that asserts exactly-once for an external
     # effect using only our own rows does not pass. So a case anchored inside or
     # after an effect window must name a destination assertion.
-    if case["checkpoint"] in EFFECT_BEARING_CHECKPOINTS and not expected["destination"]:
+    anchored_in_effect_window = case["checkpoint"] in EFFECT_BEARING_CHECKPOINTS or any(
+        ArmedAnchor.parse(wire).anchor in EFFECT_BEARING_CHECKPOINTS
+        for anchors in case["arms"].values()
+        for wire in anchors
+    )
+    if anchored_in_effect_window and not expected["destination"]:
         raise ContractViolation(
-            f"{case_id}: anchored at {case['checkpoint']}, where SQLite alone "
-            "cannot tell a completed effect from one that never started -- name "
-            "a destination assertion"
+            f"{case_id}: armed inside or after an effect window, where SQLite "
+            "alone cannot tell a completed effect from one that never started "
+            "-- name a destination assertion. The check reads the armed anchors "
+            "and not only the case-id classification, because in a combination "
+            "case a secondary role can be the one armed in the effect window"
         )
 
     if expected["recovery_owner"] is not None and expected["recovery_owner"] not in ROLES:
@@ -642,6 +674,29 @@ def validate_case(case: Mapping[str, Any]) -> None:
             f"{case_id}: a cross-role skew is observed by the sibling acting "
             "under its new clock (design 7)"
         )
+
+    if case["fault"] in ("drop-delivery", "dup-delivery", "lost-ack"):
+        if not case["release_after_barrier"]:
+            raise ContractViolation(
+                f"{case_id}: a delivery-surface fault anchors at a pass-through "
+                "barrier and declares release_after_barrier"
+            )
+        if case["incident_params"] is None:
+            raise ContractViolation(
+                f"{case_id}: the dedup row of ACCEPTANCE.md section 2 requires "
+                "both Q-0002 (collapse semantics) and Q-0003 (reconcile "
+                "interval) to be parameterised rather than hard-coded; carry "
+                "them as manifest fields, unset"
+            )
+        for key in ("collapse", "reconcile_interval_ms"):
+            if key not in case["incident_params"]:
+                raise ContractViolation(f"{case_id}: incident_params omits {key!r}")
+            if case["incident_params"][key] is not None:
+                raise ContractViolation(
+                    f"{case_id}: {key!r} is fixed to "
+                    f"{case['incident_params'][key]!r}; S9 fixes no value for an "
+                    "open question (design 10)"
+                )
 
     if case["ttl_ms"] <= 0 or case["clock_base_ms"] <= 0:
         raise ContractViolation(f"{case_id}: the lease geometry is positive")

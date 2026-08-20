@@ -222,6 +222,8 @@ ROLE_SCRIPTS: Mapping[str, tuple[str, ...]] = {
         OPERATION_ATTEMPT,
         OPERATION_ACK,
     ),
+    # The delivery loop: hold the writer lease across the whole run, renewing
+    # rather than releasing, and take rows through record -> effect -> result.
     ROLE_DISPATCHER: (
         OPERATION_LEASE_ACQUIRE,
         OPERATION_LEASE_RENEW,
@@ -229,12 +231,17 @@ ROLE_SCRIPTS: Mapping[str, tuple[str, ...]] = {
         OPERATION_ATTEMPT,
         OPERATION_ACK,
     ),
+    # The intake/ack side: enqueue, deliver, ack, and then hand the resource
+    # back. The release is not decoration -- it is the step neither other script
+    # performs, so the Secretary's write-set ends on a lease-row mutation the
+    # Dispatcher never makes and the two scripts are not one function under two
+    # names (design 2.1 item 5).
     ROLE_SECRETARY: (
         OPERATION_LEASE_ACQUIRE,
-        OPERATION_LEASE_RENEW,
         OPERATION_ENQUEUE,
         OPERATION_ATTEMPT,
         OPERATION_ACK,
+        OPERATION_LEASE_RELEASE,
     ),
 }
 
@@ -424,13 +431,20 @@ INVARIANT_NAMES = SQL_INVARIANTS + DESTINATION_INVARIANTS
 #: so a durable test can supply them without knowing the schema behind them; the
 #: adapter's SQL must use exactly these and no others, and the conformance
 #: battery checks that it does.
+#:
+#: ``scope`` is deliberately not ``resource``. The spike schema's effect table
+#: has no resource column at all -- a known limit recorded in
+#: ``docs/lease-fencing.md`` -- so an adapter must be free to scope a history
+#: query by whatever its schema actually carries. Naming the parameter after the
+#: *question* ("this role's own write scope") rather than after one schema's
+#: answer is what keeps the durable assertion re-bindable.
 INVARIANT_PARAMETERS: Mapping[str, tuple[str, ...]] = {
     INVARIANT_NO_UNOWNED_OUTBOX: ("resource", "now_ms"),
     INVARIANT_RETRY_COUNT_DURABLE: ("holder_prefix",),
     INVARIANT_SINGLE_ACKED_STATE: ("holder_prefix",),
-    INVARIANT_LINEAR_WRITER_HISTORY: ("resource", "kind"),
+    INVARIANT_LINEAR_WRITER_HISTORY: ("scope",),
     INVARIANT_RECORDED_REFUSALS: ("resource", "holder"),
-    INVARIANT_NO_PENDING_ACTION: ("resource",),
+    INVARIANT_NO_PENDING_ACTION: ("scope",),
     INVARIANT_LEASE_SINGLE_HOLDER: ("now_ms",),
 }
 

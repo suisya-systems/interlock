@@ -819,7 +819,8 @@
         ],
         "queries": [
           "lease-single-holder",
-          "linear-writer-history"
+          "linear-writer-history",
+          "recorded-refusals"
         ],
         "recovery_owner": null
       },
@@ -909,13 +910,13 @@
     },
     {
       "arms": {
-        "sec": [
+        "disp": [
           "lease-acquire@lease-acquired:1"
         ]
       },
       "barrier": "aligned",
       "behaviours": [],
-      "case_id": "sec__lease-acquire__lease-acquired__clock-back",
+      "case_id": "disp__lease-acquire__lease-acquired__clock-back",
       "checkpoint": "lease-acquired",
       "claimant": null,
       "clock_base_ms": 1700000000000,
@@ -925,14 +926,15 @@
         ],
         "queries": [
           "lease-single-holder",
-          "linear-writer-history"
+          "linear-writer-history",
+          "recorded-refusals"
         ],
         "recovery_owner": null
       },
       "fault": "clock-back",
       "incident_params": null,
       "kill_order": [
-        "sec"
+        "disp"
       ],
       "lane": "portable",
       "manifest_version": 1,
@@ -944,35 +946,35 @@
       "release_after_barrier": true,
       "restart_after": false,
       "restart_order": [
-        "sec"
+        "disp"
       ],
       "skew": {
         "direction": "backward",
         "observation": "next-operation",
-        "role": "sec"
+        "role": "disp"
       },
       "staggered": null,
       "targets": [
-        "sec"
+        "disp"
       ],
       "ttl_ms": 30000,
       "variant": null
     },
     {
       "arms": {
-        "sup": [
+        "sec": [
           "lease-acquire@lease-acquired:1"
         ]
       },
       "barrier": "aligned",
       "behaviours": [],
-      "case_id": "sup__lease-acquire__lease-acquired__clock-fwd",
+      "case_id": "sec__lease-acquire__lease-acquired__clock-fwd",
       "checkpoint": "lease-acquired",
       "claimant": {
         "clock": "forward",
         "holder_suffix": "b",
         "observation": "sibling",
-        "role": "sup"
+        "role": "sec"
       },
       "clock_base_ms": 1700000000000,
       "expected": {
@@ -989,7 +991,7 @@
       "fault": "clock-fwd",
       "incident_params": null,
       "kill_order": [
-        "sup"
+        "sec"
       ],
       "lane": "portable",
       "manifest_version": 1,
@@ -1001,12 +1003,12 @@
       "release_after_barrier": false,
       "restart_after": false,
       "restart_order": [
-        "sup"
+        "sec"
       ],
       "skew": null,
       "staggered": null,
       "targets": [
-        "sup"
+        "sec"
       ],
       "ttl_ms": 30000,
       "variant": null

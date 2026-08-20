@@ -275,6 +275,29 @@ def test_a_kill_is_a_signal_and_the_exit_status_says_so(tmp_path: Path) -> None:
     assert status == -signal.SIGKILL
 
 
+@pytest.mark.skipif(not _POSIX, reason="SIGKILL exit status is POSIX-only")
+def test_a_process_that_was_not_killed_fails_the_case_as_a_harness_error(
+    tmp_path: Path,
+) -> None:
+    """The exit-status check has to be able to fire, or it is decoration.
+
+    This is the check that stands between "the case injected a crash" and "the
+    case ran a process that finished normally and reported PASS". It is asserted
+    here against a process that really did exit 0, because a check nobody has
+    ever seen fail is indistinguishable from one that cannot.
+    """
+
+    case = conformance.synthetic_case(
+        case_id="protocol-not-killed", role=contract.ROLE_DISPATCHER, arms={}
+    )
+    with _controller(tmp_path, case) as controller:
+        controller.bootstrap()
+        controller.spawn(contract.ROLE_DISPATCHER, armed=())
+        controller.run_to_completion(contract.ROLE_DISPATCHER)
+        with pytest.raises(ContractViolation, match="not -SIGKILL"):
+            controller.kill(contract.ROLE_DISPATCHER, assert_exit_status=True)
+
+
 # ---------------------------------------------------------------------------
 # the linear-history reader
 # ---------------------------------------------------------------------------
