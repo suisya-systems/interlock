@@ -521,6 +521,33 @@ def test_a_hostile_constant_is_rendered_as_an_inert_literal(cp):
     ).fetchone() == ("a(b", hostile)
 
 
+def test_a_constant_is_rendered_as_its_value_and_nothing_else():
+    """The two shapes str/int typing alone would let through.
+
+    An IntEnum member *is* an int, but ``str()`` of one may spell its *name*
+    (Python 3.10) -- and a name is not a number the statement can carry. And a
+    NUL character in a str constant would truncate the SQL text on its way into
+    SQLite; refusing it at build time names the constant rather than the whole
+    statement.
+    """
+
+    import enum
+
+    class Status(enum.IntEnum):
+        DONE = 7
+
+    statement = fenced_update(
+        "run",
+        set={"status": value(Status.DONE)},
+        where=eq("run_id", param("r")),
+        stamps_writer_epoch=False,
+    )
+    assert "status = 7" in statement and "DONE" not in statement
+
+    with pytest.raises(LeaseUsageError):
+        value("a\x00b")
+
+
 def test_a_name_is_a_name_and_never_a_fragment():
     """Identifiers are the one caller string left, so they admit no structure."""
 

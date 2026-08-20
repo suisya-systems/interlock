@@ -23,8 +23,9 @@ lease epoch and validates it **inside the write**, as one statement:
                     WHERE resource = :fence_resource AND holder = :fence_holder
                       AND epoch = :fence_epoch AND expires_at_ms > :fence_now_ms)
 
-:func:`protected_write` refuses any statement that does not carry
-:data:`FENCE_SQL` verbatim, so the unfenced shape cannot reach the database
+:func:`protected_write` accepts only a :class:`FencedStatement`, which the
+typed builders alone can issue and which always carries :data:`FENCE_SQL` in
+the write's own predicate, so the unfenced shape cannot reach the database
 through this module at all.
 
 **Why the epoch and not the expiry is what a write validates.** Time is the
@@ -71,6 +72,7 @@ from typing import Any, Iterator, Mapping, Sequence
 __all__ = [
     "DESTINATIONS",
     "EXACTLY_ONCE_MECHANISMS",
+    "FENCE_PARAMS",
     "FENCE_SQL",
     "WRITE_HISTORY_QUERY",
     "Authority",
@@ -106,6 +108,7 @@ __all__ = [
     "ne",
     "overlapping_claims",
     "param",
+    "protected_write",
     "read_lease",
     "resource_of_kind",
     "release",
@@ -115,11 +118,13 @@ __all__ = [
 ]
 
 
-#: The fence, as the exact text a protected statement must carry. It is a
-#: constant rather than a template because the check in :func:`protected_write`
-#: is a substring test: a fence assembled by string surgery at the call site is a
-#: fence that can be assembled slightly wrong, and the failure would be invisible
-#: in the row that results.
+#: The fence, as the exact text every builder-issued statement carries. It is a
+#: constant rather than a template because the builders splice it in verbatim:
+#: a fence assembled by string surgery would be a fence that can be assembled
+#: slightly wrong, and the failure would be invisible in the row that results.
+#: What :func:`protected_write` enforces is the :class:`FencedStatement` type,
+#: not a scan for this text -- see that class for why a substring test cannot
+#: tell a fence that gates a write from one parked somewhere harmless.
 FENCE_SQL = (
     "EXISTS (SELECT 1 FROM lease\n"
     "                    WHERE resource = :fence_resource\n"
@@ -699,6 +704,13 @@ class Value:
                 f"{self.constant!r}; anything richer is bound as a param() at "
                 "execution time instead of rendered into the statement"
             )
+        if isinstance(self.constant, str) and "\x00" in self.constant:
+            raise LeaseUsageError(
+                "a value() constant may not contain a NUL character: the SQL "
+                "text is NUL-terminated on its way into SQLite, so the refusal "
+                "belongs here, where it names the constant, rather than at "
+                "execution time where it names the whole statement"
+            )
 
 
 @dataclass(frozen=True)
@@ -826,7 +838,10 @@ def _render_operand(expression: "Param | Value | _FenceEpoch") -> str:
     if constant is None:
         return "NULL"
     if isinstance(constant, int):
-        return str(constant)
+        # Through int(), not str(): an int *subclass* -- an IntEnum member is
+        # the live case -- may render its name rather than its value, and a
+        # name is not a number the statement can carry.
+        return str(int(constant))
     # SQLite's own escape: the quote is doubled, and nothing else in a string
     # literal is structural. Rendered here, by the builder, so the constant is
     # data however it is spelled.
@@ -841,7 +856,7 @@ def _render_assignment(column: str, expression: object) -> str:
                 f"increment({expression.column!r}) assigned to {column!r}: a "
                 "counter is incremented in place, so the two names must agree"
             )
-        rendered = f"{column} + {expression.by}"
+        rendered = f"{column} + {int(expression.by)}"
     elif isinstance(expression, (Param, Value, _FenceEpoch)):
         rendered = _render_operand(expression)
     else:
