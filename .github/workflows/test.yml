@@ -48,4 +48,10 @@ jobs:
         # than on the day the next provider arrives. Deliberately not -q: the
         # plugin's header line names the provider, its version and the session's
         # own state word, and that line is the run's evidence.
+        #
+        # S3 by name because it is the one provider that needs no Claude CLI and
+        # no network, so this step means the same thing on every matrix row. The
+        # run above already covers every *registered* provider -- tests/gate_item11
+        # parameterises the same comparison over the registry -- and this step is
+        # the legible, named one a reader of the log can find.
         run: python -m pytest tests/control_plane -p tests.gate_item11.provider_plugin

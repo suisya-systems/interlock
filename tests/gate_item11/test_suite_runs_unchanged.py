@@ -89,6 +89,7 @@ def _run(tmp_path: Path, *, provider: str | None) -> dict:
         f"--- stdout ---\n{completed.stdout}\n--- stderr ---\n{completed.stderr}"
     )
     recorded = json.loads(report.read_text(encoding="utf-8"))
+    recorded["provider"] = provider
     recorded["stdout"] = completed.stdout
     recorded["stderr"] = completed.stderr
     recorded["returncode"] = completed.returncode
@@ -102,11 +103,20 @@ def unbound_run(tmp_path_factory) -> dict:
     return _run(tmp_path_factory.mktemp("item11-unbound"), provider=None)
 
 
-@pytest.fixture(scope="module")
-def bound_run(tmp_path_factory) -> dict:
-    """The same suite, with the default provider live for its whole duration."""
+@pytest.fixture(scope="module", params=sorted(registry.PROVIDERS), ids=lambda key: key)
+def bound_run(request, tmp_path_factory) -> dict:
+    """The same suite, with one registered provider live for its whole duration.
 
-    return _run(tmp_path_factory.mktemp("item11-bound"), provider=registry.DEFAULT_PROVIDER)
+    Parameterised over the whole registry rather than over
+    :data:`registry.DEFAULT_PROVIDER`, so that adding S2 (issue ``#17``) buys the
+    unchanged-suite run as well as the substitution scenarios. A registry entry
+    that only bought the scenarios would leave the measurement item 11 is
+    actually about -- *this* suite, unmodified, against *that* provider -- still
+    covering S3 alone.
+    """
+
+    provider = request.param
+    return _run(tmp_path_factory.mktemp(f"item11-{provider}"), provider=provider)
 
 
 def _failed(run: dict) -> dict[str, dict[str, str]]:
@@ -179,7 +189,7 @@ def test_the_bound_run_really_had_a_provider_live(bound_run):
     this also fails if the binding degraded into something that reported nothing.
     """
 
-    entry = registry.PROVIDERS[registry.DEFAULT_PROVIDER]
+    entry = registry.PROVIDERS[bound_run["provider"]]
     assert "gate item 11: control-plane suite bound to" in bound_run["stdout"]
     assert entry.scaffold in bound_run["stdout"]
     assert "live session" in bound_run["stdout"]
