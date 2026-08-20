@@ -181,6 +181,26 @@ _CAPABILITY_FLAGS: Mapping[str, tuple[str, ...]] = {
     "session.structured-readout": ("--output-format", "--verbose"),
 }
 
+#: Flags this provider renders itself. A per-role ``cli_args`` carrying one of
+#: these would be appended *after* the provider's own and could override the
+#: committed identity or the structured-output invocation -- ``--session-id``
+#: from a role configuration would start writing another conversation before
+#: identity read-back notices. Refused at settings validation, before any
+#: spawn. ``--continue``/``-c`` are on the list although this provider never
+#: passes them: they re-enter whatever conversation is most recent, which is
+#: an identity chosen by nobody.
+_PROVIDER_OWNED_FLAGS = (
+    "-p",
+    "--print",
+    "-r",
+    "--resume",
+    "-c",
+    "--continue",
+    "--session-id",
+    "--output-format",
+    "--verbose",
+)
+
 #: How much of a session's captured stderr a readout carries. A tail, because
 #: the messages that matter (the refusal, a fatal startup error) are last, and
 #: a readout that embedded megabytes of stderr would itself be unreadable.
@@ -251,19 +271,58 @@ class _SessionRecord:
 
     @staticmethod
     def from_json(text: str) -> "_SessionRecord":
+        """Parse, and validate the shape while parsing.
+
+        Every field is checked here rather than trusted, because a record
+        that decodes but carries the wrong types would not fail until the
+        field is *used* -- a ``generation`` of ``null`` blowing up inside a
+        path format, say -- which is a crash where the broken-record readout
+        should have been. Raises :class:`ValueError` on any wrong shape, so
+        every caller's broken-record handling covers it.
+        """
+
         raw = json.loads(text)
+        if not isinstance(raw, dict):
+            raise ValueError(f"a session record must be an object, got {type(raw).__name__}")
+
+        def _text(key: str) -> str:
+            value = raw.get(key)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"record field {key!r} must be a non-empty string, got {value!r}")
+            return value
+
+        def _strings(key: str) -> tuple[str, ...]:
+            value = raw.get(key)
+            if not isinstance(value, list) or not all(isinstance(part, str) for part in value):
+                raise ValueError(f"record field {key!r} must be a list of strings, got {value!r}")
+            return tuple(value)
+
+        def _optional_int(key: str) -> int | None:
+            value = raw.get(key)
+            if value is not None and not isinstance(value, int):
+                raise ValueError(f"record field {key!r} must be an integer or null, got {value!r}")
+            return value
+
+        generation = raw.get("generation")
+        if not isinstance(generation, int) or generation < 0:
+            raise ValueError(
+                f"record field 'generation' must be a non-negative integer, got {generation!r}"
+            )
+        incident = raw.get("incident")
+        if incident is not None and not isinstance(incident, str):
+            raise ValueError(f"record field 'incident' must be a string or null, got {incident!r}")
         return _SessionRecord(
-            session_id=raw["session_id"],
-            claude_session_uuid=raw["claude_session_uuid"],
-            workspace=raw["workspace"],
-            role=raw["role"],
-            resume_prompt=raw["resume_prompt"],
-            cli_args=tuple(raw["cli_args"]),
-            generation=raw["generation"],
-            argv=tuple(raw["argv"]),
-            pid=raw.get("pid"),
-            pgid=raw.get("pgid"),
-            incident=raw.get("incident"),
+            session_id=_text("session_id"),
+            claude_session_uuid=_text("claude_session_uuid"),
+            workspace=_text("workspace"),
+            role=_text("role"),
+            resume_prompt=_text("resume_prompt"),
+            cli_args=_strings("cli_args"),
+            generation=generation,
+            argv=_strings("argv"),
+            pid=_optional_int("pid"),
+            pgid=_optional_int("pgid"),
+            incident=incident,
         )
 
 
@@ -509,9 +568,12 @@ class ClaudeCliSessionProvider(SessionProvider):
         prompt, resume_prompt, cli_args = settings_or_refusal
 
         try:
-            workspace = Path(request.workspace)
+            # Resolved before it is recorded: the record outlives this
+            # process, and a relative path in it would name a different
+            # directory to every future supervisor's working directory.
+            workspace = Path(request.workspace).resolve()
             workspace_exists = workspace.is_dir()
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             return Failure(
                 FailureKind.REFUSED_BY_PROVIDER,
                 f"the workspace configured for session {request.session_id!r} "
@@ -912,6 +974,23 @@ class ClaudeCliSessionProvider(SessionProvider):
                         f"{request.session_id!r} contains a NUL, which no "
                         "operating system can carry in an argv",
                     )
+                owned = next(
+                    (
+                        flag
+                        for flag in _PROVIDER_OWNED_FLAGS
+                        if part == flag or part.startswith(flag + "=")
+                    ),
+                    None,
+                )
+                if owned is not None:
+                    return Failure(
+                        FailureKind.REFUSED_BY_PROVIDER,
+                        f"settings[{CLI_ARGS_SETTING!r}][{index}] for session "
+                        f"{request.session_id!r} carries {owned!r}, which this "
+                        "provider renders itself; per-role arguments must not "
+                        "override the committed identity or the structured "
+                        "readout",
+                    )
         else:
             # A bare string is refused along with the rest: iterating it would
             # pass its characters as separate arguments.
@@ -1045,7 +1124,13 @@ class ClaudeCliSessionProvider(SessionProvider):
                         f"{self._stop_timeout}s of SIGKILL",
                         {"pid": process.pid},
                     )
-            return None
+            # The leader's exit is not the group's (H1): an MCP child that
+            # ignored the SIGTERM outlives a parent that honoured it, and
+            # ``wait()`` returning says nothing about it. The group itself is
+            # confirmed empty before the stop reports done.
+            return self._reap_group_remnants(
+                record.pgid or process.pid, record.session_id
+            )
         # An adopted orphan is not a child of this process, so there is no
         # ``wait``; the exit is confirmed by the pid disappearing. The
         # identity was confirmed by ``_child_liveness`` above -- a stranger on
@@ -1067,6 +1152,32 @@ class ClaudeCliSessionProvider(SessionProvider):
                     f"{record.session_id!r} did not exit within "
                     f"{self._stop_timeout}s of SIGKILL",
                     {"pid": record.pid},
+                )
+            time.sleep(0.05)
+        return self._reap_group_remnants(record.pgid or record.pid, record.session_id)
+
+    def _reap_group_remnants(self, pgid: int, session_id: str) -> Failure | None:
+        """Confirm the whole process group is gone, killing what remains (H1).
+
+        The CLI does not reap MCP-server children of its own, and one that
+        ignored the SIGTERM survives the leader -- so the leader's confirmed
+        exit is where the sweep *starts*, not where the stop is done. Best
+        effort on a platform without process groups.
+        """
+
+        if os.name != "posix":  # pragma: no cover - exercised only on Windows
+            return None
+        if not _group_has_live_members(pgid):
+            return None
+        _signal_group(pgid, signal.SIGKILL)
+        deadline = time.monotonic() + self._stop_timeout
+        while _group_has_live_members(pgid):
+            if time.monotonic() >= deadline:
+                return Failure(
+                    FailureKind.TIMED_OUT,
+                    f"process group {pgid} of session {session_id!r} still "
+                    f"has members {self._stop_timeout}s after SIGKILL",
+                    {"pgid": pgid},
                 )
             time.sleep(0.05)
         return None
@@ -1145,10 +1256,26 @@ class ClaudeCliSessionProvider(SessionProvider):
             # rides in the detail when a readout is still possible, and it is
             # the loud answer itself when nothing better exists (below).
             base_detail["uninterpretable_line"] = garbage
+
+        # The read-back is positive, not merely non-contradictory: structured
+        # output that never names the session's identity cannot be reconciled
+        # with the one committed before the spawn, and accepting it anyway
+        # would let schema drift quietly defeat the one check U27 makes
+        # mandatory. A live child is given time (below); a finished one is
+        # answered loudly.
+        identity_read_back = any(event.get("session_id") is not None for event in events)
         result_event = next(
             (event for event in reversed(events) if event.get("type") == "result"), None
         )
         if result_event is not None:
+            if not identity_read_back:
+                return _Uninterpretable(
+                    f"the child of session {record.session_id!r} finished "
+                    "without any event naming a session identity, so the "
+                    "identity committed before the spawn cannot be read back "
+                    "and reconciled; its outcome is not accepted on trust",
+                    {**base_detail, "expected": record.claude_session_uuid},
+                )
             word = result_event.get("terminal_reason") or result_event.get("subtype")
             if not isinstance(word, str) or not word.strip():
                 return _Uninterpretable(
@@ -1185,6 +1312,21 @@ class ClaudeCliSessionProvider(SessionProvider):
         if liveness:
             if garbage is not None:
                 return _Uninterpretable(garbage, base_detail)
+            if events and not identity_read_back:
+                # The child is speaking but has not yet said who it is. The
+                # identity may still arrive, so this is tolerated as an
+                # explicit could-not-observe rather than either accepted as
+                # an observed state or condemned as an incident.
+                return SessionReadout(
+                    session_id=record.session_id,
+                    observation=Observation.COULD_NOT_OBSERVE,
+                    could_not_observe_reason=(
+                        "the child is emitting events, but none has named a "
+                        "session identity yet; an observed state is withheld "
+                        "until the committed identity reads back"
+                    ),
+                    provider_detail=base_detail,
+                )
             if events:
                 last = events[-1]
                 word = last.get("subtype") or last.get("type")
@@ -1214,6 +1356,14 @@ class ClaudeCliSessionProvider(SessionProvider):
         # The child is gone without a result event.
         if garbage is not None:
             return _Uninterpretable(garbage, base_detail)
+        if events and not identity_read_back:
+            return _Uninterpretable(
+                f"the child of session {record.session_id!r} is gone after "
+                "emitting events, none of which named a session identity; the "
+                "identity committed before the spawn cannot be read back and "
+                "reconciled",
+                {**base_detail, "expected": record.claude_session_uuid},
+            )
         returncode = self._returncode(session)
         if returncode is not None:
             # A child of ours: the operating system's word for its exit is a
@@ -1366,7 +1516,7 @@ class ClaudeCliSessionProvider(SessionProvider):
             record = _SessionRecord.from_json(record_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, ValueError, KeyError) as exc:
+        except (OSError, ValueError, KeyError, TypeError) as exc:
             # A record that exists but cannot be read is not "no session" --
             # a record is right there -- and it is not a readable one either.
             # Deliberately not cached: a record repaired or finished being
@@ -1472,6 +1622,39 @@ def _pid_cmdline(pid: int) -> str | None:
     except OSError:
         return None
     return raw.replace(b"\x00", b" ").decode("utf-8", "replace")
+
+
+def _group_has_live_members(pgid: int) -> bool:
+    """Does the process group still hold anything that is actually running?
+
+    ``killpg(pgid, 0)`` alone cannot answer it: an unreaped zombie holds its
+    group open while being unkillable, and a sweep that waited on it would
+    time out on an exit that already happened. Where ``/proc`` exists the
+    group's members are read directly and zombies discounted; elsewhere the
+    signal-0 probe is the best available answer.
+    """
+
+    proc = Path("/proc")
+    if proc.is_dir():
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                text = (entry / "stat").read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            fields = text.rpartition(")")[2].split()
+            # After the command name: state, ppid, pgrp, ...
+            if len(fields) >= 3 and fields[2] == str(pgid) and fields[0] != "Z":
+                return True
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _signal_group(pgid: int, signum: int) -> None:

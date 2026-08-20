@@ -104,13 +104,28 @@ if mode == "silent":
     sys.exit(0)
 
 reported = os.environ.get("FAKE_REPORT_ID", claimed)
+omit_identity = os.environ.get("FAKE_OMIT_IDENTITY") == "1"
 
 def emit(payload):
+    if omit_identity:
+        payload.pop("session_id", None)
     sys.stdout.write(json.dumps(payload) + "\\n")
     sys.stdout.flush()
 
+if mode == "shielded-grandchild":
+    import subprocess
+    grandchild = subprocess.Popen(
+        [sys.executable, "-c",
+         "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)"])
+    with open(os.environ["FAKE_GRANDCHILD_PID_FILE"], "w", encoding="utf-8") as handle:
+        handle.write(str(grandchild.pid))
+
 emit({{"type": "system", "subtype": "init", "session_id": reported,
       "unknown_field": {{"nested": ["tolerated"]}}}})
+
+if mode == "shielded-grandchild":
+    time.sleep(sleep_for)
+    sys.exit(0)
 
 if mode == "garbage-then-hang":
     sys.stdout.write("this complete line is not JSON\\n")
@@ -798,6 +813,109 @@ def test_a_garbage_line_before_a_valid_result_is_surfaced_not_swallowed(
     _wait_for_exit(provider, "sess-1")
     readout = _wait_for_state(provider, "sess-1", "completed")
     assert "not JSON" in readout.provider_detail["uninterpretable_line"]
+
+
+@pytest.mark.parametrize(
+    "cli_args",
+    [["--session-id", "5"*8], ["--resume=abc"], ["-p", "another prompt"], ["--continue"]],
+    ids=["session-id", "resume-eq", "print", "continue"],
+)
+def test_provider_owned_flags_in_role_arguments_are_refused(
+    provider, tmp_path, spawn_log, cli_args
+):
+    """A role configuration must not be able to override the committed
+    identity or the structured-output invocation from ``cli_args``."""
+
+    result = provider.start(_request(tmp_path, cli_args=cli_args))
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+    assert _spawned(spawn_log) == []
+
+
+def test_a_finished_child_that_never_named_its_identity_is_not_accepted(
+    provider, tmp_path, monkeypatch
+):
+    """The read-back is positive: a result from output that never carried a
+    session identity cannot be reconciled, so it is answered loudly rather
+    than accepted on trust."""
+
+    monkeypatch.setenv("FAKE_OMIT_IDENTITY", "1")
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    result = provider.read_state("sess-1")
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.UNINTERPRETABLE_RESPONSE
+    assert "read back" in result.detail
+
+
+def test_a_live_child_that_has_not_named_its_identity_yet_is_tolerated(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_OMIT_IDENTITY", "1")
+    monkeypatch.setenv("FAKE_MODE", "events-then-hang")
+    provider.start(_request(tmp_path))
+    deadline = time.monotonic() + 10.0
+    while True:
+        result = provider.read_state("sess-1")
+        assert isinstance(result, Ok)
+        readout = result.value
+        if "identity" in (readout.could_not_observe_reason or ""):
+            break
+        assert time.monotonic() < deadline, f"never saw the withheld state: {readout!r}"
+        time.sleep(0.02)
+    assert readout.observation is Observation.COULD_NOT_OBSERVE
+
+
+def test_a_relative_workspace_is_recorded_absolute(provider, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    monkeypatch.chdir(tmp_path)
+    result = provider.start(
+        StartRequest(session_id="rel", workspace="rel-ws", role="worker")
+    )
+    assert isinstance(result, Ok)
+    record = json.loads(
+        (tmp_path / "state" / "rel" / "record.json").read_text(encoding="utf-8")
+    )
+    assert Path(record["workspace"]).is_absolute()
+    assert record["workspace"] == str((tmp_path / "rel-ws").resolve())
+
+
+def test_a_type_invalid_record_is_a_broken_record_not_a_crash(provider, tmp_path):
+    _plant_record(tmp_path, "typebad", cli_args=None)
+    read = provider.read_state("typebad")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+    listed = provider.list_sessions()
+    assert isinstance(listed, Ok)
+    assert [r.session_id for r in listed.value] == ["typebad"]
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="process groups are POSIX")
+def test_stop_reaps_a_group_member_that_outlived_the_leader(
+    provider, tmp_path, monkeypatch
+):
+    """H1's exact shape: an MCP-like grandchild ignores the SIGTERM, the
+    leader honours it, and ``wait()`` returning must not end the stop --
+    the group is confirmed empty, killing what remains."""
+
+    monkeypatch.setenv("FAKE_MODE", "shielded-grandchild")
+    pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setenv("FAKE_GRANDCHILD_PID_FILE", str(pid_file))
+    provider.start(_request(tmp_path))
+    deadline = time.monotonic() + 10.0
+    while not pid_file.exists():
+        assert time.monotonic() < deadline, "the grandchild never announced itself"
+        time.sleep(0.02)
+    grandchild = int(pid_file.read_text(encoding="utf-8"))
+
+    result = provider.stop("sess-1")
+    assert isinstance(result, Ok)
+    deadline = time.monotonic() + 10.0
+    while s2._pid_running(grandchild):
+        assert time.monotonic() < deadline, (
+            f"the shielded grandchild (pid {grandchild}) survived the stop"
+        )
+        time.sleep(0.02)
 
 
 def test_the_probes_raw_answers_are_durably_recorded(provider, tmp_path):
