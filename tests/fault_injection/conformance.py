@@ -611,6 +611,44 @@ def check_refusal_ids_are_unique(adapter: Any, workdir: Path) -> None:
             )
 
 
+def check_escalation_path_can_record(adapter: Any, workdir: Path) -> None:
+    """A recommendation *can* be recorded, so its absence is evidence.
+
+    The observation cases assert that no termination/restart recommendation was
+    produced from an outage (ACCEPTANCE.md section 2, D-0006). That assertion is
+    a count, and a count over a path nothing can reach is zero forever -- it
+    would pass on the day the rule broke, and on every day before it.
+
+    So the battery drives the path with a fact state D-0006 says nothing about,
+    supplied as case data, and asserts the row appears. Nothing here claims that
+    state *should* escalate: the policy is an input, Q-0012 is open, and what is
+    being checked is that the query and the write both work.
+    """
+
+    role = contract.ROLE_SUPERVISOR
+    case = synthetic_case(case_id="conformance-escalation", role=role, arms={})
+    case["observation"] = {
+        "mode": contract.OBSERVATION_HEALTHY,
+        "escalate_on": [contract.FACT_ACTIVE_EVIDENCE],
+    }
+    with _controller(adapter, workdir, case) as controller:
+        controller.bootstrap()
+        controller.spawn(role, armed=())
+        controller.run_to_completion(role)
+
+        now_ms = controller.last_reported_now_ms(default=CONFORMANCE_CLOCK_BASE_MS)
+        params = adapter.query_parameters(role, now_ms=now_ms)
+        rows = controller.query(
+            contract.INVARIANT_NO_ANOMALY_ESCALATION, scope=params["scope"]
+        )
+        if not rows or int(rows[0]["escalations"]) < 1:
+            raise ContractViolation(
+                f"{adapter.driver_module}: the escalation path recorded nothing "
+                "even when the case asked for it, so 'no recommendation was "
+                "produced' is a statement about a path that cannot be taken"
+            )
+
+
 #: The battery, as data, so a report can name what ran.
 BATTERY = (
     "checkpoint-blocks",
@@ -625,4 +663,5 @@ BATTERY = (
     "invariant-queries",
     "invariant-queries-not-vacuous",
     "refusal-ids-unique",
+    "escalation-path-reachable",
 )

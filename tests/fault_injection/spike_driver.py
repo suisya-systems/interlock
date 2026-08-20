@@ -1150,6 +1150,13 @@ def escalate(ctx: Context, *, fact_state: str, incident_id: str, now_ms: int) ->
             "idempotency_key",
             "exactly_once_mechanism",
             "status",
+            # ``action`` really does carry a ``writer_epoch``, so the fence
+            # stamps one. Omitting the column while leaving the builder's
+            # default in place raises ``UnfencedStatement`` before the row is
+            # ever written -- which would make this whole path unreachable, and
+            # a "no recommendation was produced" assertion means nothing if a
+            # recommendation could not have been produced either way.
+            "writer_epoch",
             "created_at_ms",
             "applied_at_ms",
         ),
@@ -1160,6 +1167,7 @@ def escalate(ctx: Context, *, fact_state: str, incident_id: str, now_ms: int) ->
             ":idempotency_key",
             ":exactly_once_mechanism",
             "'applied'",
+            ":fence_epoch",
             ":created_at_ms",
             ":applied_at_ms",
         ),

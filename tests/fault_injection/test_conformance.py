@@ -98,6 +98,15 @@ def test_no_two_refusals_in_one_case_share_an_attempt_id(
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)
+def test_the_escalation_path_can_record_a_recommendation(
+    adapter: Any, tmp_path: Path
+) -> None:
+    """So that the matrix's "none were produced" is evidence and not a tautology."""
+
+    conformance.check_escalation_path_can_record(adapter, tmp_path)
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)
 def test_the_barrier_round_trip_releases_the_process(adapter: Any, tmp_path: Path) -> None:
     conformance.check_barrier_round_trip(
         adapter, tmp_path, role=contract.ROLE_DISPATCHER
