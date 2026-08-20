@@ -897,7 +897,17 @@ def test_a_type_invalid_record_is_a_broken_record_not_a_crash(provider, tmp_path
     assert [r.session_id for r in listed.value] == ["typebad"]
 
 
-@pytest.mark.skipif(not IS_POSIX, reason="process groups are POSIX")
+@pytest.mark.skipif(
+    not HAS_PROC,
+    reason=(
+        "the post-exit sweep signals only a group whose live member provably "
+        "carries the session marker, and the proof is read from /proc; where "
+        "/proc does not exist (macOS) the sweep deliberately does nothing "
+        "rather than signal an unverifiable group, so a TERM-ignoring "
+        "survivor of an exited leader is a documented platform limitation, "
+        "not a behaviour to assert"
+    ),
+)
 def test_stop_reaps_a_group_member_that_outlived_the_leader(
     provider, tmp_path, monkeypatch
 ):
