@@ -246,6 +246,12 @@ def build_cases() -> list[dict]:
         (ROLE_SECRETARY, OPERATION_ENQUEUE, CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT),
         (ROLE_DISPATCHER, OPERATION_LEASE_ACQUIRE, CHECKPOINT_BEFORE_DURABLE_WRITE),
     ):
+        # A kill at the first step of a script leaves nothing durable behind, so
+        # it names no recovery owner: what it proves is that a restart from a
+        # cold start is clean, not that recovery repaired anything.
+        from_cold = operation == contract.ROLE_SCRIPTS[role][0] and (
+            checkpoint == CHECKPOINT_BEFORE_DURABLE_WRITE
+        )
         cases.append(
             _case(
                 targets=(role,),
@@ -258,7 +264,7 @@ def build_cases() -> list[dict]:
                 expected={
                     "queries": _KILL_QUERIES,
                     "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
-                    "recovery_owner": role,
+                    "recovery_owner": None if from_cold else role,
                 },
             )
         )
@@ -655,10 +661,26 @@ def validate_case(case: Mapping[str, Any]) -> None:
 
     if expected["recovery_owner"] is not None and expected["recovery_owner"] not in ROLES:
         raise ContractViolation(f"{case_id}: {expected['recovery_owner']!r} is not a role")
-    if case["restart_after"] and expected["recovery_owner"] is None:
+    # A kill at the very first durable write of a role's script leaves nothing
+    # behind: no lease row, no message, no action. Such a case is worth having --
+    # it proves a restart from a cold start is clean -- but it has no recovery to
+    # name, and naming one would be an assertion satisfied by an empty set. So
+    # the rule runs both ways.
+    nothing_was_written = (
+        len(targets) == 1
+        and case["checkpoint"] == contract.CHECKPOINT_BEFORE_DURABLE_WRITE
+        and case["operation"] == contract.ROLE_SCRIPTS[targets[0]][0]
+    )
+    if case["restart_after"] and expected["recovery_owner"] is None and not nothing_was_written:
         raise ContractViolation(
             f"{case_id}: a case that restarts names the role whose recovery it "
             "asserts; 'somebody recovered it' is not an assertion (design 5)"
+        )
+    if case["restart_after"] and expected["recovery_owner"] is not None and nothing_was_written:
+        raise ContractViolation(
+            f"{case_id}: the kill lands before this role's first durable write, "
+            "so the restart has nothing to recover and the case may not name a "
+            "recovery owner"
         )
 
     skew = case["skew"]

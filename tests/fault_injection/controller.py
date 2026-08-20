@@ -455,7 +455,18 @@ class Controller:
             role=str(hello["role"]),
             case_id=str(hello["case_id"]),
             restart_generation=int(hello["restart_generation"]),
-        ).check()
+        ).check(
+            # Versions and vocabulary membership are not enough. A driver that
+            # answered with a *valid* but different role, case or generation
+            # would still be recorded under the slot the controller asked for,
+            # so the harness would drive one role while reporting another -- or
+            # run generation 0 twice and call the second one a restart. The
+            # handshake is the only place that can catch it, because every later
+            # event is correlated by the slot rather than by the wire.
+            expect_role=role,
+            expect_case_id=str(self.case["case_id"]),
+            expect_generation=generation,
+        )
         return process
 
     def spawn_claimant(
@@ -972,13 +983,7 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
         for role in targets
     }
     unresolved_at_kill = {
-        role: controller.query(
-            contract.INVARIANT_RETRY_COUNT_DURABLE,
-            holder_prefix=controller.adapter.query_parameters(
-                role, now_ms=case["clock_base_ms"]
-            )["holder_prefix"],
-        )
-        for role in targets
+        role: _recoverable_state(controller, role, case) for role in targets
     }
 
     if case["restart_after"]:
@@ -1000,6 +1005,46 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
         "at_kill": at_kill,
         "unresolved_at_kill": unresolved_at_kill,
     }
+
+
+def _recoverable_state(
+    controller: "Controller", role: str, case: Mapping[str, Any]
+) -> list[dict]:
+    """Durable state the kill left mid-flight, for this role.
+
+    Deliberately wider than the outbox. A kill inside ``bind`` leaves no unacked
+    message but does leave a lease row held by a process that no longer exists
+    and a half-written binding -- state a restart has to reconcile. Counting
+    only outbox rows would call that case "nothing to recover" and let its
+    recovery assertion pass on an empty set, which is the same vacuity in a new
+    place.
+    """
+
+    now_ms = controller.last_reported_now_ms(default=int(case["clock_base_ms"]))
+    params = controller.adapter.query_parameters(role, now_ms=now_ms)
+    state: list[dict] = []
+    state.extend(
+        dict(row, evidence="outbox")
+        for row in controller.query(
+            contract.INVARIANT_RETRY_COUNT_DURABLE,
+            holder_prefix=params["holder_prefix"],
+        )
+        if row.get("status") != "acked"
+    )
+    state.extend(
+        dict(row, evidence="action")
+        for row in controller.query(
+            contract.INVARIANT_NO_PENDING_ACTION, scope=params["scope"]
+        )
+    )
+    state.extend(
+        dict(row, evidence="lease")
+        for row in controller.query(
+            contract.INVARIANT_LEASE_SINGLE_HOLDER, now_ms=now_ms
+        )
+        if row["resource"] == params["resource"]
+    )
+    return state
 
 
 def assert_invariants(
@@ -1246,19 +1291,31 @@ def assert_invariants(
             fail(f"{owner} never signalled recovery-complete after its restart")
 
         if unresolved_at_kill is not None:
-            pending = [
+            left_behind = [
                 row
                 for role in case["targets"]
                 for row in unresolved_at_kill.get(role, ())
-                if row.get("status") != "acked"
             ]
-            missing = [
-                role
-                for role in case["targets"]
-                if not unresolved_at_kill.get(role)
-            ]
-            if not pending and not missing:
+            if not left_behind:
                 fail(
-                    "the kill left no unresolved work, so the restart recovered "
-                    "nothing and this case asserts recovery vacuously"
+                    "the kill left no durable state -- no unacked message, no "
+                    "pending action, no held lease -- so the restart recovered "
+                    f"nothing and naming {owner!r} as the recovery owner "
+                    "asserts recovery vacuously"
                 )
+
+    if case["restart_after"] and owner is None and unresolved_at_kill is not None:
+        # The other direction, so the rule cannot be satisfied by simply
+        # declining to name an owner: a case that *did* leave work behind must
+        # say whose recovery resolved it.
+        left_behind = [
+            row
+            for role in case["targets"]
+            for row in unresolved_at_kill.get(role, ())
+        ]
+        if left_behind:
+            fail(
+                f"the kill left {len(left_behind)} piece(s) of durable state "
+                "behind but the case names no recovery owner; 'somebody "
+                "recovered it' is not an assertion (design 5)"
+            )

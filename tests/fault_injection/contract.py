@@ -562,7 +562,31 @@ class Handshake:
     restart_generation: int
     extras: Mapping[str, Any] = field(default_factory=dict)
 
-    def check(self) -> None:
+    def check(
+        self,
+        *,
+        expect_role: str | None = None,
+        expect_case_id: str | None = None,
+        expect_generation: int | None = None,
+    ) -> None:
+        if expect_role is not None and self.role != expect_role:
+            raise ContractViolation(
+                f"the driver answered as {self.role!r}, but was spawned as "
+                f"{expect_role!r}: every later event is correlated by the slot, "
+                "so the harness would drive one role and report another"
+            )
+        if expect_case_id is not None and self.case_id != expect_case_id:
+            raise ContractViolation(
+                f"the driver answered for case {self.case_id!r}, but was "
+                f"spawned for {expect_case_id!r}"
+            )
+        if expect_generation is not None and self.restart_generation != expect_generation:
+            raise ContractViolation(
+                f"the driver answered as restart generation "
+                f"{self.restart_generation}, but was spawned as "
+                f"{expect_generation}: a generation 0 reported as a restart is a "
+                "recovery that never happened"
+            )
         if self.protocol_version != PROTOCOL_VERSION:
             raise ContractViolation(
                 f"driver speaks protocol {self.protocol_version}, controller "

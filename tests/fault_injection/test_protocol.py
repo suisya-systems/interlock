@@ -89,6 +89,32 @@ def test_the_handshake_refuses_a_version_mismatch() -> None:
         ).check()
 
 
+def test_the_handshake_refuses_a_driver_that_is_not_the_one_that_was_spawned() -> None:
+    """Valid-but-different is the dangerous answer, not invalid.
+
+    Every event after the handshake is correlated by the process slot, not by
+    what the driver says it is. A driver answering as another role, another case
+    or generation 0 when a restart was asked for would therefore be driven as
+    the requested one and reported as the requested one -- a recovery that never
+    happened, passing.
+    """
+
+    good = Handshake(
+        protocol_version=PROTOCOL_VERSION,
+        contract_version=contract.FAULT_RUNNER_CONTRACT_VERSION,
+        role=contract.ROLE_DISPATCHER,
+        case_id="c",
+        restart_generation=1,
+    )
+    good.check(expect_role=contract.ROLE_DISPATCHER, expect_case_id="c", expect_generation=1)
+    with pytest.raises(ContractViolation, match="spawned as"):
+        good.check(expect_role=contract.ROLE_SECRETARY)
+    with pytest.raises(ContractViolation, match="spawned for"):
+        good.check(expect_case_id="other")
+    with pytest.raises(ContractViolation, match="recovery that never happened"):
+        good.check(expect_generation=0)
+
+
 # ---------------------------------------------------------------------------
 # the barrier
 # ---------------------------------------------------------------------------

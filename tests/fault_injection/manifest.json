@@ -724,7 +724,7 @@
           "linear-writer-history",
           "no-pending-action"
         ],
-        "recovery_owner": "disp"
+        "recovery_owner": null
       },
       "fault": "sigkill",
       "incident_params": null,
