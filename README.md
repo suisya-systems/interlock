@@ -11,8 +11,11 @@ holds the context and consequences behind every `D-00NN` cited here.
 
 - **SQLite is the single source of truth** (D-0001). Runs, tasks, sessions,
   leases, incidents, assessments, actions and the outbox live in SQLite. AI
-  context and any UI are projections. After a mid-flight kill, the system
-  resumes from SQLite — from unresolved incidents — without double execution.
+  context and any UI are projections. The invariant this buys — that after a
+  mid-flight kill the system resumes from SQLite, from unresolved incidents,
+  without double execution — is the design's obligation, not yet a
+  demonstrated property: gate items 4 and 5 are the proofs, and both are
+  still pending in [`docs/gate-record.md`](docs/gate-record.md).
 - **Monitoring is deterministic** (D-0002). The resident LLM monitoring loop is
   retired; the program-side event loop and a low-frequency reconcile loop stay.
   Deleting every loop is explicitly *not* the goal.
@@ -87,19 +90,21 @@ distribution on PyPI is the v1 / maintenance line — a different codebase
 ```sh
 git clone https://github.com/suisya-systems/interlock
 cd interlock
+python -m venv .venv && . .venv/bin/activate
+python -m pip install "jsonschema>=4.18" pytest
 ```
 
-This is a Python **src-layout** project. Run against `src/` on `PYTHONPATH`
-rather than installing the package, so that a stale install cannot shadow the
-tree and import older code:
+`jsonschema` is the only runtime dependency and `pytest` the only test
+dependency; Python 3.10+ is required.
+
+Install the dependencies but **not** the package: this is a Python
+**src-layout** project, and running against `src/` on `PYTHONPATH` is what
+stops a stale install from shadowing the tree and importing older code.
 
 ```sh
 PYTHONPATH=src python -m pytest
 PYTHONPATH=src python -m claude_org_runtime.cli --help
 ```
-
-`pytest` is the only test dependency; the package itself needs `jsonschema` and
-Python 3.10+.
 
 ## CLI
 
@@ -125,7 +130,11 @@ claude-org-runtime dispatcher delegate-plan \
 ```
 
 Also available: `settings show`, `sandbox doctor`, `attention scan` / `watch`,
-and `migrate v1-to-v2`. See [`docs/cli.md`](docs/cli.md) for the full reference.
+and `migrate v1-to-v2`. [`docs/cli.md`](docs/cli.md) documents flags and exit
+codes for the `dispatcher`, `settings` and `sandbox` groups; `attention` and
+`migrate` have no page there yet, and its own install snippet still points at
+PyPI and reports version 0.1.0 — read this section, not that one, for how to
+get the tree. Otherwise `--help` on any group is authoritative.
 
 Note that `delegate-plan` still expects renga-shaped pane JSON as *input data*
 while nothing in this tree produces it any more — the transport that fed it was
