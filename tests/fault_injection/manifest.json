@@ -1590,6 +1590,9 @@
       "case_id": "disp__lease-acquire__lease-acquired__writer-race",
       "checkpoint": "lease-acquired",
       "claimant": {
+        "behaviours": [
+          "stale-writer"
+        ],
         "clock": "forward",
         "holder_suffix": "race",
         "observation": "sibling",
@@ -1646,6 +1649,9 @@
       "case_id": "sec__lease-acquire__lease-acquired__writer-race",
       "checkpoint": "lease-acquired",
       "claimant": {
+        "behaviours": [
+          "stale-writer"
+        ],
         "clock": "forward",
         "holder_suffix": "race",
         "observation": "sibling",
@@ -1697,10 +1703,15 @@
         ]
       },
       "barrier": "aligned",
-      "behaviours": [],
+      "behaviours": [
+        "stale-writer"
+      ],
       "case_id": "disp__enqueue__before_durable_write__resumed-writer-race",
       "checkpoint": "before_durable_write",
       "claimant": {
+        "arms": [
+          "attempt@delivered_before_ack:1"
+        ],
         "clock": "forward",
         "holder_suffix": "b",
         "observation": "sibling",

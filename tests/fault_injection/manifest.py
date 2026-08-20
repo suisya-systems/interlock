@@ -194,7 +194,14 @@ def _case(
         },
         "messages": messages,
         "behaviours": list(behaviours),
-        "claimant": dict(claimant) if claimant else None,
+        "claimant": (
+            {
+                key: (list(value) if isinstance(value, tuple) else value)
+                for key, value in claimant.items()
+            }
+            if claimant
+            else None
+        ),
         "skew": dict(skew) if skew else None,
         "release_after_barrier": release_after_barrier,
         "restart_after": restart_after,
@@ -587,6 +594,13 @@ def build_cases() -> list[dict]:
                     "holder_suffix": "race",
                     "clock": "forward",
                     "observation": "sibling",
+                    # Refused at acquire *and then carrying on* with a token the
+                    # lease row rejects. Without this the racer contributes no
+                    # write at all, and section 2's "the state item's history is
+                    # a linear sequence with no interleaving from the rejected
+                    # writer" would be true of every run -- including a run in
+                    # which atomic fencing had stopped working.
+                    "behaviours": ("stale-writer",),
                 },
                 expected={
                     "queries": (
@@ -619,11 +633,25 @@ def build_cases() -> list[dict]:
                     f"{OPERATION_ENQUEUE}@{CHECKPOINT_BEFORE_DURABLE_WRITE}:1",
                 )
             },
+            # The *resumed* process is the stale writer here: it comes back with
+            # no epoch, is refused at acquire, and carries on believing it holds
+            # the lease -- which is what makes its writes race the replacement's
+            # rather than simply not happening. Inert in the first generation,
+            # which acquires cleanly, and inert for the replacement, which is
+            # never refused.
+            behaviours=("stale-writer",),
             claimant={
                 "role": ROLE_DISPATCHER,
                 "holder_suffix": "b",
                 "clock": "forward",
                 "observation": "sibling",
+                # The replacement is held here, still alive and still holding,
+                # while the resumed process comes back and writes. "A write is
+                # attempted concurrently from a resumed process and its
+                # replacement" needs both to exist at once; a replacement that
+                # had already exited would leave the resumed process racing a
+                # lease row rather than a writer.
+                "arms": (f"{OPERATION_ATTEMPT}@{CHECKPOINT_DELIVERED_BEFORE_ACK}:1",),
             },
             expected={
                 "queries": _TAKEOVER_QUERIES,

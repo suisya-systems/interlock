@@ -494,7 +494,13 @@ class Controller:
         return process
 
     def spawn_claimant(
-        self, role: str, *, holder_suffix: str, clock_offset_ms: int
+        self,
+        role: str,
+        *,
+        holder_suffix: str,
+        clock_offset_ms: int,
+        armed: Sequence[Any] = (),
+        behaviours: Sequence[str] = (),
     ) -> RoleProcess:
         """A second claimant on the same resource, under its own clock.
 
@@ -502,15 +508,25 @@ class Controller:
         for: a claimant whose clock has crossed the holder's expiry takes the
         lease over while the holder is frozen. Per-role offsets, never a global
         shift, and the host clock is untouched (design 7).
+
+        ``armed`` and ``behaviours`` are the claimant's own, and deliberately
+        not the case's. A claimant that inherited the case's behaviours would
+        apply them to the incumbent too -- which for the single-writer cases
+        would fence out the writer that is supposed to *win*, inverting the
+        case. And a claimant that could not be armed could only ever be run to
+        completion, so "concurrently" could never mean two live processes.
         """
 
         holder = f"{self.adapter.holder_of(role)}-{holder_suffix}"
+        extra: list[str] = ["--holder", holder]
+        for behaviour in behaviours:
+            extra.extend(["--behaviour", behaviour])
         return self.spawn(
             role,
-            armed=(),
+            armed=tuple(armed),
             clock_offset_ms=clock_offset_ms,
             key=_claimant_key(role),
-            extra_arguments=("--holder", holder),
+            extra_arguments=tuple(extra),
         )
 
     # -- barrier -----------------------------------------------------------
@@ -963,6 +979,9 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
     fault = case["fault"]
     barrier_mode = case["barrier"]
     resolved_skew_ms: int | None = None
+    #: A claimant deliberately left blocked at its barrier so that it is still
+    #: live while the restart below happens. Released once the restart is done.
+    held_claimant: str | None = None
 
     controller.bootstrap()
     for role in targets:
@@ -1020,12 +1039,29 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
             resolved_skew_ms = contract.resolve_skew_ms(
                 claimant["clock"], ttl_ms=case["ttl_ms"], elapsed_ms=case["ttl_ms"]
             )
+            claimant_armed = [
+                ArmedAnchor.parse(wire) for wire in claimant.get("arms", ())
+            ]
             controller.spawn_claimant(
                 claimant["role"],
                 holder_suffix=claimant["holder_suffix"],
                 clock_offset_ms=resolved_skew_ms,
+                armed=claimant_armed,
+                behaviours=claimant.get("behaviours", ()),
             )
-            controller.run_to_completion(_claimant_key(claimant["role"]))
+            if claimant_armed:
+                # "A write is attempted concurrently from a resumed process and
+                # its replacement" -- so the replacement is held at its barrier
+                # rather than run to completion, and is *still alive and still
+                # holding* when the resumed process comes back below. Running it
+                # to completion here would leave the resumed process meeting
+                # nothing but a lease row belonging to a process that had
+                # already exited, which is not a concurrent write by any
+                # reading. It is released after the restart, at the end.
+                controller.wait_at_anchor(_claimant_key(claimant["role"]))
+                held_claimant = _claimant_key(claimant["role"])
+            else:
+                controller.run_to_completion(_claimant_key(claimant["role"]))
         del role
     elif fault == "writer-race":
         # "Two writers race for the same state item." They cannot both be live
@@ -1047,6 +1083,15 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
                 holder_suffix=racer["holder_suffix"],
                 # No skew: the point is that the incumbent's lease is *live*.
                 clock_offset_ms=0,
+                # The racer's own behaviours, not the case's -- giving these to
+                # the incumbent would fence out the writer that is supposed to
+                # win. Refused at acquire and then carrying on with a token the
+                # row rejects, it runs its whole script against the same state
+                # item while the incumbent is still frozen at its barrier. That
+                # is what makes the history half of section 2's single-writer
+                # observable reachable: a racer that stopped at acquire would
+                # contribute no write for an interleaving to be visible in.
+                behaviours=racer.get("behaviours", ()),
             )
             controller.run_to_completion(_claimant_key(racer["role"]))
         controller.release(role)
@@ -1145,6 +1190,12 @@ def execute_case(controller: "Controller", case: Mapping[str, Any]) -> dict:
             # component recovers into which intermediate state.
             controller.restart(role, armed=())
             controller.run_to_completion(role)
+
+    if held_claimant is not None:
+        # Only now: the resumed process has been and gone while this one was
+        # holding, which is the concurrency the case is named for.
+        controller.release(held_claimant)
+        controller.run_to_completion(held_claimant)
 
     return {
         "resolved_skew_ms": resolved_skew_ms,
@@ -1457,6 +1508,26 @@ def assert_invariants(
                         fail(
                             f"{role}: no ClockSkewRefused was recorded, so the "
                             "backward skew never reached the expiry boundary"
+                        )
+                if case["fault"] in ("writer-race", "resumed-writer-race"):
+                    # The half of section 2's single-writer observable that is
+                    # about the *history* only means something if the rejected
+                    # writer actually attempted a write. A refusal at ``acquire``
+                    # alone would leave the history containing nothing but the
+                    # winner's rows, and "no interleaving from the rejected
+                    # writer" would then be true of every run -- including one
+                    # in which atomic fencing had stopped working. So the case
+                    # requires the refusal that can only come from a write:
+                    # ``StaleWriterRefused`` is raised by the fence, inside the
+                    # write's own transaction.
+                    fenced = [
+                        row for row in rows if row["refusal"] == "StaleWriterRefused"
+                    ]
+                    if not fenced:
+                        fail(
+                            f"{role}: no write was refused by the fence, so the "
+                            "rejected writer never attempted one and 'no "
+                            "interleaving' asserts nothing about fencing"
                         )
                 if case["fault"] in ("dup-ack", "re-ack"):
                     # The ack-multiplicity injections leave no trace in the

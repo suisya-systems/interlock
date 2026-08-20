@@ -185,10 +185,23 @@ BEHAVIOUR_RE_ACK = "re-ack"
 #: (D-0003, D-0007), so replaying it means reading it back.
 BEHAVIOUR_INCIDENT_REPLAY = "incident-replay"
 
-#: Present a fencing token the lease row will reject, on two consecutive
-#: protected writes. It exists for the conformance battery: the refusal
-#: ``action_id`` collision it checks for can only happen when the *same* writer
-#: is refused twice, and no ordinary case does that.
+#: Carry on as a writer that believes it holds the lease and does not.
+#:
+#: Two things use it, and they are the same injection seen from two sides.
+#:
+#: The conformance battery needs the *same* writer refused twice, so it can
+#: check that two refusal ids do not collide -- no ordinary case does that.
+#:
+#: ACCEPTANCE.md section 2's single-writer row needs something more important:
+#: its observable is that "the state item's history in SQLite is a linear
+#: sequence with no interleaving from the rejected writer", and a writer that is
+#: turned away at ``acquire`` never attempts a write at all, so that half of the
+#: observable is true of every run and could not fail. A racer under this
+#: behaviour fabricates the token ``acquire`` refused it and runs its whole
+#: script against the same state item -- which is exactly the real hazard, a
+#: process that has not noticed it lost its lease. Every write it makes is
+#: refused *at the fence* and recorded there, and the history finally has the
+#: opportunity to show an interleaving that atomic fencing is what prevents.
 BEHAVIOUR_STALE_WRITER = "stale-writer"
 
 BEHAVIOURS = (
@@ -738,6 +751,25 @@ def op_lease_acquire(ctx: Context) -> Lease | None:
             epoch=0,
             now_ms=now_ms,
         )
+        if BEHAVIOUR_STALE_WRITER in ctx.behaviours:
+            # ... and now carry on anyway, holding a token the lease row will
+            # reject. Not a way around the refusal: the refusal above is
+            # recorded either way. It is how the case reaches the *other* half
+            # of the single-writer observable, the one about the write history,
+            # which a writer that stops at ``acquire`` can never reach.
+            #
+            # The epoch is taken from the row that actually exists and moved one
+            # past it, which is what a writer that had lost the lease without
+            # noticing would present.
+            observed_now = read_lease(ctx.connection, ctx.resource)
+            lease = Lease(
+                resource=ctx.resource,
+                holder=ctx.holder,
+                epoch=(observed_now.epoch if observed_now is not None else 0) + 1,
+                acquired_at_ms=now_ms,
+                expires_at_ms=now_ms + ctx.ttl_ms,
+            )
+            took = f"stale-writer:{type(error).__name__}"
     ctx.lease = lease
     ctx.barrier.hit(
         CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT, operation=OPERATION_LEASE_ACQUIRE

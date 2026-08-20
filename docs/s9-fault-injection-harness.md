@@ -623,13 +623,35 @@ refused and that refusal is recorded, not silently dropped", and both halves hol
 refused at the earliest point it can be, and the refusal is a query-answerable persisted record.
 The stale-token half stays where it actually works.
 
-**11.2 Two live writers on one resource are not expressible, and that is the invariant.** A
-`writer-race` case cannot arm two writers at their write windows and release them in a declared
-order, because the second one never reaches a write window: `acquire`'s upsert only replaces a
-lapsed row, so it is refused at the resource boundary. Rather than build a mechanism to defeat that,
-the case asserts it — which is precisely §2's single-writer invariant ("a stale writer is rejected,
-not merged"). The incumbent is held at a sync barrier for the whole race so the racer provably meets
-a *live* lease and not a lapsed one; the ordering is a barrier, never a sleep.
+**11.2 Two live writers on one resource are not expressible — but the rejected writer must still
+write.** A `writer-race` case cannot arm two writers at their write windows and release them in a
+declared order, because the second one never reaches a write window: `acquire`'s upsert only
+replaces a lapsed row, so it is refused at the resource boundary. The first version of this case
+stopped there and asserted the refusal, which is half of §2's single-writer observable — and only
+half. The other half is that "the state item's history in SQLite is a linear sequence with no
+interleaving from the rejected writer", and a writer turned away at `acquire` contributes no row for
+an interleaving to be visible in. That half was therefore true of every run, including one in which
+atomic fencing had stopped working.
+
+The resolution is to let the racer *carry on*: refused at `acquire`, it fabricates the token it was
+denied and runs its whole script against the same state item. That is not a way around the refusal —
+the refusal is recorded either way — it is the real hazard, a process that has not noticed it lost
+its lease. Every write it then makes is refused **at the fence**, inside the write's own
+transaction, and the history contains the rejected writer's rows for the assertion to be about. The
+case requires a `StaleWriterRefused` specifically, because that is the refusal only a write can
+produce; a `LeaseHeld` alone would mean the racer never tried.
+
+The same correction applies to "a write is attempted concurrently from a resumed process and its
+replacement". Running the replacement to completion and *then* restarting the killed process leaves
+the resumed process meeting a lease row belonging to a process that has already exited, which is not
+a concurrent write by any reading. The replacement is held at a barrier instead, alive and holding,
+and is released only after the restart has come and gone. `spawn_claimant` therefore takes `armed`
+and `behaviours` of its own — the claimant's, never the case's, since a claimant that inherited the
+case's behaviours would fence out the writer that is supposed to win.
+
+The general rule this is an instance of, and the one that cost the most rounds to learn: **an
+assertion about what a rejected actor did not do is empty unless that actor got far enough to do
+it.**
 
 **11.3 A fault injection that every case already performs is not an injection.** The Secretary and
 the other role scripts acked twice unconditionally, as standing evidence that acks are idempotent.
