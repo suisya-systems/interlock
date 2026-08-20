@@ -50,9 +50,20 @@ def _imported_modules(path: Path) -> set[str]:
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                names.add(f"{package}.{node.module}" if node.module else package)
+                base = f"{package}.{node.module}" if node.module else package
             elif node.module:
-                names.add(node.module)
+                base = node.module
+            else:  # pragma: no cover -- an absolute import always names a module
+                continue
+            names.add(base)
+            # ``from claude_org_runtime import session`` names a module in its
+            # *alias* list, not in ``node.module``. Recording only the base would
+            # miss the plainest way there is to reach a provider, so every name
+            # imported is recorded as a candidate module too. A name that turns
+            # out to be a class rather than a module is harmless here: nothing
+            # below asks whether the dotted path is importable, only whether one
+            # of its components names a session backend.
+            names.update(f"{base}.{alias.name}" for alias in node.names)
     return names
 
 

@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because a provider bound inside the same process as the suite would make "a
   backend was live" a claim about ordering rather than a fact about the run.
 
+  **The provider is qualified before collection starts.** One running next to
+  the suite would leave that comparison true for a provider the control plane
+  could not use at all, so the plugin first drives a full round trip -- readout
+  to binding to fenced write to acked delivery -- and aborts the run if it
+  cannot. Fail-closed (D-0010): a green run that measured nothing is worse than
+  a red one.
+
   **And the other direction, so the absence is not vacuous.**
   `test_substitution_scenarios.py` starts real sessions on S3 and binds them
   into S5's source of truth through `substitution.py` -- the one module that

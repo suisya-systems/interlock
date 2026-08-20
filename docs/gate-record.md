@@ -393,8 +393,11 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   `tests/gate_item11/provider_plugin.py` binding a live S3 session for the whole run — and compares
   the collected test ids, the per-phase outcome of every one of them, and the SHA-256 of every file
   each run read. All three are identical, which is `#20`'s fourth criterion (*the same suite
-  artifact, differing only in provider fixture*) evidenced rather than asserted. **Zero test
-  modifications were required**: no file under `tests/control_plane/` or
+  artifact, differing only in provider fixture*) evidenced rather than asserted. The provider is
+  **qualified before collection starts** — the plugin binds a session, writes it into S5 under a
+  fencing token through the adapter and delivers one acked effect about it, aborting the run if it
+  cannot — so the comparison is not one a provider the control plane could not use would also pass.
+  **Zero test modifications were required**: no file under `tests/control_plane/` or
   `src/claude_org_runtime/control_plane/` is touched by the commit that discharges this item.
   `tests/gate_item11/test_substitution_scenarios.py` drives the other direction — sessions really
   started by S3, bound into S5's source of truth through the one adapter that knows both

@@ -38,7 +38,7 @@ from claude_org_runtime.session.provider import (
 )
 
 from . import registry
-from .substitution import unwrap
+from .substitution import drive_once, unwrap
 
 #: Names the registry entry to bind. Absent means :data:`registry.DEFAULT_PROVIDER`.
 PROVIDER_ENV = "INTERLOCK_ITEM11_PROVIDER"
@@ -65,6 +65,9 @@ class BoundProvider:
     capabilities: CapabilityReport
     readouts: list[SessionReadout] = field(default_factory=list)
     root: Path | None = None
+    #: What the qualifying round trip did, for the run header. Empty only while
+    #: the binding is still being built.
+    drove: str = ""
 
 
 #: The binding for the current run, or ``None`` when the plugin is not loaded.
@@ -103,12 +106,21 @@ def bind(entry: "registry.ProviderEntry", root: Path) -> BoundProvider:
         ),
         f"{entry.id}.start",
     )
+    observed = _wait_for_report(provider, readout, entry)
+    # Qualify the provider against the control plane *before* the suite runs.
+    # Without this the binding would only prove that a child can be started
+    # alongside the suite, and a provider the control plane could not use would
+    # produce exactly the same green run. Raising here aborts collection, which
+    # is the fail-closed answer (D-0010): a run that measured nothing is worse
+    # than a red one.
+    drove = drive_once(provider, observed, provider_id=entry.id, root=root)
     return BoundProvider(
         entry=entry,
         provider=provider,
         capabilities=capabilities,
-        readouts=[_wait_for_report(provider, readout, entry)],
+        readouts=[observed],
         root=root,
+        drove=drove,
     )
 
 
@@ -162,7 +174,8 @@ def pytest_report_header(config: pytest.Config) -> Sequence[str]:
     return [
         f"gate item 11: control-plane suite bound to {BOUND.entry.scaffold} "
         f"({BOUND.entry.issue}), version {BOUND.capabilities.provider_version}, "
-        f"live session {state}"
+        f"live session {state}",
+        f"gate item 11: the provider drove the control plane -- {BOUND.drove}",
     ]
 
 

@@ -31,20 +31,27 @@ S1's vocabulary and S5's, not between any particular backend's and S5's:
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from typing import Any, Mapping
 
+from claude_org_runtime.control_plane.destination import KeyedDropbox
+from claude_org_runtime.control_plane.handlers import NOTIFY_RECIPIENT, spike_registry
 from claude_org_runtime.control_plane.lease import (
     Lease,
     ProtectedWrite,
+    acquire,
     effect_kind,
     fenced_insert,
     protected_write,
 )
+from claude_org_runtime.control_plane.outbox import Outbox
+from claude_org_runtime.control_plane.schema import create_control_plane, reconstruct
 from claude_org_runtime.session.provider import (
     Failure,
     Observation,
     Ok,
     ProviderResult,
+    SessionProvider,
     SessionReadout,
 )
 
@@ -182,3 +189,116 @@ def release_session(
             "UPDATE session SET released_at_ms = ? WHERE session_id = ?",
             (released_at_ms, session_id),
         )
+
+
+# --------------------------------------------------------------------------
+# One full round trip, used to qualify a provider before the suite runs
+# --------------------------------------------------------------------------
+
+#: The fixed instant the round trip is dated at. A constant rather than the wall
+#: clock: nothing here measures duration, and a real clock would make the one
+#: thing this must never be -- flaky -- possible.
+DRIVE_T0 = 1_700_000_000_000
+DRIVE_TTL_MS = 30_000
+DRIVE_RUN_ID = "item11-drive-run"
+DRIVE_RESOURCE = "item11-drive-resource"
+DRIVE_HOLDER = "item11-drive-writer"
+
+
+def drive_once(
+    provider: SessionProvider,
+    readout: SessionReadout,
+    *,
+    provider_id: str,
+    root: Path,
+) -> str:
+    """Run the control plane end to end with *readout*'s session as its subject.
+
+    This is what makes the bound run in ``test_suite_runs_unchanged.py`` a
+    measurement rather than a coincidence. Without it the plugin would only
+    prove that a provider can start a child *next to* the suite, and a provider
+    the control plane could not use at all would produce the same green run.
+    Here the provider's readout has to become a binding S5 accepts, under a
+    fencing token, with an outbox delivery on top -- so a provider that cannot
+    drive the control plane fails at ``pytest_configure`` and the suite never
+    runs.
+
+    Deliberately *not* a test. It is a precondition on the run, which is why it
+    raises rather than asserting through pytest: a failure here must abort
+    collection, not appear as one red case among the suite's own.
+
+    :returns: a one-line summary for the run header, so the log says what was
+        driven rather than only that something was.
+    """
+
+    connection = create_control_plane(root / "drive-control-plane.sqlite3")
+    try:
+        connection.execute(
+            "INSERT INTO run (run_id, status, created_at_ms, updated_at_ms)"
+            " VALUES (?, 'running', ?, ?)",
+            (DRIVE_RUN_ID, DRIVE_T0, DRIVE_T0),
+        )
+        connection.commit()
+        lease = acquire(
+            connection,
+            resource=DRIVE_RESOURCE,
+            holder=DRIVE_HOLDER,
+            now_ms=DRIVE_T0,
+            ttl_ms=DRIVE_TTL_MS,
+        )
+        bind_session(
+            connection,
+            lease,
+            readout,
+            run_id=DRIVE_RUN_ID,
+            provider=provider_id,
+            now_ms=DRIVE_T0,
+        )
+
+        # The provider's list verb has to agree that the session it just bound
+        # exists. A binding written from a readout the provider no longer knows
+        # about would be a row about nothing.
+        listed = {r.session_id for r in unwrap(provider.list_sessions(), "list_sessions")}
+        if readout.session_id not in listed:
+            raise AssertionError(
+                f"{provider_id} bound session {readout.session_id!r} is not in its "
+                f"own roster {sorted(listed)}"
+            )
+
+        dropbox = KeyedDropbox(root / "drive-destination", name="item11-drive-dropbox")
+        outbox = Outbox(
+            connection,
+            resource=DRIVE_RESOURCE,
+            holder=DRIVE_HOLDER,
+            registry=spike_registry(dropbox),
+        )
+        outbox.enqueue(
+            message_id="item11-drive-msg",
+            recipient=NOTIFY_RECIPIENT,
+            payload=f'{{"session":"{readout.session_id}"}}',
+            dedup_key=f"item11-drive:{readout.session_id}",
+            now_ms=DRIVE_T0,
+            epoch=lease.epoch,
+            run_id=DRIVE_RUN_ID,
+        )
+        attempt = outbox.attempt("item11-drive-msg", now_ms=DRIVE_T0 + 1, epoch=lease.epoch)
+        if not outbox.record_ack("item11-drive-msg", now_ms=DRIVE_T0 + 2).recorded:
+            raise AssertionError("the delivery was never acked")
+        if dropbox.effect_count(attempt.idempotency_key) != 1:
+            raise AssertionError(
+                f"the destination applied "
+                f"{dropbox.effect_count(attempt.idempotency_key)} effects, not one"
+            )
+
+        state = reconstruct(connection, now_ms=DRIVE_T0 + 3)
+        bound = [row["session_id"] for row in state.active_sessions]
+        if bound != [readout.session_id]:
+            raise AssertionError(f"active sessions are {bound}, not [{readout.session_id!r}]")
+        row = state.active_sessions[0]
+        return (
+            f"bound {row['session_id']} to {row['run_id']} as {row['observation']}"
+            f"/{row['provider_state'] or row['observation_reason']} under epoch "
+            f"{lease.epoch}, one effect delivered and acked"
+        )
+    finally:
+        connection.close()

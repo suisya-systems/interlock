@@ -18,6 +18,14 @@ the control-plane suite had already been collected and run by the same session,
 so "the suite ran while a backend was live" would be a claim about ordering
 rather than a fact about the run. Two processes make it a fact, and make the
 bound one the literal command CI runs.
+
+**Why the binding is qualified first.** A provider merely *running* next to the
+suite would leave every comparison here true for one the control plane could not
+use, which would make the whole measurement vacuous. So the plugin drives a full
+round trip -- readout to binding to fenced write to acked delivery -- before
+collection starts, and aborts the run if it cannot. The suite is then compared
+under a provider that has already been shown to work with the control plane it
+is being run against.
 """
 
 from __future__ import annotations
@@ -193,6 +201,21 @@ def test_the_bound_run_really_had_a_provider_live(bound_run):
     assert "gate item 11: control-plane suite bound to" in bound_run["stdout"]
     assert entry.scaffold in bound_run["stdout"]
     assert "live session" in bound_run["stdout"]
+
+
+def test_the_bound_provider_drove_the_control_plane_before_the_suite_ran(bound_run):
+    """The claim is *this provider*, not *some provider was running nearby*.
+
+    A child process started alongside the suite would leave the comparison above
+    true for a provider the control plane could not use at all. So the plugin
+    binds a session, writes it into S5's source of truth through the adapter
+    under a fencing token, and delivers one acked effect about it -- before
+    collection. A provider that cannot do that aborts the run rather than
+    producing a green one, and this asserts the run says it happened.
+    """
+
+    assert "gate item 11: the provider drove the control plane" in bound_run["stdout"]
+    assert "one effect delivered and acked" in bound_run["stdout"]
 
 
 def test_the_unbound_run_had_no_provider(unbound_run):
