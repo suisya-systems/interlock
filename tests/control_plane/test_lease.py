@@ -511,24 +511,15 @@ def test_a_subclass_is_not_a_str_however_equal_it_compares(cp):
     with pytest.raises(LeaseUsageError):
         eq(Sneaky("c"), value(1))
 
-    # The builder's own types admit no subclasses either: a Param or predicate
-    # subclass would pass construction-time validation and still render
-    # through its author's attribute reads.
-    Param = type(param("p"))
-    Value = type(value(1))
+    # The builder's own types admit no subclasses either: a Param, Value or
+    # predicate subclass passes every construction-time validation -- these
+    # ones do, their fields are innocent -- while its attribute reads stay its
+    # author's code, free to answer rendering with different text. Exact-type
+    # gates refuse the instance itself, however valid its fields look.
+    sneaky_param = type("SneakyParam", (type(param("p")),), {})("p")
+    sneaky_value = type("SneakyValue", (type(value(1)),), {})("x")
+    sneaky_predicate = type("SneakyIsNull", (type(is_null("x")),), {})("resolved_at_ms")
 
-    class SneakyParam(Param):
-        @property
-        def name(self):  # pragma: no cover - must never be consulted
-            return "x, writer_epoch = 1 WHERE 1 = 1 --"
-
-    class SneakyValue(Value):
-        @property
-        def constant(self):  # pragma: no cover - must never be consulted
-            return "x' WHERE 1 = 1 --"
-
-    sneaky_param = object.__new__(SneakyParam)
-    sneaky_value = object.__new__(SneakyValue)
     with pytest.raises(UnfencedStatement):
         fenced_update(
             "run",
@@ -543,21 +534,19 @@ def test_a_subclass_is_not_a_str_however_equal_it_compares(cp):
         )
     with pytest.raises(UnfencedStatement):
         eq("run_id", sneaky_param)
-
-    SneakyPredicate = type("SneakyPredicate", (type(is_null("x")),), {})
-
     with pytest.raises(UnfencedStatement):
         fenced_update(
             "run",
             set={"status": value("done")},
-            where=object.__new__(SneakyPredicate),
+            where=sneaky_predicate,
             stamps_writer_epoch=False,
         )
-    # ...and a foreign _FenceEpoch instance is not the sentinel.
+    # ...and a foreign _FenceEpoch instance is not the sentinel: the stamp is
+    # matched by identity, so only fence_epoch itself mints it.
     with pytest.raises(UnfencedStatement):
         fenced_update(
             "action",
-            set={"writer_epoch": object.__new__(type(fence_epoch))},
+            set={"writer_epoch": type(fence_epoch)()},
             where=eq("action_id", param("a")),
         )
     with pytest.raises(LeaseUsageError):
