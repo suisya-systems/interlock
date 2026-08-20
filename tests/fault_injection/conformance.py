@@ -221,6 +221,13 @@ def check_restart_is_idempotent(adapter: Any, workdir: Path, *, role: str) -> No
         controller.restart(role)
         controller.run_to_completion(role)
         first = _snapshot(controller, adapter, role)
+        if not first[contract.INVARIANT_LINEAR_WRITER_HISTORY] or not first[
+            contract.INVARIANT_RETRY_COUNT_DURABLE
+        ]:
+            raise ContractViolation(
+                f"{adapter.driver_module}: the idempotence snapshot is empty, so "
+                "'restarting twice changes nothing' compares nothing to nothing"
+            )
 
         controller.restart(role)
         controller.run_to_completion(role)
@@ -235,13 +242,27 @@ def check_restart_is_idempotent(adapter: Any, workdir: Path, *, role: str) -> No
 
 
 def _snapshot(controller: Controller, adapter: Any, role: str) -> dict:
-    now_ms = CONFORMANCE_CLOCK_BASE_MS + CONFORMANCE_TTL_MS * 4
+    """Everything a restart could change, so "changes nothing" means something.
+
+    The write history and the retry state are in here, not only the "is anything
+    unfinished" queries: an adapter whose restart appended another applied
+    action, or bumped a retry count, or re-attempted an already-acked message,
+    would leave every unfinished-work query empty and pass an idempotence check
+    that never looked at what it actually mutated.
+
+    The lease row is deliberately excluded -- a restart renews, and an expiry
+    that moves is the correct behaviour, not a durable change.
+    """
+
+    now_ms = controller.last_reported_now_ms(default=CONFORMANCE_CLOCK_BASE_MS)
     params = adapter.query_parameters(role, now_ms=now_ms)
     snapshot: dict[str, Any] = {}
     for name in (
         contract.INVARIANT_NO_UNOWNED_OUTBOX,
         contract.INVARIANT_SINGLE_ACKED_STATE,
         contract.INVARIANT_NO_PENDING_ACTION,
+        contract.INVARIANT_LINEAR_WRITER_HISTORY,
+        contract.INVARIANT_RETRY_COUNT_DURABLE,
     ):
         wanted = contract.INVARIANT_PARAMETERS[name]
         snapshot[name] = controller.query(
@@ -249,7 +270,7 @@ def _snapshot(controller: Controller, adapter: Any, role: str) -> dict:
         )
     observer = controller.observer(role)
     snapshot["effects"] = {
-        key: observer.effect_count(key)
+        key: (observer.effect_count(key), observer.attempt_count(key))
         for key in adapter.effect_keys(role, controller.case)
     }
     return snapshot

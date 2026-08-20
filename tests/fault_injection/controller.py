@@ -44,6 +44,7 @@ from tests.fault_injection.contract import (
 
 __all__ = [
     "BarrierTimeout",
+    "CaseFailure",
     "CaseTimeout",
     "Controller",
     "RoleProcess",
@@ -56,6 +57,17 @@ __all__ = [
 TEARDOWN_GRACE_S = 2.0
 
 _POSIX = os.name == "posix"
+
+
+class CaseFailure(AssertionError):
+    """A case failed, with the reproduction line attached.
+
+    Raised *instead of* re-instantiating whatever the original exception was:
+    the harness can surface exceptions whose constructors take more than a
+    message, and rebuilding one of those from a string turns a real failure into
+    a ``TypeError`` about reporting it. The original is always the chained
+    cause.
+    """
 
 
 class BarrierTimeout(AssertionError):

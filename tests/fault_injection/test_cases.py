@@ -15,6 +15,7 @@ import pytest
 
 from tests.fault_injection import conftest as policy
 from tests.fault_injection.controller import (
+    CaseFailure,
     Controller,
     assert_invariants,
     execute_case,
@@ -69,16 +70,27 @@ def test_manifest_case(
                 at_kill=outcome["at_kill"],
                 unresolved_at_kill=outcome["unresolved_at_kill"],
             )
-        except BaseException as error:
+        except Exception as error:
+            # Only ``Exception``: a skip, a keyboard interrupt or pytest's own
+            # control-flow exceptions must pass through untouched.
+            #
+            # And a *new* exception chained from the original rather than the
+            # original's type re-instantiated with a longer message: several
+            # exceptions the harness can raise have structured constructors
+            # (``subprocess.TimeoutExpired`` takes cmd and timeout), so
+            # rebuilding them from a string raises ``TypeError`` and replaces
+            # the real failure with a failure about reporting the failure. The
+            # cause is chained, so the original traceback is still what the
+            # reader sees first.
             line = repro_line(
                 case_id=case["case_id"],
                 suite_seed=policy.suite_seed(),
                 manifest_version=case["manifest_version"],
                 profile=str(profile["name"]),
             )
-            if line.splitlines()[0] not in str(error):
-                raise type(error)(f"{error}\n{line}") from error
-            raise
+            if line.splitlines()[0] in str(error):
+                raise
+            raise CaseFailure(f"{type(error).__name__}: {error}\n{line}") from error
 
 
 def test_what_this_os_does_not_run_is_enumerable() -> None:
