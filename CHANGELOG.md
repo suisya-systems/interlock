@@ -185,10 +185,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `applied_at_ms IS NULL` on an `action` update, so finished evidence is added to
   and never replaced. Merged with S7 (#14): the register entry type is
   `DestinationFencing`, named for the property rather than the place so it does
-  not shadow S7's `Destination` (a delivery target), and the package re-exports
-  neither `StaleWriterRefused` -- both modules define one and they mean the same
-  thing, so shadowing either would make `except` miss half the refusals.
-  Reconciling them to one class is follow-up work.
+  not shadow S7's `Destination` (a delivery target). Both modules initially
+  defined their own `StaleWriterRefused` and the package exported neither, so
+  that shadowing either would not make `except` miss half the refusals; #45
+  since consolidated the two into the lease-owned class -- see the Changed
+  entry below.
 
   **Where a destination can enforce a stale token it does, and where it cannot
   that is written down.** `DESTINATIONS` refuses to register a destination that
@@ -568,6 +569,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Per D-0026 the tests are the durable output; the implementation is throwaway
   by default. Design note: `docs/curator-promotion-gate.md`.
+
+### Changed
+
+- **The two `StaleWriterRefused` classes are one class, the lease's** (#45).
+  S7 grew its own while S6 was in flight; `control_plane.outbox` now imports
+  and re-exports `lease.StaleWriterRefused`, and every outbox refusal path
+  satisfies the shared constructor's contract: `action_id` names the durable
+  `action` row in status `'refused'`, and `observed` is the lease row read
+  under `BEGIN IMMEDIATE` in the same transaction that records the refusal
+  (`None` if the resource has no row). With one class left the package exports
+  the name, so `except control_plane.StaleWriterRefused` catches every refusal
+  from both modules; it is also a `LeaseRefusal` now, as the lease's copy
+  always was.
 
 ### Fixed
 

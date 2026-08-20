@@ -70,7 +70,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 
 from .destination import DeliveryReceipt, DestinationRefusal
-from .lease import Lease, StaleWriterRefused, read_lease
+from .lease import Lease, StaleWriterRefused, _immediate, read_lease
 
 __all__ = [
     "CHECKPOINTS",
@@ -1138,7 +1138,15 @@ class Outbox:
         """
 
         action_id = f"refused-{uuid.uuid4().hex}"
-        with self._connection:
+        # BEGIN IMMEDIATE, not ``with self._connection:``. Under the legacy
+        # isolation level this codebase's connections run on, the connection
+        # context manager begins no transaction of its own -- the implicit
+        # BEGIN happens at the INSERT, so the read above it would run in
+        # autocommit and another connection could move the lease between the
+        # row we observe and the refusal committing against it. The write lock
+        # taken here up front is the same guard :func:`.lease.protected_write`
+        # uses to keep its own classification honest.
+        with _immediate(self._connection):
             observed = read_lease(self._connection, self._resource)
             self._connection.execute(
                 """

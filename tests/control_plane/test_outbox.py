@@ -1088,6 +1088,32 @@ def test_a_stale_writer_cannot_even_enqueue(cp, dropbox):
     assert (observed.holder, observed.epoch) == ("writer-b", 2)
 
 
+def test_a_refusal_with_no_lease_row_at_all_observes_none(cp, dropbox):
+    """The ``observed`` contract's other half: ``None`` when no row exists.
+
+    A resource that has never been leased is not the same evidence as a row
+    held by somebody else, and the class promises to carry the difference
+    rather than a stale sentinel. (Never leased, not deleted: S5's trigger
+    forbids deleting lease rows, so absence can only mean the resource was
+    never taken.)
+    """
+
+    outbox = Outbox(
+        cp,
+        resource="never-leased-resource",
+        holder=HOLDER,
+        registry=spike_registry(dropbox),
+    )
+
+    with pytest.raises(StaleWriterRefused, match="refused to enqueue") as refused:
+        enqueue(outbox, message_id="msg-unleased", dedup_key="dk-unleased")
+
+    refusals = actions(cp, status="refused")
+    assert len(refusals) == 1, "the rejection is durable even with no lease row"
+    assert refused.value.action_id == refusals[0]["action_id"]
+    assert refused.value.observed is None
+
+
 def test_an_expired_lease_refuses_the_enqueue_too(cp, dropbox):
     outbox = make_outbox(cp, dropbox)
     with pytest.raises(StaleWriterRefused):
@@ -1116,11 +1142,17 @@ def test_the_lease_is_re_read_between_the_durable_write_and_the_effect(cp, dropb
     outbox = make_outbox(cp, dropbox, checkpoint=lose_the_lease)
     message = enqueue(outbox)
 
-    with pytest.raises(StaleWriterRefused, match="before the effect was attempted"):
+    with pytest.raises(StaleWriterRefused, match="before the effect was attempted") as refused:
         outbox.attempt(message.message_id, now_ms=T0 + 10, epoch=EPOCH)
 
     assert dropbox.effects() == (), "no effect was applied by the superseded writer"
-    assert len(actions(cp, status="refused")) == 1
+    refusals = actions(cp, status="refused")
+    assert len(refusals) == 1
+    assert refused.value.action_id == refusals[0]["action_id"], (
+        "the refusal row, not the pending intent recorded just before it"
+    )
+    observed = refused.value.observed
+    assert (observed.holder, observed.epoch) == ("writer-b", 2)
 
 
 def test_the_destination_refuses_a_superseded_fencing_token(tmp_path):
