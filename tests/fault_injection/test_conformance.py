@@ -72,6 +72,41 @@ def test_the_non_delivery_operations_expose_their_windows(
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)
+def test_the_observation_step_exposes_its_windows(adapter: Any, tmp_path: Path) -> None:
+    """The observation operation is armable like any other durable write.
+
+    It is on the Supervisor's script only -- the Supervisor is the role that
+    binds a session, so it is the role that observes it -- and a window the
+    applicability matrix advertises has to be reachable or a case arming it
+    would time out in CI instead of failing at collection (design 3.1).
+    """
+
+    conformance.check_checkpoint_blocks(
+        adapter,
+        tmp_path,
+        role=contract.ROLE_SUPERVISOR,
+        operation=contract.OPERATION_OBSERVE,
+        checkpoint=contract.CHECKPOINT_BEFORE_DURABLE_WRITE,
+    )
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)
+def test_no_two_refusals_in_one_case_share_an_attempt_id(
+    adapter: Any, tmp_path: Path
+) -> None:
+    conformance.check_refusal_ids_are_unique(adapter, tmp_path)
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)
+def test_the_escalation_path_can_record_a_recommendation(
+    adapter: Any, tmp_path: Path
+) -> None:
+    """So that the matrix's "none were produced" is evidence and not a tautology."""
+
+    conformance.check_escalation_path_can_record(adapter, tmp_path)
+
+
+@pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)
 def test_the_barrier_round_trip_releases_the_process(adapter: Any, tmp_path: Path) -> None:
     conformance.check_barrier_round_trip(
         adapter, tmp_path, role=contract.ROLE_DISPATCHER

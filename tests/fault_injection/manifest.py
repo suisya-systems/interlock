@@ -43,12 +43,15 @@ from tests.fault_injection.contract import (
     OPERATION_BIND,
     OPERATION_ENQUEUE,
     OPERATION_LEASE_ACQUIRE,
+    OPERATION_LEASE_RENEW,
+    OPERATION_OBSERVE,
     ROLES,
     ROLE_DISPATCHER,
     ROLE_SECRETARY,
     ROLE_SUPERVISOR,
     SQL_INVARIANTS,
     SYNC_LEASE_ACQUIRED,
+    SYNC_OBSERVED,
 )
 
 __all__ = [
@@ -68,7 +71,14 @@ MANIFEST_PATH = Path(__file__).with_name("manifest.json")
 
 #: Bumped on any semantic change to the matrix. A failure report carries it
 #: alongside the contract version (design 4.2, 4.4).
-MANIFEST_VERSION = 1
+#:
+#: 1 -> 2 (I-11, Issue ``#16``): the matrix grows from S9's seed set to the whole
+#: ``ACCEPTANCE.md`` section 2 table. The bump is not cosmetic -- the version is
+#: stamped into every case entry and mixed into every per-case seed, so it also
+#: re-rolls the payload bytes and schedule jitter of the 35 seed cases. That is
+#: the intended meaning of a semantic change to the matrix: the old evidence was
+#: recorded against manifest 1 and is not silently re-labelled as manifest 2.
+MANIFEST_VERSION = 2
 
 #: A fixed constant, not a wall-clock reading: the injected clock's base
 #: (design 7). It is the same instant the S6/S7 suites use.
@@ -102,6 +112,13 @@ PROFILES: Mapping[str, Mapping[str, Any]] = {
 
 #: Recorded rather than left implicit (design 5): scale is controlled by policy,
 #: not by product, and anything pruned is listed.
+#: The two collapse rules ACCEPTANCE.md section 2 names without choosing between
+#: them (Q-0002). The matrix must cover both; this file expresses no preference.
+COLLAPSE_RULES = ("increment-in-place", "open-linked")
+
+#: The faults whose subject is the incident packet rather than the delivery.
+INCIDENT_FAULTS = ("incident-repeat", "incident-replay")
+
 PRUNING_RULE = (
     "Aligned combination cases cover the multi-role subsets against a curated "
     "set of (operation, checkpoint) pairs -- the delivery loop's windows where "
@@ -136,6 +153,8 @@ def _case(
     restart_after: bool = True,
     staggered: Sequence[Mapping[str, Any]] | None = None,
     incident_params: Mapping[str, Any] | None = None,
+    observation: Mapping[str, Any] | None = None,
+    unavailable_attempts: int | None = None,
 ) -> dict:
     """One manifest entry. Every field a case needs that the id does not carry.
 
@@ -175,12 +194,31 @@ def _case(
         },
         "messages": messages,
         "behaviours": list(behaviours),
-        "claimant": dict(claimant) if claimant else None,
+        "claimant": (
+            {
+                key: (list(value) if isinstance(value, tuple) else value)
+                for key, value in claimant.items()
+            }
+            if claimant
+            else None
+        ),
         "skew": dict(skew) if skew else None,
         "release_after_barrier": release_after_barrier,
         "restart_after": restart_after,
         "staggered": [dict(step) for step in staggered] if staggered else None,
         "incident_params": dict(incident_params) if incident_params else None,
+        # Normalised to JSON's own types, so the frozen literal and the
+        # generator compare equal: a tuple survives ``dict()`` unchanged but
+        # reads back from JSON as a list.
+        "observation": (
+            {
+                "mode": observation["mode"],
+                "escalate_on": list(observation.get("escalate_on", ())),
+            }
+            if observation
+            else None
+        ),
+        "unavailable_attempts": unavailable_attempts,
         "ttl_ms": TTL_MS,
         "clock_base_ms": CLOCK_BASE_MS,
         "manifest_version": MANIFEST_VERSION,
@@ -485,6 +523,389 @@ def build_cases() -> list[dict]:
         )
     )
 
+    # =====================================================================
+    # I-11 (Issue #16): the rest of the ACCEPTANCE.md section 2 table.
+    #
+    # Everything above is S9's seed set -- one case per fault kind, per
+    # checkpoint, per lane, plus the combination seeds. Everything below closes
+    # the gap between that set and the six-row table, and each block names the
+    # row and the injected phrase it discharges so the table can be checked
+    # against this file without opening the manifest.
+    # =====================================================================
+
+    # -- Lease row: "kill the lease holder without release" -----------------
+    #
+    # The holder dies mid-script without ever releasing, a claimant whose clock
+    # has crossed the expiry takes the resource over, and the restarted holder
+    # comes back to find the lease gone. It is refused at ``acquire`` and the
+    # refusal is recorded -- which is the observable this row asks for, obtained
+    # at the point a SIGKILLed process can actually be refused. (A killed
+    # process keeps no epoch in memory, so it cannot present a stale token the
+    # way the SIGSTOP cases' holder does; that half of the row is theirs.)
+    for role, operation, checkpoint, profiles in (
+        (ROLE_DISPATCHER, OPERATION_LEASE_RENEW, CHECKPOINT_BEFORE_DURABLE_WRITE,
+         ("fast", "full")),
+        (ROLE_SUPERVISOR, OPERATION_LEASE_RENEW, CHECKPOINT_BEFORE_DURABLE_WRITE,
+         ("full",)),
+    ):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=operation,
+                checkpoint=checkpoint,
+                fault="sigkill-expire",
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={role: (f"{operation}@{checkpoint}:1",)},
+                claimant={
+                    "role": role,
+                    "holder_suffix": "b",
+                    "clock": "forward",
+                    "observation": "sibling",
+                },
+                expected={
+                    "queries": _TAKEOVER_QUERIES,
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": role,
+                },
+            )
+        )
+
+    # -- Single-writer row: "two writers race for the same state item" ------
+    #
+    # They cannot both be live writers, and that is the finding rather than a
+    # limitation: ``acquire`` only replaces a lapsed row, so the second claimant
+    # is refused at the resource boundary. "A stale writer is rejected, not
+    # merged" is observed exactly there. The incumbent is held at a barrier for
+    # the whole race so the racer provably meets a *live* lease.
+    for role, profiles in ((ROLE_DISPATCHER, ("fast", "full")), (ROLE_SECRETARY, ("full",))):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_LEASE_ACQUIRE,
+                checkpoint=SYNC_LEASE_ACQUIRED,
+                fault="writer-race",
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={role: (f"{OPERATION_LEASE_ACQUIRE}@{SYNC_LEASE_ACQUIRED}:1",)},
+                restart_after=False,
+                claimant={
+                    "role": role,
+                    "holder_suffix": "race",
+                    "clock": "forward",
+                    "observation": "sibling",
+                    # Refused at acquire *and then carrying on* with a token the
+                    # lease row rejects. Without this the racer contributes no
+                    # write at all, and section 2's "the state item's history is
+                    # a linear sequence with no interleaving from the rejected
+                    # writer" would be true of every run -- including a run in
+                    # which atomic fencing had stopped working.
+                    "behaviours": ("stale-writer",),
+                },
+                expected={
+                    "queries": (
+                        contract.INVARIANT_LINEAR_WRITER_HISTORY,
+                        contract.INVARIANT_RECORDED_REFUSALS,
+                        contract.INVARIANT_LEASE_SINGLE_HOLDER,
+                    ),
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+            )
+        )
+
+    # -- Single-writer row: "a write is attempted concurrently from a resumed
+    #    process and its replacement" ---------------------------------------
+    #
+    # Same mechanic as the lease row above, anchored mid-write instead of at the
+    # lease boundary: the resumed process is the restarted generation and the
+    # replacement is the claimant that took the resource over while it was gone.
+    cases.append(
+        _case(
+            targets=(ROLE_DISPATCHER,),
+            operation=OPERATION_ENQUEUE,
+            checkpoint=CHECKPOINT_BEFORE_DURABLE_WRITE,
+            fault="resumed-writer-race",
+            lane=LANE_LINUX,
+            profiles=("fast", "full"),
+            arms={
+                ROLE_DISPATCHER: (
+                    f"{OPERATION_ENQUEUE}@{CHECKPOINT_BEFORE_DURABLE_WRITE}:1",
+                )
+            },
+            # The *resumed* process is the stale writer here: it comes back with
+            # no epoch, is refused at acquire, and carries on believing it holds
+            # the lease -- which is what makes its writes race the replacement's
+            # rather than simply not happening. Inert in the first generation,
+            # which acquires cleanly, and inert for the replacement, which is
+            # never refused.
+            behaviours=("stale-writer",),
+            claimant={
+                "role": ROLE_DISPATCHER,
+                "holder_suffix": "b",
+                "clock": "forward",
+                "observation": "sibling",
+                # The replacement is held here, still alive and still holding,
+                # while the resumed process comes back and writes. "A write is
+                # attempted concurrently from a resumed process and its
+                # replacement" needs both to exist at once; a replacement that
+                # had already exited would leave the resumed process racing a
+                # lease row rather than a writer.
+                "arms": (f"{OPERATION_ATTEMPT}@{CHECKPOINT_DELIVERED_BEFORE_ACK}:1",),
+            },
+            expected={
+                "queries": _TAKEOVER_QUERIES,
+                "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                "recovery_owner": ROLE_DISPATCHER,
+            },
+        )
+    )
+
+    # -- Outbox-resend row: "hold the recipient unavailable across several
+    #    retry attempts" ---------------------------------------------------
+    #
+    # The invariant this row names is that the retry count is "monotonically
+    # increasing, restart-surviving", so the case has to contain a restart --
+    # a run without one could not observe the surviving half at all. The
+    # refusal budget lives in the destination's own attempt log, so it keeps
+    # counting across the kill instead of starting again.
+    for role, profiles in ((ROLE_DISPATCHER, ("fast", "full")), (ROLE_SECRETARY, ("full",))):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_ATTEMPT,
+                checkpoint=CHECKPOINT_DELIVERED_BEFORE_ACK,
+                fault="recipient-unavailable",
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={
+                    role: (f"{OPERATION_ATTEMPT}@{CHECKPOINT_DELIVERED_BEFORE_ACK}:1",)
+                },
+                behaviours=("recipient-unavailable",),
+                unavailable_attempts=3,
+                expected={
+                    "queries": (
+                        contract.INVARIANT_NO_UNOWNED_OUTBOX,
+                        contract.INVARIANT_RETRY_COUNT_DURABLE,
+                        contract.INVARIANT_SINGLE_ACKED_STATE,
+                        contract.INVARIANT_NO_PENDING_ACTION,
+                    ),
+                    "destination": _KILL_DESTINATION,
+                    "recovery_owner": role,
+                },
+            )
+        )
+
+    # -- Ack row: "duplicate the ack", "ack an already-acked message",
+    #    "deliver the ack after the sender has restarted" -------------------
+    #
+    # All three used to happen in every case and therefore in no case: the ack
+    # step acked twice unconditionally, so a regression in either shape had
+    # nowhere to show. The repeat is behaviour-driven now and these are the
+    # cases that ask for it. The observable is section 2's own: "message
+    # identity in SQLite shows exactly one acked state regardless of ack
+    # multiplicity; the recipient's effect count is one".
+    for role, fault, behaviour, profiles in (
+        (ROLE_DISPATCHER, "dup-ack", "dup-ack", ("fast", "full")),
+        (ROLE_SECRETARY, "dup-ack", "dup-ack", ("full",)),
+        (ROLE_SUPERVISOR, "re-ack", "re-ack", ("fast", "full")),
+        (ROLE_DISPATCHER, "re-ack", "re-ack", ("full",)),
+    ):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_ACK,
+                checkpoint=CHECKPOINT_BEFORE_DURABLE_WRITE,
+                fault=fault,
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={role: (f"{OPERATION_ACK}@{CHECKPOINT_BEFORE_DURABLE_WRITE}:1",)},
+                release_after_barrier=True,
+                restart_after=False,
+                expected={
+                    "queries": (
+                        contract.INVARIANT_SINGLE_ACKED_STATE,
+                        contract.INVARIANT_NO_UNOWNED_OUTBOX,
+                        contract.INVARIANT_NO_PENDING_ACTION,
+                        # Without this the case would pass whether or not the
+                        # second ack was ever issued: an idempotent ack leaves
+                        # the state it found, so "exactly one acked state" reads
+                        # the same after one ack as after two. The ignored ack's
+                        # ledger row is the evidence that the injection happened.
+                        contract.INVARIANT_RECORDED_REFUSALS,
+                    ),
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+                behaviours=(behaviour,),
+                incident_params={
+                    "collapse": None,
+                    "reconcile_interval_ms": None,
+                },
+            )
+        )
+
+    # The late ack: the sender dies after delivery and before the ack is
+    # recorded, and the ack lands only in the generation that comes back. "A
+    # lost ack causes a resend (safe), never a lost message", and the late ack
+    # changes nothing.
+    for role, profiles in ((ROLE_DISPATCHER, ("fast", "full")), (ROLE_SUPERVISOR, ("full",))):
+        cases.append(
+            _case(
+                targets=(role,),
+                operation=OPERATION_ATTEMPT,
+                checkpoint=CHECKPOINT_DELIVERED_BEFORE_ACK,
+                fault="late-ack",
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={
+                    role: (f"{OPERATION_ATTEMPT}@{CHECKPOINT_DELIVERED_BEFORE_ACK}:1",)
+                },
+                expected={
+                    "queries": (
+                        contract.INVARIANT_NO_UNOWNED_OUTBOX,
+                        contract.INVARIANT_SINGLE_ACKED_STATE,
+                        contract.INVARIANT_RETRY_COUNT_DURABLE,
+                        contract.INVARIANT_NO_PENDING_ACTION,
+                    ),
+                    "destination": _KILL_DESTINATION,
+                    "recovery_owner": role,
+                },
+            )
+        )
+
+    # -- Dedup row: "raise the same incident condition repeatedly within a
+    #    window", "replay a persisted incident packet" ---------------------
+    #
+    # This is the block Q-0002 governs, and the shape is dictated by what §2
+    # asks for rather than by what would be convenient: "tests must parameterise
+    # both rather than hard-code either". So every case names its collapse rule
+    # and its re-notification window, the driver implements both rules and is
+    # told which to apply, and `_validate_incident_parameterisation` refuses a
+    # matrix that has drifted onto one rule or one window. Nothing here decides
+    # Q-0002; the matrix covers it.
+    #
+    # The window is made to *do* something, too. A parameter that is carried but
+    # never changes an outcome is indistinguishable from a hard-coded one, so one
+    # case declares a window its own raises fall outside of and expects no
+    # collapse at all.
+    #
+    # ``expect_collapse`` is declared rather than derived. Deriving it would mean
+    # comparing the window against this harness's step interval inside the
+    # assertion, which bakes an implementation detail of the driver into the
+    # thing that is supposed to be checking the driver.
+    for fault, collapse, window_ms, expect_collapse, profiles in (
+        ("incident-repeat", "increment-in-place", 5_000, True, ("fast", "full")),
+        ("incident-repeat", "open-linked", 60_000, True, ("full",)),
+        # The window is too small for the second raise to fall inside it, so the
+        # repeat is not a repeat *within a window* and nothing is collapsed.
+        ("incident-repeat", "open-linked", 10, False, ("full",)),
+        ("incident-replay", "increment-in-place", 60_000, True, ("fast", "full")),
+        ("incident-replay", "open-linked", 5_000, True, ("full",)),
+    ):
+        replay = fault == "incident-replay"
+        variant = f"{collapse}-{'in' if expect_collapse else 'out'}"
+        cases.append(
+            _case(
+                targets=(ROLE_SUPERVISOR,),
+                operation=OPERATION_OBSERVE,
+                checkpoint=SYNC_OBSERVED,
+                fault=fault,
+                variant=variant,
+                lane=LANE_LINUX,
+                profiles=profiles,
+                arms={ROLE_SUPERVISOR: (f"{OPERATION_OBSERVE}@{SYNC_OBSERVED}:1",)},
+                release_after_barrier=True,
+                restart_after=False,
+                behaviours=("incident-replay",) if replay else (),
+                observation={"mode": contract.OBSERVATION_SILENT, "escalate_on": ()},
+                incident_params={
+                    # Case data, never composed by the driver: Q-0002 asks what
+                    # composes an incident dedup key, and the two spellings
+                    # below differ in composition on purpose so no case can be
+                    # relying on one shape.
+                    "dedup_key": (
+                        f"observe/{fault}/{collapse}"
+                        if expect_collapse
+                        else f"{fault}:{collapse}:outside"
+                    ),
+                    "repeats": 2,
+                    "collapse": collapse,
+                    "renotify_window_ms": window_ms,
+                    "expect_collapse": expect_collapse,
+                    # Q-0003, not Q-0002. Named so it is visibly unset rather
+                    # than absent, and refused a value by validation.
+                    "reconcile_interval_ms": None,
+                },
+                expected={
+                    "queries": (
+                        contract.INVARIANT_INCIDENT_COLLAPSE,
+                        contract.INVARIANT_UNRESOLVED_INCIDENTS,
+                        contract.INVARIANT_OBSERVATION_CLASSIFIED,
+                        contract.INVARIANT_NO_ANOMALY_ESCALATION,
+                    ),
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+            )
+        )
+
+    # -- Observation-outage row (D-0006) ------------------------------------
+    #
+    # "Make the observation path fail or return nothing while the worker is
+    # genuinely healthy." Two distinct injections, because the whole of D-0006
+    # is that they are distinct: a read that *fails* is
+    # ``OBSERVATION_UNAVAILABLE`` and a read that *returns nothing* is
+    # ``NO_ACTIVITY_EVIDENCE``, and neither is an anomaly.
+    #
+    # Each case also declares an escalation policy naming the very state the
+    # injection produces. That is what makes the second half of the row
+    # falsifiable: the driver is *asked* to escalate and must refuse, so
+    # ``no-anomaly-escalation`` counts a row a broken driver would have written
+    # rather than a row nothing in the tree can write.
+    for mode, lane, profiles in (
+        # The off-Linux add-on has a 20-case budget of its own (design 9) and
+        # this fills the last slot deliberately: the read-failure injection is
+        # the row's headline, it touches no signal, and D-0006 is a
+        # control-plane property worth proving on every OS. The silent-read
+        # injection runs on the conformance lane, which is where I-11's gate
+        # evidence is read from in any case.
+        (contract.OBSERVATION_UNREADABLE, LANE_PORTABLE, ("fast", "full")),
+        (contract.OBSERVATION_SILENT, LANE_LINUX, ("fast", "full")),
+    ):
+        cases.append(
+            _case(
+                targets=(ROLE_SUPERVISOR,),
+                operation=OPERATION_OBSERVE,
+                checkpoint=SYNC_OBSERVED,
+                fault="observation-outage",
+                variant=mode,
+                lane=lane,
+                profiles=profiles,
+                arms={ROLE_SUPERVISOR: (f"{OPERATION_OBSERVE}@{SYNC_OBSERVED}:1",)},
+                release_after_barrier=True,
+                restart_after=False,
+                observation={
+                    "mode": mode,
+                    "escalate_on": (contract.OBSERVATION_FACT_STATES[mode],),
+                },
+                expected={
+                    "queries": (
+                        contract.INVARIANT_OBSERVATION_CLASSIFIED,
+                        contract.INVARIANT_NO_ANOMALY_ESCALATION,
+                        contract.INVARIANT_RECORDED_REFUSALS,
+                        # The packet is in the row and not in anyone's context
+                        # (D-0003, D-0007), so it is readable from SQLite alone
+                        # after the fact -- which is what gate item 4's "work
+                        # resumes from unresolved incidents" rests on.
+                        contract.INVARIANT_UNRESOLVED_INCIDENTS,
+                    ),
+                    "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
+                    "recovery_owner": None,
+                },
+            )
+        )
+
     # -- aligned combinations ------------------------------------------------
     for targets in (
         (ROLE_SUPERVISOR, ROLE_DISPATCHER),
@@ -697,6 +1118,65 @@ def validate_case(case: Mapping[str, Any]) -> None:
             "under its new clock (design 7)"
         )
 
+    if case["fault"] in INCIDENT_FAULTS:
+        parameters = case["incident_params"]
+        if parameters is None:
+            raise ContractViolation(
+                f"{case_id}: an incident case carries its Q-0002 parameters"
+            )
+        # The relaxation, and its exact scope (I-11, Issue `#16`).
+        #
+        # S9 refused any value in ``incident_params`` on the grounds that S9
+        # fixes none, which was right for S9: it shipped no incident case, so a
+        # value there could only have been a decision taken by accident.
+        # ACCEPTANCE.md section 2 asks something different of the *matrix*:
+        # "tests must parameterise both rather than hard-code either". A case
+        # therefore carries a value, and the discipline moves up one level -- to
+        # :func:`_validate_incident_parameterisation`, which refuses a matrix
+        # that has quietly settled on one rule or one window. Neither this
+        # function nor that one expresses a preference between the rules, and
+        # ``Q-0002`` stays open.
+        if parameters.get("collapse") not in COLLAPSE_RULES:
+            raise ContractViolation(
+                f"{case_id}: {parameters.get('collapse')!r} is not one of the "
+                f"collapse rules {COLLAPSE_RULES}; an incident case names the "
+                "rule it runs under so the matrix can cover both"
+            )
+        window = parameters.get("renotify_window_ms")
+        if not isinstance(window, int) or window <= 0:
+            raise ContractViolation(
+                f"{case_id}: the re-notification window is the *other* half of "
+                "Q-0002 and is stated in absolute time, so a case names a "
+                f"positive value; got {window!r}"
+            )
+        if not isinstance(parameters.get("repeats"), int) or parameters["repeats"] < 2:
+            raise ContractViolation(
+                f"{case_id}: 'raise the same condition repeatedly' needs at "
+                "least two raises"
+            )
+        if not isinstance(parameters.get("expect_collapse"), bool):
+            raise ContractViolation(
+                f"{case_id}: a case says whether its raises fall inside its own "
+                "window; deriving it from the window would bake this harness's "
+                "step interval into the assertion"
+            )
+        if not parameters.get("dedup_key"):
+            raise ContractViolation(
+                f"{case_id}: the dedup key is case data. Q-0002 asks what "
+                "composes it, and a driver-side formula would answer that by "
+                "inertia -- exactly as a role-to-resource table would answer "
+                "Q-0001"
+            )
+        if "reconcile_interval_ms" not in parameters:
+            raise ContractViolation(
+                f"{case_id}: incident_params omits 'reconcile_interval_ms'"
+            )
+        if parameters["reconcile_interval_ms"] is not None:
+            raise ContractViolation(
+                f"{case_id}: reconcile_interval_ms is Q-0003, not Q-0002, and "
+                "nothing in this task settles it; leave it unset"
+            )
+
     if case["fault"] in ("drop-delivery", "dup-delivery", "lost-ack"):
         if not case["release_after_barrier"]:
             raise ContractViolation(
@@ -725,6 +1205,59 @@ def validate_case(case: Mapping[str, Any]) -> None:
     for profile in case["profiles"]:
         if profile not in PROFILES:
             raise ContractViolation(f"{case_id}: {profile!r} is not a profile")
+
+
+def _validate_incident_parameterisation(manifest: Mapping[str, Any]) -> None:
+    """Q-0002 is parameterised by the matrix, not answered by it.
+
+    ``ACCEPTANCE.md`` section 2's dedup row is explicit that the Issue fixes the
+    incident *fields* and not the semantics -- whether a repeat increments the
+    retry count on the existing incident or opens a linked one is unresolved,
+    "as is the re-notification window in absolute time -- both are Q-0002" --
+    and that "tests must parameterise both rather than hard-code either".
+
+    Per-case validation lets a case name a rule. This is what stops the matrix
+    as a whole from having quietly picked one: every rule in the vocabulary must
+    appear, and more than one window must appear, so no single value can be
+    load-bearing on a pass. A matrix that drifted onto one rule fails at
+    collection with the drift named, rather than passing and reading as though
+    the question were settled.
+
+    Q-0003 is a different question and stays out of it: ``reconcile_interval_ms``
+    is refused a value by :func:`validate_case`.
+    """
+
+    incident_cases = [
+        case for case in manifest["cases"] if case["fault"] in INCIDENT_FAULTS
+    ]
+    if not incident_cases:
+        raise ContractViolation(
+            "the dedup row of ACCEPTANCE.md section 2 names two injections -- a "
+            "repeated incident condition and a replayed packet -- and the "
+            "matrix has no case for either"
+        )
+    rules = {case["incident_params"]["collapse"] for case in incident_cases}
+    if rules != set(COLLAPSE_RULES):
+        raise ContractViolation(
+            f"the incident cases run under {sorted(rules)}; Q-0002 is open, so "
+            f"the matrix covers every rule in {sorted(COLLAPSE_RULES)} rather "
+            "than settling on one by omission"
+        )
+    windows = {case["incident_params"]["renotify_window_ms"] for case in incident_cases}
+    if len(windows) < 2:
+        raise ContractViolation(
+            f"every incident case declares the same re-notification window "
+            f"({sorted(windows)}); one window cannot show that the assertion "
+            "does not depend on its value, which is what parameterising it means"
+        )
+    if not any(
+        case["incident_params"]["expect_collapse"] is False for case in incident_cases
+    ):
+        raise ContractViolation(
+            "no incident case declares a window its own raises fall outside of, "
+            "so the window is carried but never does anything -- an inert "
+            "parameter is indistinguishable from a hard-coded one"
+        )
 
 
 def validate_manifest(manifest: Mapping[str, Any]) -> None:
@@ -765,6 +1298,8 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
             f"the portable lane holds {portable} cases, over its 20-case "
             "off-Linux budget"
         )
+
+    _validate_incident_parameterisation(manifest)
 
     # Coverage the design requires S9 to seed: one case per fault kind, per
     # checkpoint, per lane.

@@ -554,6 +554,101 @@ def check_invariant_queries_are_not_vacuous(adapter: Any, workdir: Path, *, role
                 )
 
 
+def check_refusal_ids_are_unique(adapter: Any, workdir: Path) -> None:
+    """No two refusals recorded in one case share an ``action_id``.
+
+    A refusal's ``action_id`` is whatever the driver passed as ``attempt_id``,
+    and it is the primary key of the row. A harness cannot use a uuid there --
+    a uuid in the evidence is a re-run that cannot be compared -- so the ids are
+    composed, and a composed id collides the moment the same writer is refused
+    twice on the same operation. The collision does not surface as a duplicate
+    row: it surfaces as an ``IntegrityError`` raised from inside the write's own
+    transaction, *instead of* the refusal exception, which rolls the refusal
+    back. The record ACCEPTANCE.md section 2 requires to be durable is precisely
+    the thing that is lost.
+
+    S7 hit this and randomises its own bare-refusal ids; this check is how the
+    harness keeps the property without being able to.
+    """
+
+    role = contract.ROLE_SUPERVISOR
+    case = synthetic_case(
+        case_id="conformance-refusal-ids",
+        role=role,
+        arms={},
+        # The collision cannot happen unless the same writer is refused twice,
+        # and no ordinary case does that. So the battery injects it: a token one
+        # epoch off the lease row, presented on two consecutive protected
+        # writes. A clean run would leave nothing to scan and this check would
+        # pass over an empty set -- which is the same vacuity it exists to catch
+        # elsewhere.
+        behaviours=("stale-writer",),
+    )
+    with _controller(adapter, workdir, case) as controller:
+        controller.bootstrap()
+        controller.spawn(role, armed=())
+        controller.run_to_completion(role)
+
+        now_ms = controller.last_reported_now_ms(default=CONFORMANCE_CLOCK_BASE_MS)
+        params = adapter.query_parameters(role, now_ms=now_ms)
+        history = controller.query(
+            contract.INVARIANT_LINEAR_WRITER_HISTORY, scope=params["scope"]
+        )
+        refusals = [row for row in history if row["status"] == "refused"]
+        if len(refusals) < 2:
+            raise ContractViolation(
+                f"{adapter.driver_module}: the stale-writer injection produced "
+                f"{len(refusals)} refusal row(s); at least two are needed for a "
+                "repeated id to be observable at all"
+            )
+        ids = [row["action_id"] for row in refusals]
+        duplicates = sorted({name for name in ids if ids.count(name) > 1})
+        if duplicates:  # pragma: no cover - the primary key usually raises first
+            raise ContractViolation(
+                f"{adapter.driver_module}: {role} wrote refusal rows sharing "
+                f"{duplicates}; a refusal id that repeats loses the refusal it "
+                "was supposed to record"
+            )
+
+
+def check_escalation_path_can_record(adapter: Any, workdir: Path) -> None:
+    """A recommendation *can* be recorded, so its absence is evidence.
+
+    The observation cases assert that no termination/restart recommendation was
+    produced from an outage (ACCEPTANCE.md section 2, D-0006). That assertion is
+    a count, and a count over a path nothing can reach is zero forever -- it
+    would pass on the day the rule broke, and on every day before it.
+
+    So the battery drives the path with a fact state D-0006 says nothing about,
+    supplied as case data, and asserts the row appears. Nothing here claims that
+    state *should* escalate: the policy is an input, Q-0012 is open, and what is
+    being checked is that the query and the write both work.
+    """
+
+    role = contract.ROLE_SUPERVISOR
+    case = synthetic_case(case_id="conformance-escalation", role=role, arms={})
+    case["observation"] = {
+        "mode": contract.OBSERVATION_HEALTHY,
+        "escalate_on": [contract.FACT_ACTIVE_EVIDENCE],
+    }
+    with _controller(adapter, workdir, case) as controller:
+        controller.bootstrap()
+        controller.spawn(role, armed=())
+        controller.run_to_completion(role)
+
+        now_ms = controller.last_reported_now_ms(default=CONFORMANCE_CLOCK_BASE_MS)
+        params = adapter.query_parameters(role, now_ms=now_ms)
+        rows = controller.query(
+            contract.INVARIANT_NO_ANOMALY_ESCALATION, scope=params["scope"]
+        )
+        if not rows or int(rows[0]["escalations"]) < 1:
+            raise ContractViolation(
+                f"{adapter.driver_module}: the escalation path recorded nothing "
+                "even when the case asked for it, so 'no recommendation was "
+                "produced' is a statement about a path that cannot be taken"
+            )
+
+
 #: The battery, as data, so a report can name what ran.
 BATTERY = (
     "checkpoint-blocks",
@@ -567,4 +662,6 @@ BATTERY = (
     "driver-cli",
     "invariant-queries",
     "invariant-queries-not-vacuous",
+    "refusal-ids-unique",
+    "escalation-path-reachable",
 )

@@ -50,7 +50,7 @@ import os
 import random
 import sqlite3
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -71,6 +71,7 @@ from claude_org_runtime.control_plane.lease import (
     acquire,
     effect_kind,
     fenced_insert,
+    fenced_update,
     protected_write,
     read_lease,
     renew,
@@ -104,14 +105,27 @@ from tests.fault_injection.contract import (
     OPERATION_LEASE_ACQUIRE,
     OPERATION_LEASE_RELEASE,
     OPERATION_LEASE_RENEW,
+    OPERATION_OBSERVE,
     ROLE_SCRIPTS,
     ROLE_SUPERVISOR,
 )
 
 __all__ = [
     "BEHAVIOUR_DROP_DELIVERY",
+    "BEHAVIOUR_DUP_ACK",
     "BEHAVIOUR_DUP_DELIVERY",
     "BEHAVIOUR_LOST_ACK",
+    "BEHAVIOUR_RECIPIENT_UNAVAILABLE",
+    "BEHAVIOUR_RE_ACK",
+    "BEHAVIOUR_INCIDENT_REPLAY",
+    "BEHAVIOUR_STALE_WRITER",
+    "COLLAPSE_INCREMENT_IN_PLACE",
+    "COLLAPSE_OPEN_LINKED",
+    "COLLAPSE_RULES",
+    "DEFAULT_UNAVAILABLE_ATTEMPTS",
+    "ObservationUnavailable",
+    "classify_observation",
+    "write_observation",
     "Clock",
     "DRIVER_MODULE",
     "RESTART_CLOCK_ADVANCE_MS",
@@ -148,11 +162,90 @@ BEHAVIOUR_DROP_DELIVERY = "drop-delivery"
 BEHAVIOUR_DUP_DELIVERY = "dup-delivery"
 BEHAVIOUR_LOST_ACK = "lost-ack"
 
+# -- I-11 (Issue #16) -------------------------------------------------------
+#
+#: "Hold the recipient unavailable across several retry attempts." The refusal
+#: budget is read from the destination's own attempt log rather than from a
+#: counter in this process, so it survives a restart instead of starting again
+#: at zero and refusing the first N attempts of *every* generation -- which
+#: would mean the message never lands at all.
+BEHAVIOUR_RECIPIENT_UNAVAILABLE = "recipient-unavailable"
+
+#: "Duplicate the ack": the same ack is recorded twice while the row is still
+#: acked-once, within one generation.
+BEHAVIOUR_DUP_ACK = "dup-ack"
+
+#: "Ack an already-acked message": an ack issued against a row that has already
+#: reached its terminal state.
+BEHAVIOUR_RE_ACK = "re-ack"
+
+#: "Replay a persisted incident packet": every raise after the first is sourced
+#: from the row already in SQLite rather than from a fresh observation, which is
+#: what a replay is. The packet is in the row and not in anyone's context
+#: (D-0003, D-0007), so replaying it means reading it back.
+BEHAVIOUR_INCIDENT_REPLAY = "incident-replay"
+
+#: Carry on as a writer that believes it holds the lease and does not.
+#:
+#: Two things use it, and they are the same injection seen from two sides.
+#:
+#: The conformance battery needs the *same* writer refused twice, so it can
+#: check that two refusal ids do not collide -- no ordinary case does that.
+#:
+#: ACCEPTANCE.md section 2's single-writer row needs something more important:
+#: its observable is that "the state item's history in SQLite is a linear
+#: sequence with no interleaving from the rejected writer", and a writer that is
+#: turned away at ``acquire`` never attempts a write at all, so that half of the
+#: observable is true of every run and could not fail. A racer under this
+#: behaviour fabricates the token ``acquire`` refused it and runs its whole
+#: script against the same state item -- which is exactly the real hazard, a
+#: process that has not noticed it lost its lease. Every write it makes is
+#: refused *at the fence* and recorded there, and the history finally has the
+#: opportunity to show an interleaving that atomic fencing is what prevents.
+BEHAVIOUR_STALE_WRITER = "stale-writer"
+
 BEHAVIOURS = (
     BEHAVIOUR_DROP_DELIVERY,
     BEHAVIOUR_DUP_DELIVERY,
     BEHAVIOUR_LOST_ACK,
+    BEHAVIOUR_RECIPIENT_UNAVAILABLE,
+    BEHAVIOUR_DUP_ACK,
+    BEHAVIOUR_RE_ACK,
+    BEHAVIOUR_STALE_WRITER,
+    BEHAVIOUR_INCIDENT_REPLAY,
 )
+
+#: How many attempts the recipient refuses before it becomes available again.
+#: "Several" in ACCEPTANCE.md section 2's outbox row; three is the smallest
+#: number for which "monotonically increasing" says more than "incremented".
+DEFAULT_UNAVAILABLE_ATTEMPTS = 3
+
+#: The bound on the behaviour-driven retry loop in :func:`op_attempt`. It exists
+#: so a destination that refuses forever becomes an attributable case failure
+#: rather than a wedged process the barrier watchdog has to reap.
+MAX_ATTEMPTS_PER_MESSAGE = 8
+
+#: The detector version stamped on every incident this harness raises. Q-0009
+#: (detector-version semantics for replay) is open; this is a constant string so
+#: the trace stays byte-identical, and it settles nothing.
+DETECTOR_VERSION = "s9-harness-1"
+
+#: The two collapse rules ACCEPTANCE.md section 2 requires the tests to
+#: parameterise rather than choose between (Q-0002). The driver implements both
+#: and is *told* which to apply; it never picks.
+COLLAPSE_INCREMENT_IN_PLACE = "increment-in-place"
+COLLAPSE_OPEN_LINKED = "open-linked"
+
+COLLAPSE_RULES = (COLLAPSE_INCREMENT_IN_PLACE, COLLAPSE_OPEN_LINKED)
+
+#: The action kind an escalation would carry. Nothing in the spike composes it;
+#: the harness does, precisely so that "no termination or restart recommendation
+#: is produced" is an assertion about a row a broken driver *would* write.
+ESCALATION_EFFECT = "recommend_restart"
+
+#: The file the observation seam reads. The fault acts here -- on the reader --
+#: and never on the classifier or on the assertion.
+OBSERVATION_FILE_NAME = "observation.json"
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +442,41 @@ class _DroppingDropbox:
         return self._inner.attempt_count(idempotency_key)
 
 
+class _UnavailableDropbox(_DroppingDropbox):
+    """A destination that is unavailable for its first *N* attempts.
+
+    ACCEPTANCE.md section 2's outbox row asks for the recipient to be held
+    unavailable "across several retry attempts", with a retry count that is
+    monotonically increasing and **survives a restart**. That last word is what
+    dictates the shape here: the refusal budget is read from the destination's
+    own append-only attempt log, not from a counter in this process. A
+    process-local counter would start again at zero in every generation and go
+    on refusing the first N attempts forever, so the message would never land
+    and the case would be asserting a wedge rather than a resend.
+
+    Reading the counterparty's own record also means the budget is measured in
+    the same evidence the case asserts against.
+    """
+
+    def __init__(self, inner: KeyedDropbox, *, root: Path, unavailable_attempts: int) -> None:
+        super().__init__(inner, root=root, drop_attempt=0)
+        self._unavailable_attempts = int(unavailable_attempts)
+
+    def apply(
+        self,
+        idempotency_key: str,
+        payload: str,
+        fencing_token: int | None = None,
+        fence_scope: str | None = None,
+    ) -> DeliveryReceipt:
+        if self.attempt_count(idempotency_key) < self._unavailable_attempts:
+            self._log_dropped(idempotency_key, payload)
+            raise DestinationRefusal(
+                f"the recipient is unavailable for {idempotency_key!r}"
+            )
+        return self._inner.apply(idempotency_key, payload, fencing_token, fence_scope)
+
+
 def _deliverable(ctx: "Context") -> int:
     """How many of this role's messages this generation may deliver.
 
@@ -459,6 +587,22 @@ class Context:
     clock: Clock
     barrier: Barrier
     emit: Callable[[Mapping[str, Any]], None]
+    # -- I-11 case parameters ------------------------------------------------
+    #
+    # Every one of these arrives on the command line. None of them has a value
+    # this module chose: the observation mode and the escalation policy are the
+    # case's, and the three incident parameters are the case's precisely
+    # because Q-0002 and Q-0003 are open and a driver-side default would settle
+    # them by inertia (compare ``resource``/``holder``, which keep Q-0001 open
+    # the same way).
+    observation_mode: str = contract.OBSERVATION_HEALTHY
+    escalate_on: tuple[str, ...] = ()
+    incident_dedup_key: str | None = None
+    incident_repeats: int = 0
+    incident_collapse: str | None = None
+    incident_renotify_window_ms: int | None = None
+    incident_reconcile_interval_ms: int | None = None
+    unavailable_attempts: int = DEFAULT_UNAVAILABLE_ATTEMPTS
     connection: sqlite3.Connection = field(init=False)
     lease: Lease | None = field(default=None, init=False)
     rng: random.Random = field(init=False)
@@ -503,6 +647,24 @@ def _role_salt(role: str) -> int:
     return {"sup": 0x11, "disp": 0x22, "sec": 0x33}.get(role, 0)
 
 
+def _attempt_id(ctx: Context, operation: str, repeat: int = 0) -> str:
+    """A refusal's ``action_id``: deterministic, and unique per attempt.
+
+    ``protected_write`` passes ``attempt_id`` straight through as the primary
+    key of the refusal row, so an id composed only of holder and operation
+    collides the moment the same stale writer is refused twice -- and the
+    collision surfaces as a raw ``IntegrityError`` from inside the transaction
+    *instead of* ``StaleWriterRefused``, losing the refusal record that
+    ACCEPTANCE.md section 2 requires to be durable. S7 learned this already and
+    randomises its own bare-refusal ids; a harness cannot, because a uuid would
+    break the byte-identical-trace property. So the generation and the repeat
+    index -- both script-declared and both on the command line or derived from
+    it -- carry the uniqueness instead.
+    """
+
+    return f"refused-{ctx.holder}-{operation}-g{ctx.restart_generation}-r{repeat}"
+
+
 def _rows(connection: sqlite3.Connection, sql: str, params: Mapping[str, Any]) -> list[dict]:
     cursor = connection.execute(sql, dict(params))
     try:
@@ -525,8 +687,8 @@ def _open_or_create(ctx: Context) -> sqlite3.Connection:
 
 # -- lease -----------------------------------------------------------------
 
-def op_lease_acquire(ctx: Context) -> Lease:
-    """Take or resume this role's own lease.
+def op_lease_acquire(ctx: Context) -> Lease | None:
+    """Take or resume this role's own lease, or be refused and record it.
 
     A restarted holder whose lease row is still its own and still live *renews*
     rather than re-acquiring: renewal keeps the epoch, and keeping the epoch is
@@ -534,17 +696,42 @@ def op_lease_acquire(ctx: Context) -> Lease:
     When the lease has lapsed or moved on, re-acquiring raises the epoch -- and
     then ``Outbox.recover`` re-stamps the orphaned rows, which is the other half
     of the same recovery.
+
+    **Refusal at acquire returns ``None`` rather than raising.** Two of the
+    ACCEPTANCE.md section 2 rows need this. A second live claimant on one
+    resource is refused here, by ``acquire``'s upsert, and not at any later
+    write -- so "two writers race for the same state item ... a stale writer is
+    rejected, not merged" is observed at exactly this point. So is the return of
+    a holder that was SIGKILLed without releasing: it comes back with no epoch
+    in memory, re-runs its script from the top, and meets the claimant that took
+    the resource over. ``LeaseHeld`` is persisted nowhere by S6, so the refusal
+    ledger is what makes it the durable record section 2 demands rather than an
+    exception nobody kept.
     """
 
     ctx.barrier.hit(CHECKPOINT_BEFORE_DURABLE_WRITE, operation=OPERATION_LEASE_ACQUIRE)
     now_ms = ctx.clock.advance()
     observed = read_lease(ctx.connection, ctx.resource)
     took = "acquired"
-    if observed is not None and observed.holder == ctx.holder and observed.looks_live_at(now_ms):
-        try:
-            lease = renew(ctx.connection, observed, now_ms=now_ms, ttl_ms=ctx.ttl_ms)
-            took = "renewed"
-        except LeaseNotHeld:
+    lease: Lease | None = None
+    try:
+        if (
+            observed is not None
+            and observed.holder == ctx.holder
+            and observed.looks_live_at(now_ms)
+        ):
+            try:
+                lease = renew(ctx.connection, observed, now_ms=now_ms, ttl_ms=ctx.ttl_ms)
+                took = "renewed"
+            except LeaseNotHeld:
+                lease = acquire(
+                    ctx.connection,
+                    resource=ctx.resource,
+                    holder=ctx.holder,
+                    now_ms=now_ms,
+                    ttl_ms=ctx.ttl_ms,
+                )
+        else:
             lease = acquire(
                 ctx.connection,
                 resource=ctx.resource,
@@ -552,14 +739,37 @@ def op_lease_acquire(ctx: Context) -> Lease:
                 now_ms=now_ms,
                 ttl_ms=ctx.ttl_ms,
             )
-    else:
-        lease = acquire(
-            ctx.connection,
-            resource=ctx.resource,
-            holder=ctx.holder,
+    except LeaseHeld as error:
+        took = f"refused:{type(error).__name__}"
+        record_refusal(
+            ctx,
+            operation=OPERATION_LEASE_ACQUIRE,
+            refusal=type(error).__name__,
+            # No epoch was granted, and saying so is the honest record: the
+            # ledger's epoch column is what this writer *held*, which is
+            # nothing.
+            epoch=0,
             now_ms=now_ms,
-            ttl_ms=ctx.ttl_ms,
         )
+        if BEHAVIOUR_STALE_WRITER in ctx.behaviours:
+            # ... and now carry on anyway, holding a token the lease row will
+            # reject. Not a way around the refusal: the refusal above is
+            # recorded either way. It is how the case reaches the *other* half
+            # of the single-writer observable, the one about the write history,
+            # which a writer that stops at ``acquire`` can never reach.
+            #
+            # The epoch is taken from the row that actually exists and moved one
+            # past it, which is what a writer that had lost the lease without
+            # noticing would present.
+            observed_now = read_lease(ctx.connection, ctx.resource)
+            lease = Lease(
+                resource=ctx.resource,
+                holder=ctx.holder,
+                epoch=(observed_now.epoch if observed_now is not None else 0) + 1,
+                acquired_at_ms=now_ms,
+                expires_at_ms=now_ms + ctx.ttl_ms,
+            )
+            took = f"stale-writer:{type(error).__name__}"
     ctx.lease = lease
     ctx.barrier.hit(
         CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT, operation=OPERATION_LEASE_ACQUIRE
@@ -569,7 +779,7 @@ def op_lease_acquire(ctx: Context) -> Lease:
             "event": EVENT_STEP,
             "operation": OPERATION_LEASE_ACQUIRE,
             "outcome": took,
-            "epoch": lease.epoch,
+            "epoch": lease.epoch if lease is not None else 0,
             "now_ms": now_ms,
         }
     )
@@ -712,8 +922,9 @@ def op_bind(ctx: Context) -> None:
             write,
             now_ms=now_ms,
             # A deterministic refusal id: the module's default is a uuid4, and a
-            # uuid in the evidence is a re-run that cannot be compared.
-            attempt_id=f"refused-{ctx.holder}-bind",
+            # uuid in the evidence is a re-run that cannot be compared. It also
+            # has to be unique *per attempt* -- see :func:`_attempt_id`.
+            attempt_id=_attempt_id(ctx, OPERATION_BIND),
         )
         outcome = "bound"
     except lease_module.StaleWriterRefused as error:
@@ -736,6 +947,404 @@ def op_bind(ctx: Context) -> None:
     )
 
 
+# -- the observation seam and the incident packet ----------------------------
+#
+# ACCEPTANCE.md section 2's last row asks for the observation path to "fail or
+# return nothing while the worker is genuinely healthy", classified
+# ``OBSERVATION_UNAVAILABLE`` and never as an anomaly, with
+# ``NO_ACTIVITY_EVIDENCE`` likewise not an anomaly (D-0006, AC-3/AC-4).
+#
+# The shape below is chosen so the case can actually FAIL. The fault acts on the
+# **reader** -- a file the driver reads through -- and the classifier maps the
+# reader's outcome onto a fact state. If the reader collapsed a read failure into
+# an empty result (the exact defect D-0006 exists to police) the two modes would
+# produce the same fact state and the case would go red. A design in which the
+# same step both chose the fact state and asserted it could only fail if it
+# contradicted itself, which is not a test of anything.
+
+
+class ObservationUnavailable(RuntimeError):
+    """The observation path failed. Not an anomaly -- a missing observation."""
+
+
+def observation_path(workdir: Path, role: str) -> Path:
+    return workdir / "observations" / role / OBSERVATION_FILE_NAME
+
+
+def write_observation(workdir: Path, role: str, *, mode: str) -> None:
+    """Prepare the seam the case's observation mode asks for.
+
+    ``unreadable`` deliberately leaves *no* file: the read raises. ``silent``
+    writes a well-formed observation carrying no activity -- readable, and
+    empty, which is a different fact about the world from "we could not look".
+    """
+
+    path = observation_path(workdir, role)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if mode == contract.OBSERVATION_UNREADABLE:
+        if path.exists():
+            path.unlink()
+        return
+    activity = [] if mode == contract.OBSERVATION_SILENT else [{"kind": "tool_use"}]
+    path.write_text(json.dumps({"activity": activity}, sort_keys=True), encoding="utf-8")
+
+
+def read_observation(ctx: Context) -> list:
+    """Read the worker's activity, or fail to.
+
+    Raising and returning nothing are kept apart on purpose: this function is
+    the seam D-0006 is about, and a reader that swallowed the exception into an
+    empty list would make an outage indistinguishable from a quiet worker.
+    """
+
+    path = observation_path(ctx.workdir, ctx.role)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ObservationUnavailable(str(path)) from error
+    return list(json.loads(raw).get("activity", ()))
+
+
+def classify_observation(ctx: Context) -> str:
+    """The reader's outcome, named. Nothing here is a verdict.
+
+    D-0005 fixes the names and D-0006 fixes one relation between two of them;
+    per-state semantics are Q-0012 and stay open, so this function maps *what
+    the read did* onto a name and stops there. It never decides what the name
+    means, and no other function maps a name onto an action.
+    """
+
+    try:
+        activity = read_observation(ctx)
+    except ObservationUnavailable:
+        return contract.FACT_OBSERVATION_UNAVAILABLE
+    return contract.FACT_ACTIVE_EVIDENCE if activity else contract.FACT_NO_ACTIVITY_EVIDENCE
+
+
+def raise_incident(
+    ctx: Context,
+    *,
+    fact_state: str,
+    dedup_key: str,
+    repeat: int,
+    now_ms: int,
+    lease: Lease | None = None,
+) -> tuple[str, str]:
+    """Persist one incident packet, collapsing per the case's declared rule.
+
+    Returns ``(incident_id, outcome)``. Both Q-0002 rules are implemented and
+    the caller is *told* which to apply -- the schema deliberately permits both
+    (``dedup_key`` is indexed but not unique, ``related_incident_id`` is a plain
+    nullable self-reference) and this driver may not choose between them any
+    more than the schema did.
+    """
+
+    assert ctx.lease is not None
+    lease = lease if lease is not None else ctx.lease
+    open_rows = _rows(
+        ctx.connection,
+        "SELECT incident_id, retry_count, created_at_ms FROM incident "
+        "WHERE dedup_key = :dedup_key AND resolved_at_ms IS NULL "
+        "ORDER BY created_at_ms, incident_id",
+        {"dedup_key": dedup_key},
+    )
+    window_ms = ctx.incident_renotify_window_ms
+    within_window = bool(open_rows) and (
+        window_ms is None or (now_ms - int(open_rows[0]["created_at_ms"])) <= window_ms
+    )
+
+    if within_window and ctx.incident_collapse == COLLAPSE_INCREMENT_IN_PLACE:
+        root = open_rows[0]
+        statement = fenced_update(
+            "incident",
+            set_clause="retry_count = retry_count + 1, updated_at_ms = :updated_at_ms",
+            where="incident_id = :incident_id AND resolved_at_ms IS NULL",
+            # ``incident`` has no ``writer_epoch`` column, so the fence is a
+            # clause of the write without stamping one.
+            stamps_writer_epoch=False,
+        )
+        params = {"incident_id": root["incident_id"], "updated_at_ms": now_ms}
+        incident_id = str(root["incident_id"])
+        outcome = "collapsed"
+    else:
+        incident_id = f"{dedup_key}-i{repeat}"
+        related = str(open_rows[0]["incident_id"]) if within_window else None
+        statement = fenced_insert(
+            "incident",
+            columns=(
+                "incident_id",
+                "run_id",
+                "session_id",
+                "fact_state",
+                "detector_version",
+                "dedup_key",
+                "retry_count",
+                "related_incident_id",
+                "created_at_ms",
+                "updated_at_ms",
+            ),
+            values=(
+                ":incident_id",
+                ":run_id",
+                ":session_id",
+                ":fact_state",
+                ":detector_version",
+                ":dedup_key",
+                "0",
+                ":related_incident_id",
+                ":created_at_ms",
+                ":updated_at_ms",
+            ),
+            stamps_writer_epoch=False,
+        )
+        params = {
+            "incident_id": incident_id,
+            "run_id": ctx.run_id,
+            # Only the Supervisor's script binds a session, and the foreign key
+            # is enforced, so any other role's incident carries none.
+            # Foreign keys are enforced, and the binding is not guaranteed to
+            # exist: only the Supervisor's script binds at all, and even there
+            # the bind can have been refused by a fence. So the row is looked
+            # up rather than assumed.
+            "session_id": _bound_session_id(ctx),
+            "fact_state": fact_state,
+            "detector_version": DETECTOR_VERSION,
+            "dedup_key": dedup_key,
+            "related_incident_id": related,
+            "created_at_ms": now_ms,
+            "updated_at_ms": now_ms,
+        }
+        outcome = "linked" if related else "opened"
+
+    write = ProtectedWrite(
+        kind=effect_kind(ctx.resource, "raise_incident"),
+        idempotency_key=f"raise_incident:{incident_id}:{repeat}",
+        statement=statement,
+        exactly_once_mechanism="transactional_with_record",
+        params=params,
+        run_id=ctx.run_id,
+        # Deliberately NOT ``incident_id=incident_id``: on the refusal path that
+        # would insert an ``action`` row referencing an incident this write did
+        # not manage to create, which is a foreign-key violation in exactly the
+        # case where the refusal record matters most.
+    )
+    try:
+        protected_write(
+            ctx.connection,
+            lease,
+            write,
+            now_ms=now_ms,
+            attempt_id=_attempt_id(ctx, "raise_incident", repeat),
+        )
+    except lease_module.StaleWriterRefused as error:
+        record_refusal(
+            ctx,
+            operation=OPERATION_OBSERVE,
+            refusal=type(error).__name__,
+            epoch=lease.epoch,
+            now_ms=now_ms,
+        )
+        outcome = f"refused:{type(error).__name__}"
+    return incident_id, outcome
+
+
+def escalate(ctx: Context, *, fact_state: str, incident_id: str, now_ms: int) -> str:
+    """Record a termination/restart recommendation -- or refuse to.
+
+    This is where D-0006 is *enforced* rather than merely hoped for. The
+    escalation policy is case data: the manifest names which fact states this
+    case would escalate on, and the driver refuses the two D-0006 settles are
+    not anomalies even when it is asked, recording that refusal durably. That is
+    what makes "no termination or restart recommendation is produced from it" an
+    assertion about a row a broken driver would have written, rather than a
+    count of rows nothing in the tree can write.
+
+    Nothing here reads a fact state's *meaning*: the policy arrives from
+    outside, so Q-0012 stays open.
+    """
+
+    assert ctx.lease is not None
+    if fact_state not in ctx.escalate_on:
+        return "not-escalated"
+    if fact_state in contract.ESCALATION_REFUSED_FACT_STATES:
+        record_refusal(
+            ctx,
+            operation=OPERATION_OBSERVE,
+            refusal="EscalationRefusedNotAnAnomaly",
+            epoch=ctx.lease.epoch,
+            now_ms=now_ms,
+        )
+        return "escalation-refused"
+    # The recommendation is an ``action`` row, which is what the schema calls a
+    # side-effect record -- and it has to be written by a *fenced* insert,
+    # because ``protected_write`` only synthesises an action row on the refusal
+    # path. A successful protected write leaves no action row behind, so an
+    # escalation recorded any other way would be invisible to the query that is
+    # supposed to catch it.
+    statement = fenced_insert(
+        "action",
+        columns=(
+            "action_id",
+            "run_id",
+            "kind",
+            "idempotency_key",
+            "exactly_once_mechanism",
+            "status",
+            # ``action`` really does carry a ``writer_epoch``, so the fence
+            # stamps one. Omitting the column while leaving the builder's
+            # default in place raises ``UnfencedStatement`` before the row is
+            # ever written -- which would make this whole path unreachable, and
+            # a "no recommendation was produced" assertion means nothing if a
+            # recommendation could not have been produced either way.
+            "writer_epoch",
+            "created_at_ms",
+            "applied_at_ms",
+        ),
+        values=(
+            ":action_id",
+            ":run_id",
+            ":kind",
+            ":idempotency_key",
+            ":exactly_once_mechanism",
+            "'applied'",
+            ":fence_epoch",
+            ":created_at_ms",
+            ":applied_at_ms",
+        ),
+    )
+    escalation_id = f"{incident_id}-escalation"
+    kind = effect_kind(ctx.resource, ESCALATION_EFFECT)
+    write = ProtectedWrite(
+        kind=kind,
+        idempotency_key=f"{ESCALATION_EFFECT}:{escalation_id}",
+        statement=statement,
+        # D-0004: an action with a real side effect is not the AI's to apply.
+        # A restart recommendation is exactly that, so it names the human gate.
+        exactly_once_mechanism="human_gate",
+        params={
+            "action_id": escalation_id,
+            "run_id": ctx.run_id,
+            "kind": kind,
+            "idempotency_key": f"{ESCALATION_EFFECT}:{escalation_id}",
+            "exactly_once_mechanism": "human_gate",
+            "created_at_ms": now_ms,
+            "applied_at_ms": now_ms,
+        },
+        run_id=ctx.run_id,
+    )
+    protected_write(
+        ctx.connection,
+        ctx.lease,
+        write,
+        now_ms=now_ms,
+        attempt_id=_attempt_id(ctx, ESCALATION_EFFECT),
+    )
+    return "escalated"
+
+
+def _bound_session_id(ctx: Context) -> str | None:
+    """This role's live session binding, or ``None`` if it has none."""
+
+    rows = _rows(
+        ctx.connection,
+        "SELECT session_id FROM session WHERE run_id = :run_id "
+        "AND released_at_ms IS NULL",
+        {"run_id": ctx.run_id},
+    )
+    return str(rows[0]["session_id"]) if rows else None
+
+
+def op_observe(ctx: Context) -> None:
+    """Read the worker, name what the read found, and persist the packet.
+
+    The repeats are the ACCEPTANCE.md section 2 dedup row's "raise the same
+    incident condition repeatedly within a window"; the window and the collapse
+    rule are the case's, never this module's.
+    """
+
+    assert ctx.lease is not None
+    dedup_key = ctx.incident_dedup_key or f"{ctx.holder}-observation"
+    repeats = max(1, ctx.incident_repeats)
+
+    # Resumable by query, like every other step (D-0001). A restarted process
+    # re-runs its script from the top, and re-observing would either collide on
+    # the incident's primary key or increment a retry count that no repeat
+    # earned -- so an observation already on record is adopted rather than
+    # taken again. The seam is also left as the predecessor found it: a restart
+    # must not repair the observation path on its way past.
+    if ctx.restart_generation > 0 and _rows(
+        ctx.connection,
+        "SELECT incident_id FROM incident WHERE dedup_key = :dedup_key",
+        {"dedup_key": dedup_key},
+    ):
+        ctx.emit(
+            {
+                "event": EVENT_STEP,
+                "operation": OPERATION_OBSERVE,
+                "outcome": "adopted",
+                "now_ms": ctx.clock.now_ms(),
+            }
+        )
+        return
+
+    fact_state = classify_observation(ctx)
+    # The stale-writer injection: a token one epoch off the row, so every
+    # protected write below is fenced out. Two repeats, because one refusal
+    # cannot collide with anything -- the defect this exists to expose is a
+    # refusal id that repeats.
+    stale = BEHAVIOUR_STALE_WRITER in ctx.behaviours
+    lease = (
+        replace(ctx.lease, epoch=ctx.lease.epoch + 1) if stale else None
+    )
+    if stale:
+        repeats = max(repeats, 2)
+    replay = BEHAVIOUR_INCIDENT_REPLAY in ctx.behaviours
+    outcomes: list[str] = []
+    incident_id = ""
+    for repeat in range(repeats):
+        ctx.barrier.hit(CHECKPOINT_BEFORE_DURABLE_WRITE, operation=OPERATION_OBSERVE)
+        now_ms = ctx.clock.advance()
+        raised = fact_state
+        if replay and repeat:
+            # The replay: this raise is not a fresh observation at all, it is
+            # the persisted packet read back and submitted again. Whether the
+            # replay is collapsed or opens a linked incident is the case's
+            # declared rule -- the same rule a repeat follows -- which is the
+            # point: a replayed packet must not be a way around dedup.
+            persisted = _rows(
+                ctx.connection,
+                "SELECT fact_state FROM incident WHERE dedup_key = :dedup_key "
+                "ORDER BY created_at_ms, incident_id LIMIT 1",
+                {"dedup_key": dedup_key},
+            )
+            if persisted:
+                raised = str(persisted[0]["fact_state"])
+        incident_id, outcome = raise_incident(
+            ctx,
+            fact_state=raised,
+            dedup_key=dedup_key,
+            repeat=repeat,
+            now_ms=now_ms,
+            lease=lease,
+        )
+        outcomes.append(outcome)
+        ctx.barrier.hit(CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT, operation=OPERATION_OBSERVE)
+    escalation = escalate(
+        ctx, fact_state=fact_state, incident_id=incident_id, now_ms=ctx.clock.now_ms()
+    )
+    ctx.emit(
+        {
+            "event": EVENT_STEP,
+            "operation": OPERATION_OBSERVE,
+            "outcome": ",".join(outcomes),
+            "fact_state": fact_state,
+            "escalation": escalation,
+            "now_ms": ctx.clock.now_ms(),
+        }
+    )
+    ctx.barrier.hit(contract.SYNC_OBSERVED, operation=OPERATION_OBSERVE, kind=EVENT_SYNC)
+
+
 # -- the outbox surface ------------------------------------------------------
 
 def _outbox(ctx: Context) -> Outbox:
@@ -746,6 +1355,12 @@ def _outbox(ctx: Context) -> Outbox:
         # unfinished work to resolution, and a destination that keeps refusing
         # would be testing the harness's patience rather than the resend.
         dropbox = _DroppingDropbox(dropbox, root=root, drop_attempt=1)
+    elif BEHAVIOUR_RECIPIENT_UNAVAILABLE in ctx.behaviours:
+        # Deliberately *not* gated on the generation: this budget is durable, so
+        # it keeps counting across the restart and stops refusing on its own.
+        dropbox = _UnavailableDropbox(
+            dropbox, root=root, unavailable_attempts=ctx.unavailable_attempts
+        )
     return Outbox(
         ctx.connection,
         resource=ctx.resource,
@@ -833,38 +1448,71 @@ def op_attempt(ctx: Context, outbox: Outbox) -> None:
         message = due.get(message_id)
         if message is None or message.status == "acked":
             continue
-        now_ms = ctx.clock.advance()
-        try:
-            result = outbox.attempt(message_id, now_ms=now_ms, epoch=ctx.lease.epoch)
-            outcome = "delivered"
-            deduplicated = result.deduplicated
-        except DestinationRefusal as error:
-            outcome = f"refused:{type(error).__name__}"
-            deduplicated = False
-        except outbox_module.StaleWriterRefused as error:
-            outcome = f"refused:{type(error).__name__}"
-            deduplicated = False
-            record_refusal(
-                ctx,
-                operation=OPERATION_ATTEMPT,
-                refusal=type(error).__name__,
-                epoch=ctx.lease.epoch,
-                now_ms=now_ms,
-            )
-        ctx.emit(
-            {
-                "event": EVENT_STEP,
-                "operation": OPERATION_ATTEMPT,
-                "outcome": outcome,
-                "message_id": message_id,
-                "deduplicated": deduplicated,
-                "now_ms": now_ms,
-            }
+        # One attempt per message normally. A case that holds the recipient
+        # unavailable needs *several*, and they have to happen here: a resend
+        # driven only by restart generations would give at most two attempts,
+        # and "monotonically increasing" wants more than one increment to be
+        # meaningful. The loop is bounded so a destination that refuses forever
+        # becomes an attributable failure and not a wedge (design 8.2), and it
+        # only ever runs more than once for a case that asked for it -- so no
+        # other case's ``attempt`` occurrence indices move.
+        attempts = (
+            MAX_ATTEMPTS_PER_MESSAGE
+            if BEHAVIOUR_RECIPIENT_UNAVAILABLE in ctx.behaviours
+            else 1
         )
+        for _ in range(attempts):
+            now_ms = ctx.clock.advance()
+            try:
+                result = outbox.attempt(message_id, now_ms=now_ms, epoch=ctx.lease.epoch)
+                outcome = "delivered"
+                deduplicated = result.deduplicated
+            except DestinationRefusal as error:
+                outcome = f"refused:{type(error).__name__}"
+                deduplicated = False
+            except outbox_module.StaleWriterRefused as error:
+                outcome = f"refused:{type(error).__name__}"
+                deduplicated = False
+                record_refusal(
+                    ctx,
+                    operation=OPERATION_ATTEMPT,
+                    refusal=type(error).__name__,
+                    epoch=ctx.lease.epoch,
+                    now_ms=now_ms,
+                )
+            ctx.emit(
+                {
+                    "event": EVENT_STEP,
+                    "operation": OPERATION_ATTEMPT,
+                    "outcome": outcome,
+                    "message_id": message_id,
+                    "deduplicated": deduplicated,
+                    "now_ms": now_ms,
+                }
+            )
+            if outcome == "delivered":
+                break
+
+
+def _ack_repeats(ctx: Context) -> int:
+    """How many times each message is acked in this generation.
+
+    Once by default. It used to be twice unconditionally, as standing evidence
+    that acks are idempotent -- but ACCEPTANCE.md section 2's Ack row asks for
+    "duplicate the ack" and "ack an already-acked message" as *injections*, and
+    an injection every case performs anyway is one no case can fail on. So the
+    repeat is behaviour-driven now: the cases that name the injection get it,
+    and the baseline cases ack once, which is what lets a regression in one of
+    the two shapes actually turn a case red.
+    """
+
+    if BEHAVIOUR_DUP_ACK in ctx.behaviours or BEHAVIOUR_RE_ACK in ctx.behaviours:
+        return 2
+    return 1
 
 
 def op_ack(ctx: Context, outbox: Outbox) -> None:
-    """Record the acks. Twice per message, deliberately: acks are idempotent."""
+    """Record the acks for this role's own messages."""
 
     if BEHAVIOUR_LOST_ACK in ctx.behaviours and ctx.restart_generation == 0:
         ctx.emit(
@@ -885,10 +1533,37 @@ def op_ack(ctx: Context, outbox: Outbox) -> None:
         )
         if not rows or rows[0]["status"] == "pending":
             continue
-        for _ in range(2):
+        if BEHAVIOUR_RE_ACK in ctx.behaviours and rows[0]["status"] != "acked":
+            # "Ack an already-acked message" means exactly that: drive the row
+            # to its terminal state first, then ack it again below. Without
+            # this the second ack would be a duplicate of a non-terminal ack,
+            # which is the *other* injection.
+            outbox.record_ack(message_id, now_ms=ctx.clock.advance())
+        for _ in range(_ack_repeats(ctx)):
             ctx.barrier.hit(CHECKPOINT_BEFORE_DURABLE_WRITE, operation=OPERATION_ACK)
             now_ms = ctx.clock.advance()
             outcome = outbox.record_ack(message_id, now_ms=now_ms)
+            if not outcome.recorded:
+                # An ack against a row that is already terminal changes nothing
+                # -- which is the invariant, and which is also why it leaves no
+                # trace of its own anywhere in the control plane. That silence
+                # is a problem for the two cases whose whole injection is the
+                # *second* ack: with no record, a case asserting "exactly one
+                # acked state" passes identically whether the duplicate was
+                # issued or never happened at all.
+                #
+                # So the ignored ack goes in the harness ledger, which exists
+                # for exactly this -- the classes S6/S7 persist nowhere. It is a
+                # persisted, query-answerable row, which is the standard
+                # ACCEPTANCE.md section 2 sets, and it makes the ack-multiplicity
+                # cases fail if the multiplicity ever stops happening.
+                record_refusal(
+                    ctx,
+                    operation=OPERATION_ACK,
+                    refusal="AckAlreadyRecorded",
+                    epoch=ctx.lease.epoch if ctx.lease is not None else 0,
+                    now_ms=now_ms,
+                )
             ctx.barrier.hit(
                 CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT, operation=OPERATION_ACK
             )
@@ -908,6 +1583,7 @@ _OPERATIONS: Mapping[str, Any] = {
     OPERATION_LEASE_RENEW: op_lease_renew,
     OPERATION_LEASE_RELEASE: op_lease_release,
     OPERATION_BIND: op_bind,
+    OPERATION_OBSERVE: op_observe,
 }
 
 
@@ -954,7 +1630,29 @@ def run_script(ctx: Context) -> None:
 
     for step in steps:
         if step == OPERATION_LEASE_ACQUIRE:
-            op_lease_acquire(ctx)
+            if op_lease_acquire(ctx) is None:
+                # Refused at acquire. The script is *over*, and it ended
+                # correctly: this writer was rejected rather than merged, which
+                # is the whole of what the case is asserting. Carrying on would
+                # mean writing without a lease, which is the defect.
+                if ctx.restart_generation > 0:
+                    # A restart's contract is "recover before you proceed", and
+                    # this restart did: it reconstructed its view from SQLite
+                    # alone, found the resource held by someone else, and
+                    # declined to write. That is recovery concluding correctly,
+                    # not recovery failing to happen -- so the event is emitted,
+                    # and the controller is not left waiting on a process that
+                    # has already done everything it may do.
+                    ctx.emit(
+                        {
+                            "event": EVENT_RECOVERY_COMPLETE,
+                            "generation": ctx.restart_generation,
+                            "adopted": [],
+                            "outcome": "refused",
+                            "now_ms": ctx.clock.now_ms(),
+                        }
+                    )
+                break
             ctx.barrier.hit(
                 contract.SYNC_LEASE_ACQUIRED,
                 operation=OPERATION_LEASE_ACQUIRE,
@@ -1075,11 +1773,18 @@ _INVARIANT_QUERIES: Mapping[str, str] = {
     # The refusal of a stale writer, durable and query-answerable. This is a
     # SQL query over a persisted row, not a harness event-trace line: the trace
     # would only prove the harness saw an exception (design 5).
+    # ``holder LIKE :holder || '%'`` and not ``holder = :holder``: a claimant or
+    # a racer is this holder plus a suffix, and its refusal is the one several
+    # of the ACCEPTANCE.md section 2 rows are actually about -- the second
+    # writer that was rejected rather than merged. Scoping to the exact holder
+    # would make precisely those refusals invisible and report them as "never
+    # recorded". The refusal belongs to the resource's timeline, which is what
+    # the resource predicate already pins, not to one holder identity.
     contract.INVARIANT_RECORDED_REFUSALS: """
         SELECT seq, resource, holder, epoch, operation, refusal, now_ms
           FROM harness_refusal
          WHERE resource = :resource
-           AND holder = :holder
+           AND holder LIKE :holder || '%'
          ORDER BY seq
     """,
     # Nothing is left half-recorded once recovery has run.
@@ -1099,6 +1804,53 @@ _INVARIANT_QUERIES: Mapping[str, str] = {
           FROM lease
          WHERE expires_at_ms > :now_ms
          ORDER BY resource
+    """,
+    # -- I-11 (Issue #16) --------------------------------------------------
+    #
+    # Every incident row in the scope. The assertion groups by dedup key and
+    # checks whichever collapse rule the case declared -- so neither Q-0002
+    # rule appears in this SQL, which is the same reason the schema indexes
+    # ``dedup_key`` without making it unique. A query that counted rows per key
+    # would have chosen the increment-in-place rule by arithmetic.
+    contract.INVARIANT_INCIDENT_COLLAPSE: """
+        SELECT incident_id, dedup_key, fact_state, detector_version,
+               retry_count, related_incident_id, created_at_ms, updated_at_ms,
+               resolved_at_ms
+          FROM incident
+         WHERE run_id = :scope
+         ORDER BY created_at_ms, incident_id
+    """,
+    # "Work resumes from unresolved incidents" (gate item 4, D-0001) is one
+    # query, and the schema says so in a comment on the index this uses.
+    contract.INVARIANT_UNRESOLVED_INCIDENTS: """
+        SELECT incident_id, dedup_key, fact_state, retry_count, created_at_ms
+          FROM incident
+         WHERE run_id = :scope
+           AND resolved_at_ms IS NULL
+         ORDER BY created_at_ms, incident_id
+    """,
+    # What the observation path was classified as. Every incident row in the
+    # scope is one, because an escalation is an ``action`` row and not an
+    # incident -- the recommendation and the fact it was drawn from are
+    # different records on purpose.
+    contract.INVARIANT_OBSERVATION_CLASSIFIED: """
+        SELECT incident_id, fact_state, detector_version, dedup_key,
+               created_at_ms
+          FROM incident
+         WHERE run_id = :scope
+         ORDER BY created_at_ms, incident_id
+    """,
+    # The termination/restart recommendations produced in this scope. A COUNT,
+    # so the query always returns exactly one row and "none were produced" is a
+    # pass rather than an empty result the assertion would have to guess about.
+    # A driver that escalated on a D-0006 state moves this number, which is what
+    # makes the assertion falsifiable.
+    contract.INVARIANT_NO_ANOMALY_ESCALATION: """
+        SELECT COUNT(*) AS escalations
+          FROM action
+         WHERE run_id = :scope
+           AND kind LIKE 'recommend_restart@%'
+           AND status <> 'refused'
     """,
 }
 
@@ -1146,6 +1898,49 @@ class SpikeAdapter:
         ]
         for behaviour in behaviours:
             arguments.extend(["--behaviour", behaviour])
+
+        # -- I-11 case parameters ------------------------------------------
+        #
+        # Forwarded verbatim, and only when the case declared them: a case that
+        # says nothing gets the driver's inert defaults, which is what keeps the
+        # 35 S9 seed cases running exactly as they did.
+        observation = case.get("observation")
+        if observation:
+            arguments.extend(["--observation-mode", observation["mode"]])
+            for fact_state in observation.get("escalate_on", ()):
+                arguments.extend(["--escalate-on", fact_state])
+
+        incident = case.get("incident_params")
+        if incident:
+            # ``dedup_key`` is the case's, never composed here. Q-0002 asks
+            # what composes an incident dedup key; a driver-side formula would
+            # answer it by inertia, exactly as a role-to-resource table would
+            # have answered Q-0001.
+            if incident.get("dedup_key") is not None:
+                arguments.extend(["--incident-dedup-key", str(incident["dedup_key"])])
+            if incident.get("repeats"):
+                arguments.extend(["--incident-repeats", str(incident["repeats"])])
+            if incident.get("collapse") is not None:
+                arguments.extend(["--incident-collapse", str(incident["collapse"])])
+            if incident.get("renotify_window_ms") is not None:
+                arguments.extend(
+                    [
+                        "--incident-renotify-window-ms",
+                        str(incident["renotify_window_ms"]),
+                    ]
+                )
+            if incident.get("reconcile_interval_ms") is not None:
+                arguments.extend(
+                    [
+                        "--incident-reconcile-interval-ms",
+                        str(incident["reconcile_interval_ms"]),
+                    ]
+                )
+
+        if case.get("unavailable_attempts"):
+            arguments.extend(
+                ["--unavailable-attempts", str(case["unavailable_attempts"])]
+            )
         return tuple(arguments)
 
     def observer(self, workdir: Any, role: str) -> _DropboxObserver:
@@ -1271,6 +2066,34 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--messages", type=int, default=1)
     parser.add_argument("--manifest-version", type=int, default=1)
     parser.add_argument("--behaviour", action="append", default=[], choices=list(BEHAVIOURS))
+    # -- I-11 case parameters (Issue #16) ---------------------------------
+    #
+    # The observation seam and the incident parameters. Every default here is
+    # the *inert* one -- healthy observation, no escalation policy, no repeats,
+    # no collapse rule -- so a case that says nothing gets the behaviour the 35
+    # S9 seed cases already had. The values that matter are the case's.
+    parser.add_argument(
+        "--observation-mode",
+        default=contract.OBSERVATION_HEALTHY,
+        choices=list(contract.OBSERVATION_MODES),
+    )
+    parser.add_argument(
+        "--escalate-on",
+        action="append",
+        default=[],
+        choices=list(contract.FACT_STATES),
+        help="fact states this case's escalation policy would escalate on",
+    )
+    parser.add_argument("--incident-dedup-key", default=None)
+    parser.add_argument("--incident-repeats", type=int, default=0)
+    parser.add_argument(
+        "--incident-collapse", default=None, choices=list(COLLAPSE_RULES)
+    )
+    parser.add_argument("--incident-renotify-window-ms", type=int, default=None)
+    parser.add_argument("--incident-reconcile-interval-ms", type=int, default=None)
+    parser.add_argument(
+        "--unavailable-attempts", type=int, default=DEFAULT_UNAVAILABLE_ATTEMPTS
+    )
     return parser
 
 
@@ -1331,7 +2154,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         clock=clock,
         barrier=barrier,
         emit=emit,
+        observation_mode=arguments.observation_mode,
+        escalate_on=tuple(arguments.escalate_on),
+        incident_dedup_key=arguments.incident_dedup_key,
+        incident_repeats=arguments.incident_repeats,
+        incident_collapse=arguments.incident_collapse,
+        incident_renotify_window_ms=arguments.incident_renotify_window_ms,
+        incident_reconcile_interval_ms=arguments.incident_reconcile_interval_ms,
+        unavailable_attempts=arguments.unavailable_attempts,
     )
+    # The seam is prepared before the script runs and only in the first
+    # generation: a restart must find the world as its predecessor left it, not
+    # a freshly repaired observation path.
+    if arguments.restart_generation == 0:
+        write_observation(
+            Path(arguments.workdir), arguments.role, mode=arguments.observation_mode
+        )
     ctx.connection = _open_or_create(ctx)
     try:
         run_script(ctx)

@@ -601,3 +601,95 @@ plus the cheap portable lane; the full matrix is a scheduled/gate concern.
   case set (§4.2, §5), the spike driver adapter, the lane markers and budgets wired into CI.
   **What it does not ship:** the full §2 matrix (I-11), the real-component adapters (I-12/I-14
   follow-ups), any recovery logic (the components').
+
+---
+
+## 11. I-11 addendum — what the matrix run corrected (Issue `#16`)
+
+S9 shipped the harness and the seed set; I-11 populated the `ACCEPTANCE.md` §2 matrix on it, as
+§4.2 and §10 say it should. Building the rest of the table established four things this design got
+wrong or left open, and they are recorded here rather than in a commit message because the next
+adapter (I-13, I-15) inherits them.
+
+**11.1 A SIGKILLed holder cannot return as a stale writer.** §5 and §7 describe the returning
+holder's write being refused, and that shape is real — but only for `sigstop-expire`, where the
+paused holder keeps its epoch in memory across the takeover. A holder killed with SIGKILL keeps
+nothing: it re-executes its command line, re-runs its script from `lease-acquire`, and has no token
+left to present. So the lease row's "kill the lease holder without release" injection is discharged
+by a refusal at **`acquire`** rather than at a protected write. `LeaseHeld` is persisted nowhere by
+S6, so the driver appends it to the same refusal ledger §5 already specifies, and the case asserts
+that row. This does not weaken the row: §2 asks that "the returning holder's write attempt is
+refused and that refusal is recorded, not silently dropped", and both halves hold — the attempt is
+refused at the earliest point it can be, and the refusal is a query-answerable persisted record.
+The stale-token half stays where it actually works.
+
+**11.2 Two live writers on one resource are not expressible — but the rejected writer must still
+write.** A `writer-race` case cannot arm two writers at their write windows and release them in a
+declared order, because the second one never reaches a write window: `acquire`'s upsert only
+replaces a lapsed row, so it is refused at the resource boundary. The first version of this case
+stopped there and asserted the refusal, which is half of §2's single-writer observable — and only
+half. The other half is that "the state item's history in SQLite is a linear sequence with no
+interleaving from the rejected writer", and a writer turned away at `acquire` contributes no row for
+an interleaving to be visible in. That half was therefore true of every run, including one in which
+atomic fencing had stopped working.
+
+The resolution is to let the racer *carry on*: refused at `acquire`, it fabricates the token it was
+denied and runs its whole script against the same state item. That is not a way around the refusal —
+the refusal is recorded either way — it is the real hazard, a process that has not noticed it lost
+its lease. Every write it then makes is refused **at the fence**, inside the write's own
+transaction, and the history contains the rejected writer's rows for the assertion to be about. The
+case requires a `StaleWriterRefused` specifically, because that is the refusal only a write can
+produce; a `LeaseHeld` alone would mean the racer never tried.
+
+The same correction applies to "a write is attempted concurrently from a resumed process and its
+replacement". Running the replacement to completion and *then* restarting the killed process leaves
+the resumed process meeting a lease row belonging to a process that has already exited, which is not
+a concurrent write by any reading. The replacement is held at a barrier instead, alive and holding,
+and is released only after the restart has come and gone. `spawn_claimant` therefore takes `armed`
+and `behaviours` of its own — the claimant's, never the case's, since a claimant that inherited the
+case's behaviours would fence out the writer that is supposed to win.
+
+The general rule this is an instance of, and the one that cost the most rounds to learn: **an
+assertion about what a rejected actor did not do is empty unless that actor got far enough to do
+it.**
+
+**11.3 A fault injection that every case already performs is not an injection.** The Secretary and
+the other role scripts acked twice unconditionally, as standing evidence that acks are idempotent.
+That made §2's "duplicate the ack" and "ack an already-acked message" true of all 35 seed cases and
+therefore falsifiable by none: a regression in either shape had nowhere to show. Ack multiplicity is
+behaviour-driven now and the baseline acks once. The general rule, for whoever extends this matrix
+next: **an injection the harness performs by default cannot be a case.**
+
+**11.4 An absence is not evidence unless something could have made it present.** The observation
+row's second half — "no termination or restart recommendation is produced from it" — is a count of
+rows, and nothing in the harness or the spike composes such a row, so the count was structurally
+zero and the assertion could not fail. It is made falsifiable by having each observation case
+*declare an escalation policy naming the very fact state its own injection produces*, so the driver
+is asked to escalate and must refuse, recording the refusal. The policy is case data and the driver
+maps no fact state to any verdict, so `Q-0012` (per-state semantics) stays open; the only rule
+encoded is the one D-0006 actually decides. The same shape is the answer whenever a case's
+observable is the absence of something: make the thing possible, then assert it did not happen.
+
+**11.5 The dedup row, and how `Q-0002` is carried.** ACCEPTANCE.md §2 requires the incident collapse
+rule *and* the re-notification window in absolute time to be parameterised rather than hard-coded —
+both halves are `Q-0002` — so S9's own rule that `incident_params` may hold no value at all had to be
+relaxed for the matrix, which is a change to a discipline this document set and was taken as a
+ruling rather than in passing. The relaxation is narrow and its scope is the point:
+
+- A **case** names its collapse rule, its window, and its dedup key. The driver implements both
+  rules and is *told* which to apply; it never picks, and it never composes the dedup key, because a
+  driver-side formula would answer `Q-0002`'s "what composes the key" half by inertia — the same way
+  a role-to-resource table would have answered `Q-0001`.
+- The **matrix** is held to covering the question rather than answering it: manifest validation
+  refuses a matrix in which the set of collapse rules is not the whole vocabulary, or in which every
+  case declares the same window. One value being load-bearing on a pass is what "hard-coded" means.
+- One case declares a window its own raises fall **outside** of and expects no collapse. Without it
+  the window would be carried and never change an outcome, and a parameter that changes nothing is
+  indistinguishable from a hard-coded one. (Both directions are verified falsifiable: a driver that
+  ignores the declared rule fails the increment-in-place cases, and one that ignores the declared
+  window fails the outside-the-window case.)
+- `reconcile_interval_ms` is **Q-0003**, not `Q-0002`, and is refused a value. The two were conflated
+  in an earlier reading of this row; they are labelled apart now.
+
+Nothing here settles `Q-0002`. When it is decided, the manifest keeps every case it has — the
+decision removes the obligation to cover both rules, it does not invalidate either.
