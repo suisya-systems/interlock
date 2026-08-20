@@ -33,6 +33,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   blocking-`readline()` control -- inconclusive there because the children
   had finished -- re-measured against children mid-turn, folding the C2
   analogue of U6 in with numbers rather than a structural claim alone.
+- **Item 10 rehearsal — run-start routing point, run→owning-system ledger,
+  writer audit** (gate item 10, D-0022, Issue #23). **A rehearsal against a
+  synthetic counterparty, not a discharge: item 10 is discharged at the canary
+  itself, with live v1 as the counterparty, and Q-0005 (canary duration, sample
+  size, numeric go/no-go) remains open.** `src/claude_org_runtime/canary/`
+  (throwaway per D-0026) adds a routing point consulted once per run at run
+  start, sitting above both systems and the provider (it imports no other
+  Interlock module, asserted on the syntax tree); a routing ledger in its own
+  SQLite file — an append-only `routing_decision` policy relation and an
+  insert-only `run_owner` relation whose rows refuse every update by trigger,
+  so *no run changes owning system mid-flight* is the store's refusal, not the
+  writer's discipline; a writer audit over both stores whose attribution is
+  physical presence (one store per system) and whose reports carry the
+  rehearsal marking; and a deliberately dumb JSON-lines stand-in for v1.
+  **Rollback is a routing change, not a data migration**, made structural: the
+  only thing the rollback path writes is one appended routing decision, and
+  the rehearsal asserts both run stores and the run ledger canonically
+  byte-identical across it (stable order and encoding, not raw file bytes).
+  `tests/canary/` and `docs/canary-routing-rehearsal.md` are the durable half;
+  the end-to-end scenario routes exactly one new run to Interlock between a
+  baseline and a post-rollback run on the stand-in. `docs/gate-record.md` item
+  10 moves to `rehearsed — not discharged`.
 
 - **S9 -- the fault-injection harness** (`ACCEPTANCE.md` §2, gate items 4 and 5,
   D-0026, Issue #15). `tests/fault_injection/` implements

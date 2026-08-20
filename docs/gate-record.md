@@ -46,7 +46,9 @@ Three things follow, and every row below is read in their light:
 discharged on C2**, on the weakened observable D-0023 defines — and its residual is stated in §3 in
 D-0023's own terms rather than folded into the verdict. Item 2 carries a **failed** verdict on C1
 and is **pending** on C2. **Item 8 is rehearsed on C2 — explicitly not discharged** (D-0022): its
-discharge point remains before the canary starts, against the real Secretary. Every other item is
+discharge point remains before the canary starts, against the real Secretary. **Item 10 is
+rehearsed against a synthetic counterparty — explicitly not discharged** (D-0022): its discharge
+point remains at the canary itself, with live v1 as the counterparty. Every other item is
 **pending** — the spike is under way on C2 and its evidence has not landed yet.
 
 ---
@@ -69,7 +71,7 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | 7 | Unsaved artifacts protected from the managed worktree lifecycle | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#7` — not yet landed | The spike (phase 1b) |
 | 8 | Secretary window responsiveness under worker load | `rehearsed — not discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#21` — `tests/secretary/`; `docs/secretary-intake-boundary.md`; `investigation/i16-item8-rehearsal.md` | **Before the canary starts** (D-0022) |
 | 9 | Curator output cannot reach a skill without human approval | `discharged` | `proven on the spike slice` | `provider-independent` | `#22`, PR `#27`; `docs/curator-promotion-gate.md`; `tests/curator/`; `investigation/u8-skill-hot-reload-probe.md` (U8) | **Discharged 2026-08-18**, independently of the spike |
-| 10 | One-worker canary and run-boundary rollback | `pending` rehearsal → **not discharged** | `pending` | `pending` | `#23` (rehearsal) — not yet landed | **At the canary itself** (D-0022) |
+| 10 | One-worker canary and run-boundary rollback | `rehearsed — not discharged` | `proven on the spike slice` | `provider-independent` | `#23` — `tests/canary/`; `docs/canary-routing-rehearsal.md`; `src/claude_org_runtime/canary/` (synthetic counterparty rehearsal) | **At the canary itself** (D-0022) |
 | 11 | Only the `SessionProvider` need be swapped | `discharged` | `proven on the spike slice` | `provider-independent` | `#10` (S1) and `#11` (S3) landed 2026-08-19; `#20` landed 2026-08-20 — `tests/gate_item11/`, and the control-plane suite in CI with a provider bound. Zero test modifications; the S2 half of `#20`'s fourth criterion is residual until `#17` lands | The spike (phase 8) |
 
 All eleven items are present. None is omitted and none is merged into another.
@@ -376,22 +378,36 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 ### Item 10 — one-worker canary and run-boundary rollback
 
-- **Verdict:** `pending` rehearsal → **explicitly not discharged**
-- **D-0022 label:** `pending` (rehearsal → *proven on the spike slice*; discharge → *re-proven on
-  the real implementation*)
-- **Provider:** `pending` — `ACCEPTANCE.md` §4 requires item 10 re-run in full against whatever
-  provider ships.
-- **Evidence:** `#23` — a run-start routing point, a run→owning-system ledger and a writer audit
-  over both stores against a **synthetic** counterparty, plus a rehearsed rollback that changes only
-  the routing decision. Not yet landed.
+- **Verdict:** `rehearsed — not discharged` (2026-08-21). A **synthetic counterparty rehearsal**:
+  the rehearsal is **not** the discharge, and the discharge carries *re-proven on the real
+  implementation* and is still owed at the canary.
+- **D-0022 label:** `proven on the spike slice`.
+- **Provider:** `provider-independent` — the routing layer imports no provider (or any other
+  Interlock module), asserted on the syntax tree; and `ACCEPTANCE.md` §4 requires item 10 re-run
+  in full against whatever provider ships regardless, with live v1 as the counterparty.
+- **Evidence:** `#23` — a run-start routing point above both systems and the provider, a
+  run→owning-system ledger (separate store; append-only routing policy, insert-only run ledger,
+  mid-flight owner change refused by trigger) and a writer audit over both stores, against a
+  **synthetic** counterparty (`src/claude_org_runtime/canary/`, throwaway per D-0026;
+  `docs/canary-routing-rehearsal.md` is the contract; `tests/canary/` the durable half). The
+  end-to-end scenario routes **exactly one** new run to Interlock between a baseline run and a
+  post-rollback run on the stand-in, finishes a v1-started run mid-canary with its owner
+  untouched, shows a writer audit with **no record written by both systems**, and rehearses a
+  rollback whose entire footprint is one appended `routing_decision` row — both run stores and
+  the run ledger canonically byte-identical across it. Every output carries the rehearsal marking
+  naming the canary as the discharge point.
 - **Discharge point:** **at the canary itself** (D-0022).
 - **Discharge point reached:** `no` — the canary has not run. The item passes when canary runs complete
   with exactly one owner per run, no record written by both systems, and a real rollback that
   changes only routing.
 - **Residual:** canary duration, sample size and numeric go/no-go criteria are **unresolved** —
-  `Q-0005`, which also holds the undecided case of runs already in flight *on Interlock* at
-  rollback. Item 10's real proof needs v1 as a live counterparty, which needs the implementation to
-  be running — which is why it is deferred rather than discharged up front.
+  **Q-0005 remains open**; nothing in the rehearsal states one and none of its numbers is a
+  criterion. Q-0005 also holds the undecided case of runs already in flight *on Interlock* at
+  rollback: the rehearsal shows only that the rollback itself does not touch such runs, and
+  deliberately provides no API in which a policy about them could be expressed. The counterparty
+  is synthetic, so nothing here exercises v1's real write paths, load or failure modes — item
+  10's real proof needs v1 live, which needs the implementation to be running, which is why it is
+  deferred rather than discharged up front.
 - **Scoped exception:** see §4. Deferred, not waived.
 
 ### Item 11 — even if the provider does not hold, only the `SessionProvider` need be swapped
@@ -478,6 +494,7 @@ anything.
 | S6 / S7 — lease and outbox implementations | throwaway (their tests are durable) | `#13` — landed 2026-08-19: `src/claude_org_runtime/control_plane/lease.py`, tests `tests/control_plane/test_lease.py`, written record `docs/lease-fencing.md`. Throwaway under D-0026 and it survives a C2 switch untouched — it is Interlock's own obligation regardless of provider (D-0024), and after the fence search it is the only exclusion there is. `Q-0001` stays open: `holder` is an opaque claimant identity and never a role. `#14` — landed 2026-08-19: `src/claude_org_runtime/control_plane/{outbox,handlers,destination}.py` is throwaway, `tests/control_plane/test_outbox.py` is the durable half |
 | S8 — `MessageBus` MCP endpoint | throwaway (the no-edge assertion is durable) | `#19` |
 | Stub Secretary intake (item 8 rehearsal) | throwaway implementation, durable tests and boundary contract | `#21` — landed 2026-08-21: `src/claude_org_runtime/secretary/` is throwaway; `tests/secretary/` (the structural and behavioural assertions) and `docs/secretary-intake-boundary.md` (the contract the real Secretary and `#29` build against) are the durable half; `investigation/i16_item8_rehearsal.py` is an S4-style throwaway harness and `investigation/i16-item8-rehearsal.md` its record |
+| Routing point, run-owner ledger, writer audit (item 10 rehearsal) | throwaway implementation, durable tests and contract | `#23` — landed 2026-08-21: `src/claude_org_runtime/canary/` (the routing point, the ledger with its own SQLite file, the audit and the synthetic counterparty) is throwaway; `tests/canary/` and `docs/canary-routing-rehearsal.md` (the contract the real canary cutover builds against) are the durable half. The ledger stays out of Q-0001's territory: `owning_system` names a system, never a component, role or lease holder |
 | S10 — per-role fencing renderer, `PreToolUse` deny hook, breach-probe battery | throwaway implementation, durable tests | `#9`; implementation `src/claude_org_runtime/fencing/`, tests `tests/fencing/`. Landed 2026-08-18; nothing here is promoted by having discharged item 3 |
 | Curator promotion gate implementation | throwaway | PR `#27`, `src/claude_org_runtime/curator/` |
 | Investigation records (U-register, fence search, U1, U8, U15/U35/U42) | evidence, not spike output — kept as the basis of the verdicts above | `investigation/` |
