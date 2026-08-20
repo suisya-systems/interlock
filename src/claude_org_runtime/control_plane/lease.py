@@ -875,13 +875,33 @@ def _render_operand(expression: object) -> str:
         )
     if expression is fence_epoch:
         return ":fence_epoch"
+    # Construction-time validation is repeated here, on the field as it stands
+    # at rendering: frozen=True yields to object.__setattr__, and a node
+    # mutated between the two observations would otherwise carry whatever the
+    # mutation wrote straight into the statement. What is validated is what is
+    # rendered, at the moment it is rendered.
     if type(expression) is Param:
-        return f":{expression.name}"
+        name = _require_column("a parameter name", expression.name)
+        if name in FENCE_PARAMS:
+            raise LeaseUsageError(
+                f"parameter {name!r} is bound by the fence itself and cannot "
+                "be rendered from a caller node"
+            )
+        return f":{name}"
     constant = expression.constant
     if constant is None:
         return "NULL"
+    if isinstance(constant, bool) or (
+        not isinstance(constant, int) and type(constant) is not str
+    ):
+        raise LeaseUsageError(
+            f"a value() constant must be a built-in str, an int or None at "
+            f"rendering time, got {constant!r}"
+        )
     if isinstance(constant, int):
-        return str(constant)  # canonicalised to a built-in int at construction
+        return str(int(constant))
+    if "\x00" in constant:
+        raise LeaseUsageError("a value() constant may not contain a NUL character")
     # SQLite's own escape: the quote is doubled, and nothing else in a string
     # literal is structural. Rendered here, by the builder, so the constant is
     # data however it is spelled.
@@ -891,12 +911,15 @@ def _render_operand(expression: object) -> str:
 
 def _render_assignment(column: str, expression: object) -> str:
     if type(expression) is Increment:
-        if expression.column != column:
+        if _require_column("increment() column", expression.column) != column:
             raise LeaseUsageError(
                 f"increment({expression.column!r}) assigned to {column!r}: a "
                 "counter is incremented in place, so the two names must agree"
             )
-        rendered = f"{column} + {int(expression.by)}"
+        by = expression.by
+        if not isinstance(by, int) or isinstance(by, bool):
+            raise LeaseUsageError(f"increment() by must be an int, got {by!r}")
+        rendered = f"{column} + {int(by)}"
     else:
         # _render_operand's own exact-type gate refuses everything else,
         # subclasses of the builder's types included.
@@ -904,12 +927,34 @@ def _render_assignment(column: str, expression: object) -> str:
     return f"{column} = {rendered}"
 
 
-def _render_predicate(predicate: Predicate) -> str:
-    if isinstance(predicate, Conjunction):
-        return " AND ".join(_render_predicate(p) for p in predicate.predicates)
-    if isinstance(predicate, IsNull):
-        return f"{predicate.column} IS NULL"
-    return f"{predicate.column} {predicate.operator} {_render_operand(predicate.operand)}"
+def _render_predicate(predicate: object) -> str:
+    # Exact-type dispatch with the fields revalidated as they are rendered --
+    # see _render_operand for why construction-time validation is not enough.
+    if type(predicate) is Conjunction:
+        conjuncts = tuple(predicate.predicates)
+        if not conjuncts:
+            raise LeaseUsageError("and_() needs at least one predicate")
+        return " AND ".join(_render_predicate(p) for p in conjuncts)
+    if type(predicate) is IsNull:
+        return f"{_require_column('an IS NULL column', predicate.column)} IS NULL"
+    if type(predicate) is not Comparison:
+        raise UnfencedStatement(
+            f"a predicate must be composed with eq(), ne(), is_null() and "
+            f"and_(), got {predicate!r}"
+        )
+    column = _require_column("a comparison column", predicate.column)
+    operator = predicate.operator
+    if operator not in ("=", "<>"):
+        raise LeaseUsageError(
+            f"a comparison operator is '=' or '<>', got {operator!r}"
+        )
+    operand = predicate.operand
+    if type(operand) is Value and operand.constant is None:
+        raise LeaseUsageError(
+            f"comparing {column!r} against value(None) never matches any row "
+            "in SQL; use is_null() for the null test"
+        )
+    return f"{column} {operator} {_render_operand(operand)}"
 
 
 def fenced_update(

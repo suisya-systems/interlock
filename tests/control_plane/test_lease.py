@@ -575,6 +575,48 @@ def test_a_subclass_is_not_a_str_however_equal_it_compares(cp):
     assert sneaky_table == statement
 
 
+def test_a_node_mutated_after_construction_is_refused_at_rendering():
+    """``frozen=True`` yields to ``object.__setattr__``; the rendering does not.
+
+    A validated node retained and mutated between construction and the builder
+    call would otherwise carry the mutation straight into the statement --
+    ``eq()``'s column rewritten to ``"run_id = run_id) OR 1=1 --"`` renders a
+    WHERE that is always true, with the fence constraining one OR branch. So
+    what is validated is what is rendered, at the moment it is rendered.
+    """
+
+    predicate = eq("run_id", value("safe"))
+    object.__setattr__(predicate, "column", "run_id = run_id) OR 1=1 --")
+    with pytest.raises(LeaseUsageError):
+        fenced_update(
+            "run", set={"status": value("done")}, where=predicate,
+            stamps_writer_epoch=False,
+        )
+
+    mutated_param = param("p")
+    object.__setattr__(mutated_param, "name", "p, writer_epoch = 1 WHERE 1=1 --")
+    with pytest.raises(LeaseUsageError):
+        fenced_insert(
+            "action", values={"action_id": mutated_param, "writer_epoch": fence_epoch}
+        )
+
+    mutated_value = value("safe")
+    object.__setattr__(mutated_value, "constant", object())
+    with pytest.raises(LeaseUsageError):
+        fenced_update(
+            "run", set={"status": mutated_value}, where=eq("run_id", param("r")),
+            stamps_writer_epoch=False,
+        )
+
+    null_smuggled = eq("resolved_at_ms", value(1))
+    object.__setattr__(null_smuggled.operand, "constant", None)
+    with pytest.raises(LeaseUsageError):
+        fenced_update(
+            "run", set={"status": value("done")}, where=null_smuggled,
+            stamps_writer_epoch=False,
+        )
+
+
 def test_the_builder_reads_the_callers_mapping_exactly_once():
     """A mapping that answers validation and rendering differently.
 
