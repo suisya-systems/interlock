@@ -91,11 +91,10 @@ def test_the_observation_step_exposes_its_windows(adapter: Any, tmp_path: Path) 
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)
-@pytest.mark.parametrize("role", contract.ROLES)
 def test_no_two_refusals_in_one_case_share_an_attempt_id(
-    adapter: Any, role: str, tmp_path: Path
+    adapter: Any, tmp_path: Path
 ) -> None:
-    conformance.check_refusal_ids_are_unique(adapter, tmp_path, role=role)
+    conformance.check_refusal_ids_are_unique(adapter, tmp_path)
 
 
 @pytest.mark.parametrize("adapter", ADAPTERS, ids=_ADAPTER_IDS)

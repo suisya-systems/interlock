@@ -692,6 +692,12 @@ def build_cases() -> list[dict]:
                         contract.INVARIANT_SINGLE_ACKED_STATE,
                         contract.INVARIANT_NO_UNOWNED_OUTBOX,
                         contract.INVARIANT_NO_PENDING_ACTION,
+                        # Without this the case would pass whether or not the
+                        # second ack was ever issued: an idempotent ack leaves
+                        # the state it found, so "exactly one acked state" reads
+                        # the same after one ack as after two. The ignored ack's
+                        # ledger row is the evidence that the injection happened.
+                        contract.INVARIANT_RECORDED_REFUSALS,
                     ),
                     "destination": (contract.INVARIANT_ONE_EFFECT_PER_KEY,),
                     "recovery_owner": None,

@@ -903,6 +903,27 @@ _ATTEMPT_FLOOR: Mapping[str, int] = {
     "late-ack": 2,
 }
 
+#: How high the **outbox row's own** ``retry_count`` must have climbed, per
+#: fault kind.
+#:
+#: Deliberately a second table and not a reuse of the one above, because the two
+#: count different things. ``_ATTEMPT_FLOOR`` counts attempts at a destination
+#: *key*, and ``dup-delivery`` reaches its floor of two with two different
+#: messages sharing one key -- each row attempted exactly once. Only a fault
+#: whose repeat lands on the *same row* raises that row's retry count, so only
+#: those appear here. Reusing the other table would fail ``dup-delivery`` for
+#: doing precisely what it is supposed to do.
+#:
+#: This exists because a floor of one says no more than "an attempt happened":
+#: an outbox that incremented once and never again, or lost the count across a
+#: restart, would satisfy it while breaking ACCEPTANCE.md section 2's
+#: "monotonically increasing, restart-surviving retry count".
+_RETRY_COUNT_FLOOR: Mapping[str, int] = {
+    "drop-delivery": 2,           # the refused attempt and the resend
+    "lost-ack": 2,                # the delivery and the re-delivery
+    "recipient-unavailable": 4,   # the refused attempts and the one that landed
+}
+
 
 def _armed(case: Mapping[str, Any], role: str) -> list[ArmedAnchor]:
     return [ArmedAnchor.parse(wire) for wire in case["arms"].get(role, ())]
@@ -1365,9 +1386,16 @@ def assert_invariants(
             elif name == contract.INVARIANT_RETRY_COUNT_DURABLE:
                 if not rows:
                     fail(f"{role}: no outbox rows at all; the script wrote nothing")
+                floor = max(1, _RETRY_COUNT_FLOOR.get(case["fault"], 1))
                 for row in rows:
-                    if row["retry_count"] < 1:
-                        fail(f"{role}: {row['message_id']} never recorded an attempt: {row}")
+                    if row["retry_count"] < floor:
+                        fail(
+                            f"{role}: {row['message_id']} carries "
+                            f"retry_count={row['retry_count']}; a "
+                            f"{case['fault']} case injected at least {floor} "
+                            "attempt(s), so a lower durable count means the "
+                            "count was not kept across them"
+                        )
                     if row["status"] != "acked":
                         fail(f"{role}: {row['message_id']} ended {row['status']!r}, not acked")
             elif name == contract.INVARIANT_SINGLE_ACKED_STATE:
@@ -1406,6 +1434,22 @@ def assert_invariants(
                         fail(
                             f"{role}: no ClockSkewRefused was recorded, so the "
                             "backward skew never reached the expiry boundary"
+                        )
+                if case["fault"] in ("dup-ack", "re-ack"):
+                    # The ack-multiplicity injections leave no trace in the
+                    # control plane by construction -- an idempotent ack changes
+                    # nothing, which is the invariant. So the evidence that the
+                    # *second* ack happened at all is the ignored-ack row, and
+                    # without checking for it the case would pass identically on
+                    # a driver that stopped issuing the duplicate.
+                    ignored = [
+                        row for row in rows if row["refusal"] == "AckAlreadyRecorded"
+                    ]
+                    if not ignored:
+                        fail(
+                            f"{role}: no ack was ever ignored as already-recorded, "
+                            f"so this {case['fault']} case never issued the second "
+                            "ack it claims to inject"
                         )
                 # The returning holder's write attempt is refused and that
                 # refusal is recorded, not silently dropped. This is a SQL query

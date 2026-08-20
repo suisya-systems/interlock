@@ -50,7 +50,7 @@ import os
 import random
 import sqlite3
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -117,6 +117,7 @@ __all__ = [
     "BEHAVIOUR_LOST_ACK",
     "BEHAVIOUR_RECIPIENT_UNAVAILABLE",
     "BEHAVIOUR_RE_ACK",
+    "BEHAVIOUR_STALE_WRITER",
     "COLLAPSE_INCREMENT_IN_PLACE",
     "COLLAPSE_OPEN_LINKED",
     "COLLAPSE_RULES",
@@ -177,6 +178,12 @@ BEHAVIOUR_DUP_ACK = "dup-ack"
 #: reached its terminal state.
 BEHAVIOUR_RE_ACK = "re-ack"
 
+#: Present a fencing token the lease row will reject, on two consecutive
+#: protected writes. It exists for the conformance battery: the refusal
+#: ``action_id`` collision it checks for can only happen when the *same* writer
+#: is refused twice, and no ordinary case does that.
+BEHAVIOUR_STALE_WRITER = "stale-writer"
+
 BEHAVIOURS = (
     BEHAVIOUR_DROP_DELIVERY,
     BEHAVIOUR_DUP_DELIVERY,
@@ -184,6 +191,7 @@ BEHAVIOURS = (
     BEHAVIOUR_RECIPIENT_UNAVAILABLE,
     BEHAVIOUR_DUP_ACK,
     BEHAVIOUR_RE_ACK,
+    BEHAVIOUR_STALE_WRITER,
 )
 
 #: How many attempts the recipient refuses before it becomes available again.
@@ -980,6 +988,7 @@ def raise_incident(
     dedup_key: str,
     repeat: int,
     now_ms: int,
+    lease: Lease | None = None,
 ) -> tuple[str, str]:
     """Persist one incident packet, collapsing per the case's declared rule.
 
@@ -991,6 +1000,7 @@ def raise_incident(
     """
 
     assert ctx.lease is not None
+    lease = lease if lease is not None else ctx.lease
     open_rows = _rows(
         ctx.connection,
         "SELECT incident_id, retry_count, created_at_ms FROM incident "
@@ -1081,7 +1091,7 @@ def raise_incident(
     try:
         protected_write(
             ctx.connection,
-            ctx.lease,
+            lease,
             write,
             now_ms=now_ms,
             attempt_id=_attempt_id(ctx, "raise_incident", repeat),
@@ -1091,7 +1101,7 @@ def raise_incident(
             ctx,
             operation=OPERATION_OBSERVE,
             refusal=type(error).__name__,
-            epoch=ctx.lease.epoch,
+            epoch=lease.epoch,
             now_ms=now_ms,
         )
         outcome = f"refused:{type(error).__name__}"
@@ -1230,6 +1240,16 @@ def op_observe(ctx: Context) -> None:
         return
 
     fact_state = classify_observation(ctx)
+    # The stale-writer injection: a token one epoch off the row, so every
+    # protected write below is fenced out. Two repeats, because one refusal
+    # cannot collide with anything -- the defect this exists to expose is a
+    # refusal id that repeats.
+    stale = BEHAVIOUR_STALE_WRITER in ctx.behaviours
+    lease = (
+        replace(ctx.lease, epoch=ctx.lease.epoch + 1) if stale else None
+    )
+    if stale:
+        repeats = max(repeats, 2)
     outcomes: list[str] = []
     incident_id = ""
     for repeat in range(repeats):
@@ -1241,6 +1261,7 @@ def op_observe(ctx: Context) -> None:
             dedup_key=dedup_key,
             repeat=repeat,
             now_ms=now_ms,
+            lease=lease,
         )
         outcomes.append(outcome)
         ctx.barrier.hit(CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT, operation=OPERATION_OBSERVE)
@@ -1458,6 +1479,27 @@ def op_ack(ctx: Context, outbox: Outbox) -> None:
             ctx.barrier.hit(CHECKPOINT_BEFORE_DURABLE_WRITE, operation=OPERATION_ACK)
             now_ms = ctx.clock.advance()
             outcome = outbox.record_ack(message_id, now_ms=now_ms)
+            if not outcome.recorded:
+                # An ack against a row that is already terminal changes nothing
+                # -- which is the invariant, and which is also why it leaves no
+                # trace of its own anywhere in the control plane. That silence
+                # is a problem for the two cases whose whole injection is the
+                # *second* ack: with no record, a case asserting "exactly one
+                # acked state" passes identically whether the duplicate was
+                # issued or never happened at all.
+                #
+                # So the ignored ack goes in the harness ledger, which exists
+                # for exactly this -- the classes S6/S7 persist nowhere. It is a
+                # persisted, query-answerable row, which is the standard
+                # ACCEPTANCE.md section 2 sets, and it makes the ack-multiplicity
+                # cases fail if the multiplicity ever stops happening.
+                record_refusal(
+                    ctx,
+                    operation=OPERATION_ACK,
+                    refusal="AckAlreadyRecorded",
+                    epoch=ctx.lease.epoch if ctx.lease is not None else 0,
+                    now_ms=now_ms,
+                )
             ctx.barrier.hit(
                 CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT, operation=OPERATION_ACK
             )

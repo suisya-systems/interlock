@@ -554,7 +554,7 @@ def check_invariant_queries_are_not_vacuous(adapter: Any, workdir: Path, *, role
                 )
 
 
-def check_refusal_ids_are_unique(adapter: Any, workdir: Path, *, role: str) -> None:
+def check_refusal_ids_are_unique(adapter: Any, workdir: Path) -> None:
     """No two refusals recorded in one case share an ``action_id``.
 
     A refusal's ``action_id`` is whatever the driver passed as ``attempt_id``,
@@ -571,8 +571,18 @@ def check_refusal_ids_are_unique(adapter: Any, workdir: Path, *, role: str) -> N
     harness keeps the property without being able to.
     """
 
+    role = contract.ROLE_SUPERVISOR
     case = synthetic_case(
-        case_id=f"conformance-refusal-ids-{role}", role=role, arms={}
+        case_id="conformance-refusal-ids",
+        role=role,
+        arms={},
+        # The collision cannot happen unless the same writer is refused twice,
+        # and no ordinary case does that. So the battery injects it: a token one
+        # epoch off the lease row, presented on two consecutive protected
+        # writes. A clean run would leave nothing to scan and this check would
+        # pass over an empty set -- which is the same vacuity it exists to catch
+        # elsewhere.
+        behaviours=("stale-writer",),
     )
     with _controller(adapter, workdir, case) as controller:
         controller.bootstrap()
@@ -584,11 +594,18 @@ def check_refusal_ids_are_unique(adapter: Any, workdir: Path, *, role: str) -> N
         history = controller.query(
             contract.INVARIANT_LINEAR_WRITER_HISTORY, scope=params["scope"]
         )
-        ids = [row["action_id"] for row in history]
-        duplicates = sorted({name for name in ids if ids.count(name) > 1})
-        if duplicates:
+        refusals = [row for row in history if row["status"] == "refused"]
+        if len(refusals) < 2:
             raise ContractViolation(
-                f"{adapter.driver_module}: {role} wrote action rows sharing "
+                f"{adapter.driver_module}: the stale-writer injection produced "
+                f"{len(refusals)} refusal row(s); at least two are needed for a "
+                "repeated id to be observable at all"
+            )
+        ids = [row["action_id"] for row in refusals]
+        duplicates = sorted({name for name in ids if ids.count(name) > 1})
+        if duplicates:  # pragma: no cover - the primary key usually raises first
+            raise ContractViolation(
+                f"{adapter.driver_module}: {role} wrote refusal rows sharing "
                 f"{duplicates}; a refusal id that repeats loses the refusal it "
                 "was supposed to record"
             )

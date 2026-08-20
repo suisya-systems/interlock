@@ -1876,7 +1876,8 @@
         "queries": [
           "single-acked-state",
           "no-unowned-outbox",
-          "no-pending-action"
+          "no-pending-action",
+          "recorded-refusals"
         ],
         "recovery_owner": null
       },
@@ -1932,7 +1933,8 @@
         "queries": [
           "single-acked-state",
           "no-unowned-outbox",
-          "no-pending-action"
+          "no-pending-action",
+          "recorded-refusals"
         ],
         "recovery_owner": null
       },
@@ -1987,7 +1989,8 @@
         "queries": [
           "single-acked-state",
           "no-unowned-outbox",
-          "no-pending-action"
+          "no-pending-action",
+          "recorded-refusals"
         ],
         "recovery_owner": null
       },
@@ -2043,7 +2046,8 @@
         "queries": [
           "single-acked-state",
           "no-unowned-outbox",
-          "no-pending-action"
+          "no-pending-action",
+          "recorded-refusals"
         ],
         "recovery_owner": null
       },

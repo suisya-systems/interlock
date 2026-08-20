@@ -109,7 +109,9 @@ _SECTION_2_INJECTIONS: dict[str, tuple[str, ...]] = {
         "re-ack",    # ack an already-acked message
     ),
     "dedup": (
-        "dup-delivery",  # deliver the same message twice, restarting in between
+        "dup-delivery",     # deliver the same message twice, restarting in between
+        "incident-repeat",  # raise the same incident condition repeatedly
+        "incident-replay",  # replay a persisted incident packet
     ),
     "single-writer": (
         "writer-race",          # two writers race for the same state item
@@ -134,8 +136,44 @@ def test_every_acceptance_section_2_injection_has_a_case() -> None:
     manifest = manifest_module.load_manifest()
     present = {case["fault"] for case in manifest["cases"]}
     for row, injections in _SECTION_2_INJECTIONS.items():
-        missing = [fault for fault in injections if fault not in present]
+        missing = [
+            fault
+            for fault in injections
+            if fault not in present and fault not in _PENDING_INJECTIONS
+        ]
         assert not missing, f"ACCEPTANCE.md section 2 row {row!r} has no case for {missing}"
+
+
+#: The injections that are named, understood, and deliberately not yet in the
+#: manifest -- the two halves of the dedup row that depend on ``Q-0002``.
+#:
+#: They are listed rather than omitted, and the test below pins the list, so
+#: this file cannot report the matrix complete while a row is missing. Removing
+#: an entry here without adding its case turns the checklist red; adding one
+#: without a reason is a reviewable diff. Silence was the alternative, and
+#: silence is how a gate reports success it has not earned.
+_PENDING_INJECTIONS = frozenset({"incident-repeat", "incident-replay"})
+
+
+def test_what_the_matrix_does_not_yet_cover_is_named() -> None:
+    """The gap is enumerable, in the same spirit as the lane skips (design 8.1).
+
+    ``ACCEPTANCE.md`` section 2's dedup row requires the incident collapse rule
+    *and* the re-notification window to be parameterised rather than hard-coded
+    (``Q-0002``), and S9's own manifest validation refuses any value in
+    ``incident_params`` on the grounds that S9 fixes none. Relaxing that rule is
+    a change to a discipline the S9 design set, so it is a ruling and not this
+    task's to take (design section 10).
+    """
+
+    manifest = manifest_module.load_manifest()
+    present = {case["fault"] for case in manifest["cases"]}
+    assert _PENDING_INJECTIONS.isdisjoint(present), (
+        "a pending injection now has a case; remove it from _PENDING_INJECTIONS "
+        "so the checklist starts enforcing it"
+    )
+    named = {fault for faults in _SECTION_2_INJECTIONS.values() for fault in faults}
+    assert _PENDING_INJECTIONS <= named
 
 
 def test_the_observation_row_asserts_one_fact_state_per_injection() -> None:
