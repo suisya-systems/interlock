@@ -283,6 +283,22 @@ class _Supervised:
 
 
 @dataclass(frozen=True)
+class _BrokenRecord:
+    """A session whose durable record exists but cannot be read.
+
+    Not "no session" (a record is right there) and not a readable one either.
+    The verbs split on it the same way they split on
+    :class:`_Uninterpretable`: the reading verbs report the session as
+    explicitly unobservable with this reason (R4 -- it must not vanish from
+    the roster), and the acting verbs refuse, because signalling or resuming
+    a child whose identity cannot be read is acting on a guess.
+    """
+
+    session_id: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class _Uninterpretable:
     """A session whose own output could not be read as a readout.
 
@@ -318,7 +334,11 @@ class ClaudeCliSessionProvider(SessionProvider):
             for provider-wide choices (a pinned ``--model``, say) that are not
             per-role configuration.
         stop_timeout: seconds :meth:`stop` waits after a terminate before
-            escalating to a kill, and the bound on each probe subprocess.
+            escalating to a kill.
+        probe_timeout: the bound on each capability-probe subprocess. Its own
+            knob because the two costs are unrelated: a probe is a CLI
+            answering ``--version``, whose slowness says nothing about how
+            long a terminated child should be given to die.
     """
 
     def __init__(
@@ -328,6 +348,7 @@ class ClaudeCliSessionProvider(SessionProvider):
         claude_command: str | Sequence[str] = "claude",
         base_cli_args: Sequence[str] = (),
         stop_timeout: float = 5.0,
+        probe_timeout: float = 10.0,
     ) -> None:
         super().__init__()
         # Resolved for the same reason the stub resolves it: children run with
@@ -342,6 +363,7 @@ class ClaudeCliSessionProvider(SessionProvider):
                 raise ValueError("claude_command must name at least one argument")
         self._base_cli_args = tuple(str(part) for part in base_cli_args)
         self._stop_timeout = stop_timeout
+        self._probe_timeout = probe_timeout
         self._sessions: dict[str, _Supervised] = {}
 
     # -- the capability probe (D-0010) -------------------------------------
@@ -381,6 +403,7 @@ class ClaudeCliSessionProvider(SessionProvider):
                 missing_flags[capability] = absent
             else:
                 supported.add(capability)
+        evidence = self._record_probe_evidence(version, help_text)
         return Ok(
             CapabilityReport(
                 provider_version=version,
@@ -388,24 +411,48 @@ class ClaudeCliSessionProvider(SessionProvider):
                 detail=(
                     f"version probe answered {version!r}; help text "
                     f"{'is missing ' + repr(missing_flags) if missing_flags else 'carries every required flag'}"
+                    f"; raw probe output {evidence}"
                     f"; written against {CLI_VERSION_WRITTEN_AGAINST}"
                 ),
             )
         )
+
+    def _record_probe_evidence(self, version: str, help_text: str) -> str:
+        """Keep the probe's raw answers, per D-0010's record requirement.
+
+        The ``--help`` text is pages long, so the report's ``detail`` carries a
+        pointer rather than the pages; the file under the state root is the
+        durable record. Failing to write it degrades the record, not the probe
+        -- and says so in the pointer instead of silently pointing at nothing.
+        """
+
+        path = self._state_root / "probe-evidence.txt"
+        try:
+            self._state_root.mkdir(parents=True, exist_ok=True)
+            partial = path.with_suffix(".part")
+            partial.write_text(
+                f"$ {' '.join(self._command)} --version\n{version}\n\n"
+                f"$ {' '.join(self._command)} --help\n{help_text}",
+                encoding="utf-8",
+            )
+            os.replace(partial, path)
+        except OSError as exc:
+            return f"could not be recorded at {path}: {exc}"
+        return f"recorded at {path}"
 
     def _run_probe(self, flag: str) -> "subprocess.CompletedProcess[bytes] | Failure":
         try:
             completed = subprocess.run(
                 [*self._command, flag],
                 capture_output=True,
-                timeout=self._stop_timeout,
+                timeout=self._probe_timeout,
                 check=False,
             )
         except subprocess.TimeoutExpired:
             return Failure(
                 FailureKind.TIMED_OUT,
                 f"{self._command[0]!r} did not answer {flag} within "
-                f"{self._stop_timeout}s",
+                f"{self._probe_timeout}s",
             )
         except OSError as exc:
             return Failure(
@@ -476,6 +523,18 @@ class ClaudeCliSessionProvider(SessionProvider):
                 return refusal
 
         session_uuid = claude_session_uuid(request.session_id)
+        holder = self._holder_of_uuid(session_uuid)
+        if holder is not None and holder != request.session_id:
+            # Reachable only by deliberately naming one identity twice -- an
+            # id that *is* the UUID another id derives to -- but two S1
+            # sessions sharing one provider identity is the U27 shape made at
+            # home, and refusing it costs one directory scan per start.
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"session id {request.session_id!r} derives provider identity "
+                f"{session_uuid}, which session {holder!r} already holds; two "
+                "sessions must not share one identity",
+            )
         record = _SessionRecord(
             session_id=request.session_id,
             claude_session_uuid=session_uuid,
@@ -521,6 +580,15 @@ class ClaudeCliSessionProvider(SessionProvider):
             )
         readouts = []
         for session in discovered:
+            if isinstance(session, _BrokenRecord):
+                readouts.append(
+                    SessionReadout(
+                        session_id=session.session_id,
+                        observation=Observation.COULD_NOT_OBSERVE,
+                        could_not_observe_reason=session.reason,
+                    )
+                )
+                continue
             outcome = self._readout(session)
             if isinstance(outcome, _Uninterpretable):
                 readouts.append(
@@ -553,6 +621,17 @@ class ClaudeCliSessionProvider(SessionProvider):
                 f"this provider holds no session {session_id!r} and its state "
                 "root holds no record of one",
             )
+        if isinstance(session, _BrokenRecord):
+            # The session exists -- its record is right there -- but cannot be
+            # read, which per S1 is a readout of "could not observe" with the
+            # reason, not a failed call (R4).
+            return Ok(
+                SessionReadout(
+                    session_id=session_id,
+                    observation=Observation.COULD_NOT_OBSERVE,
+                    could_not_observe_reason=session.reason,
+                )
+            )
         outcome = self._readout(session)
         if isinstance(outcome, _Uninterpretable):
             return Failure(
@@ -577,6 +656,13 @@ class ClaudeCliSessionProvider(SessionProvider):
                 FailureKind.UNKNOWN_SESSION,
                 f"this provider holds no session {session_id!r} and its state "
                 "root holds no record of one",
+            )
+        if isinstance(session, _BrokenRecord):
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"refusing to stop session {session_id!r}: {session.reason} "
+                "-- without a readable record there is no pid or process "
+                "group this provider can be sure is the session's to signal",
             )
         refusal = self._terminate(session)
         if refusal is not None:
@@ -619,6 +705,14 @@ class ClaudeCliSessionProvider(SessionProvider):
                 FailureKind.UNKNOWN_SESSION,
                 f"this provider holds no session {session_id!r} and its state "
                 "root holds no record of one",
+            )
+        if isinstance(session, _BrokenRecord):
+            return Failure(
+                FailureKind.REFUSED_BY_PROVIDER,
+                f"refusing to resume session {session_id!r}: {session.reason} "
+                "-- without a readable record neither the surviving process "
+                "nor the identity to resume can be resolved, and resuming on "
+                "a guess is how a second live writer is minted (U32)",
             )
         if session.record.incident is not None:
             return Failure(
@@ -794,6 +888,17 @@ class ClaudeCliSessionProvider(SessionProvider):
                     f"settings[{name!r}] for session {request.session_id!r} "
                     "contains a NUL, which no operating system can carry in an argv",
                 )
+            if value.lstrip().startswith("-"):
+                # ``claude -p <prompt>`` takes the prompt positionally, so a
+                # prompt that looks like a flag would be *parsed* as one --
+                # silently changing the spawn's semantics rather than being
+                # carried as text.
+                return Failure(
+                    FailureKind.REFUSED_BY_PROVIDER,
+                    f"settings[{name!r}] for session {request.session_id!r} "
+                    "begins with '-' and would be parsed as a CLI flag rather "
+                    "than carried as a prompt",
+                )
         raw_args = request.settings.get(CLI_ARGS_SETTING)
         if raw_args is None:
             cli_args: tuple[str, ...] = ()
@@ -876,6 +981,20 @@ class ClaudeCliSessionProvider(SessionProvider):
             # There is no pid to resolve, so the child -- if it ever existed
             # -- is unfindable, and the only safe reading is "gone".
             return False
+        if os.name != "posix":  # pragma: no cover - exercised via monkeypatch
+            # No signal-0 probe and no /proc: the recorded child's liveness is
+            # unknowable here, and unknowable must fail closed -- reading it
+            # as "gone" would let resume spawn next to a possibly-live writer
+            # (the U32 failure) and let stop report success over a running
+            # child.
+            return Failure(
+                FailureKind.BACKEND_UNREACHABLE,
+                f"pid {record.pid} recorded for session "
+                f"{record.session_id!r} cannot have its liveness determined "
+                "on this platform; refusing to adopt, signal or resume "
+                "around it",
+                {"pid": record.pid},
+            )
         if not _pid_exists(record.pid):
             return False
         cmdline = _pid_cmdline(record.pid)
@@ -913,7 +1032,19 @@ class ClaudeCliSessionProvider(SessionProvider):
                     _signal_group(record.pgid or process.pid, signal.SIGKILL)
                 else:  # pragma: no cover - exercised only on Windows
                     process.kill()
-                process.wait()
+                try:
+                    process.wait(timeout=self._stop_timeout)
+                except subprocess.TimeoutExpired:
+                    # A child that survives SIGKILL is stuck in the kernel;
+                    # reporting the bound loudly beats blocking the caller on
+                    # a wait that may never return.
+                    return Failure(
+                        FailureKind.TIMED_OUT,
+                        f"the child (pid {process.pid}) of session "
+                        f"{record.session_id!r} did not exit within "
+                        f"{self._stop_timeout}s of SIGKILL",
+                        {"pid": process.pid},
+                    )
             return None
         # An adopted orphan is not a child of this process, so there is no
         # ``wait``; the exit is confirmed by the pid disappearing. The
@@ -971,7 +1102,16 @@ class ClaudeCliSessionProvider(SessionProvider):
             )
         parsed = self._parse_events(session)
         if isinstance(parsed, _Uninterpretable):
-            return parsed
+            # The captured-output *file* could not be read. That is a failure
+            # of the observation channel, not an answer in an uninterpretable
+            # shape: per S1's read_state contract it is a readout of "could
+            # not observe" with the reason, never a failed call.
+            return SessionReadout(
+                session_id=record.session_id,
+                observation=Observation.COULD_NOT_OBSERVE,
+                could_not_observe_reason=parsed.detail,
+                provider_detail=parsed.provider_detail,
+            )
         events, garbage = parsed
         base_detail: dict[str, Any] = {
             "pid": record.pid,
@@ -1032,7 +1172,16 @@ class ClaudeCliSessionProvider(SessionProvider):
 
         liveness = self._child_liveness(session)
         if isinstance(liveness, Failure):
-            return _Uninterpretable(liveness.detail, dict(liveness.provider_detail))
+            # Unknowable liveness is likewise an observation-channel failure:
+            # the session is reported as itself, explicitly unobservable, with
+            # the reason. The *acting* verbs (stop, resume) still consult
+            # ``_child_liveness`` directly and keep failing closed on it.
+            return SessionReadout(
+                session_id=record.session_id,
+                observation=Observation.COULD_NOT_OBSERVE,
+                could_not_observe_reason=liveness.detail,
+                provider_detail={**base_detail, **dict(liveness.provider_detail)},
+            )
         if liveness:
             if garbage is not None:
                 return _Uninterpretable(garbage, base_detail)
@@ -1198,7 +1347,7 @@ class ClaudeCliSessionProvider(SessionProvider):
         except OSError:
             pass
 
-    def _find(self, session_id: str) -> _Supervised | None:
+    def _find(self, session_id: str) -> "_Supervised | _BrokenRecord | None":
         """The session, from this instance's table or from the durable record.
 
         A record found on disk is materialised into the table -- that is the
@@ -1217,20 +1366,48 @@ class ClaudeCliSessionProvider(SessionProvider):
             record = _SessionRecord.from_json(record_path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError) as exc:
             # A record that exists but cannot be read is not "no session" --
-            # but with no readable identity there is nothing to supervise
-            # either. It is surfaced through list_sessions' discovery below,
-            # which reports the same problem per-session.
-            return None
+            # a record is right there -- and it is not a readable one either.
+            # Deliberately not cached: a record repaired or finished being
+            # written between calls should start answering as itself.
+            return _BrokenRecord(
+                session_id=session_id,
+                reason=(
+                    f"a durable record for session {session_id!r} exists at "
+                    f"{record_path} but could not be read as one: {exc!r}"
+                ),
+            )
         session = _Supervised(record=record, provider_detail={"adopted_from_record": True})
         self._sessions[session_id] = session
         return session
 
-    def _discover_records(self) -> list[_Supervised]:
-        """Every supervised session plus every record on disk (orphans last)."""
+    def _holder_of_uuid(self, session_uuid: str) -> str | None:
+        """Which recorded session, if any, already holds this provider identity."""
 
-        discovered = list(self._sessions.values())
+        try:
+            discovered = self._discover_records()
+        except OSError:
+            # An unreadable state root cannot answer; the spawn path fails on
+            # it moments later with its own reason.
+            return None
+        for entry in discovered:
+            if isinstance(entry, _BrokenRecord):
+                continue
+            if entry.record.claude_session_uuid == session_uuid:
+                return entry.record.session_id
+        return None
+
+    def _discover_records(self) -> "list[_Supervised | _BrokenRecord]":
+        """Every supervised session plus every record on disk (orphans last).
+
+        A directory whose record cannot be read is discovered as a
+        :class:`_BrokenRecord` rather than dropped: dropping it is how a
+        possibly-running child would lose its only roster entry exactly when
+        a restarted supervisor needs it (R4).
+        """
+
+        discovered: list[_Supervised | _BrokenRecord] = list(self._sessions.values())
         known = set(self._sessions)
         if not self._state_root.is_dir():
             return discovered

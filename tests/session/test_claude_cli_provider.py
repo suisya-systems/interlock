@@ -120,6 +120,10 @@ if mode == "garbage-then-hang":
 
 emit({{"type": "unheard_of_event", "session_id": reported, "payload": 123}})
 
+if os.environ.get("FAKE_GARBAGE_BEFORE_RESULT") == "1":
+    sys.stdout.write("mid-stream line that is not JSON\\n")
+    sys.stdout.flush()
+
 if mode == "events-then-hang":
     time.sleep(sleep_for)
     sys.exit(0)
@@ -349,8 +353,16 @@ def test_cli_args_from_settings_reach_the_spawn_verbatim(
         {"prompt": ""},
         {"prompt": 42},
         {"resume_prompt": "   "},
+        {"prompt": "-p looks like a flag"},
     ],
-    ids=["bare-string-args", "nul-in-args", "empty-prompt", "non-string-prompt", "blank-resume"],
+    ids=[
+        "bare-string-args",
+        "nul-in-args",
+        "empty-prompt",
+        "non-string-prompt",
+        "blank-resume",
+        "flag-shaped-prompt",
+    ],
 )
 def test_unusable_settings_are_refused_with_a_reason_before_any_spawn(
     provider, tmp_path, spawn_log, settings
@@ -657,6 +669,144 @@ def test_a_recycled_pid_is_never_trusted_signalled_or_adopted(
     (spawned,) = _wait_for_spawns(log, 1)
     assert spawned["argv"][spawned["argv"].index("--resume") + 1] == claude_session_uuid("stale")
     _wait_for_state(provider, "stale", "completed")
+
+
+# --------------------------------------------------------------------------
+# Degraded observation: broken records, unreadable output, unknowable liveness
+# --------------------------------------------------------------------------
+
+
+def _plant_record(tmp_path: Path, session_id: str, **overrides) -> Path:
+    session_dir = tmp_path / "state" / session_id
+    session_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspaces" / session_id
+    workspace.mkdir(parents=True)
+    record = {
+        "session_id": session_id,
+        "claude_session_uuid": claude_session_uuid(session_id),
+        "workspace": str(workspace),
+        "role": "worker",
+        "resume_prompt": "continue",
+        "cli_args": [],
+        "generation": 0,
+        "argv": ["claude", "-p", "x"],
+        "pid": None,
+        "pgid": None,
+        "incident": None,
+    }
+    record.update(overrides)
+    (session_dir / "record.json").write_text(json.dumps(record), encoding="utf-8")
+    return session_dir
+
+
+def test_a_corrupt_record_does_not_vanish_and_does_not_read_as_unknown(
+    provider, tmp_path
+):
+    """R4 at the roster: a session whose durable record cannot be read is
+    still a session -- explicitly unobservable with the reason, never absent
+    and never 'this provider holds no record of one'."""
+
+    session_dir = tmp_path / "state" / "broken"
+    session_dir.mkdir(parents=True)
+    (session_dir / "record.json").write_text('{"truncated', encoding="utf-8")
+
+    listed = provider.list_sessions()
+    assert isinstance(listed, Ok)
+    (readout,) = listed.value
+    assert readout.session_id == "broken"
+    assert readout.observation is Observation.COULD_NOT_OBSERVE
+    assert "could not be read" in readout.could_not_observe_reason
+
+    read = provider.read_state("broken")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+
+    # Acting on an unreadable identity is refused, not guessed at.
+    for verb in (provider.stop, provider.resume):
+        result = verb("broken")
+        assert isinstance(result, Failure)
+        assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+
+    # And the id is still never reused.
+    again = provider.start(
+        StartRequest(session_id="broken", workspace=str(tmp_path / "w"), role="worker")
+    )
+    assert isinstance(again, Failure)
+
+
+def test_an_unreadable_output_file_is_could_not_observe_not_a_failure(
+    provider, tmp_path
+):
+    """S1's read_state contract: a session that exists but cannot be read
+    yields Ok(COULD_NOT_OBSERVE) with the reason -- Failure is reserved for
+    an answer in an uninterpretable shape."""
+
+    session_dir = _plant_record(tmp_path, "unreadable")
+    # A directory where the events file should be: read_bytes() raises
+    # OSError on every platform.
+    (session_dir / "events-000.jsonl").mkdir()
+
+    result = provider.read_state("unreadable")
+    assert isinstance(result, Ok)
+    readout = result.value
+    assert readout.observation is Observation.COULD_NOT_OBSERVE
+    assert "could not be read" in readout.could_not_observe_reason
+
+
+def test_unknowable_liveness_fails_closed_for_acting_and_open_eyed_for_reading(
+    provider, tmp_path, monkeypatch
+):
+    """Where the platform cannot answer whether the recorded child is alive,
+    reading reports the session as unobservable -- and resume/stop refuse,
+    because acting on 'probably dead' is how the U32 second writer is minted."""
+
+    _plant_record(tmp_path, "elsewhere", pid=12345, pgid=12345)
+    assert isinstance(provider.read_state("elsewhere"), Ok)  # materialise first
+    monkeypatch.setattr(s2.os, "name", "nt")
+
+    read = provider.read_state("elsewhere")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+    assert "liveness" in read.value.could_not_observe_reason
+
+    resumed = provider.resume("elsewhere")
+    assert isinstance(resumed, Failure)
+    assert resumed.kind is FailureKind.BACKEND_UNREACHABLE
+
+    stopped = provider.stop("elsewhere")
+    assert isinstance(stopped, Failure)
+    assert stopped.kind is FailureKind.BACKEND_UNREACHABLE
+
+
+def test_two_session_ids_cannot_share_one_provider_identity(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider.start(_request(tmp_path, session_id="s-one"))
+    twin = claude_session_uuid("s-one")
+    result = provider.start(_request(tmp_path, session_id=twin))
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+    assert "s-one" in result.detail
+
+
+def test_a_garbage_line_before_a_valid_result_is_surfaced_not_swallowed(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_GARBAGE_BEFORE_RESULT", "1")
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    readout = _wait_for_state(provider, "sess-1", "completed")
+    assert "not JSON" in readout.provider_detail["uninterpretable_line"]
+
+
+def test_the_probes_raw_answers_are_durably_recorded(provider, tmp_path):
+    result = provider.probe_capabilities()
+    assert isinstance(result, Ok)
+    evidence = (tmp_path / "state" / "probe-evidence.txt").read_text(encoding="utf-8")
+    assert FAKE_VERSION in evidence
+    assert "--help" in evidence
+    assert "--session-id" in evidence
 
 
 # --------------------------------------------------------------------------

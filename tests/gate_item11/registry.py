@@ -25,11 +25,15 @@ from typing import Callable
 
 from claude_org_runtime import session as session_package
 from claude_org_runtime.session.claude_cli_provider import ClaudeCliSessionProvider
-from claude_org_runtime.session.provider import SessionProvider
+from claude_org_runtime.session.provider import SessionProvider, SessionReadout
 from claude_org_runtime.session.stub_provider import LocalProcessSessionProvider
 
 
 def _always_available() -> str | None:
+    return None
+
+
+def _never_disqualified(readout: SessionReadout) -> str | None:
     return None
 
 
@@ -58,6 +62,14 @@ class ProviderEntry:
     #: exactly as the bwrap-dependent sandbox tests skip where bwrap cannot
     #: run. S3 exists so that at least one row runs everywhere.
     unavailable: Callable[[], str | None] = _always_available
+    #: Why the bound session's readout proves the backend was *not* live, or
+    #: ``None`` when it qualifies. Consulted by the provider plugin after the
+    #: bound session is observed, and per-provider on purpose: judging a
+    #: state word takes that provider's vocabulary, which is exactly the
+    #: knowledge item 11 confines to this package. Without it, a backend
+    #: whose child dies at spawn (a broken install, say) would qualify as
+    #: "live" and green the whole measurement while measuring nothing.
+    disqualified: Callable[[SessionReadout], str | None] = _never_disqualified
 
 
 def _stub(state_root: Path) -> SessionProvider:
@@ -81,6 +93,29 @@ def _claude_cli_unavailable() -> str | None:
     return None
 
 
+def _claude_cli_disqualified(readout: SessionReadout) -> str | None:
+    """A child that died without ever producing structured output.
+
+    ``exited-<rc>`` is S2's word for exactly that case: no init event, no
+    result, only an exit disposition -- which is what a present-but-broken
+    install (unauthenticated, no network) produces, with the actual refusal
+    on stderr. Such a backend answers every probe and still cannot sustain a
+    single session, so it must abort the measurement (D-0010) rather than
+    green a run whose header claims a live backend. A session that *spoke*
+    and then finished -- any state from its own output, errors included -- is
+    a session the backend really ran, and qualifies.
+    """
+
+    state = readout.provider_state or ""
+    if state.startswith("exited-"):
+        return (
+            f"the bound session's child died without producing structured "
+            f"output (state {state!r}); its stderr: "
+            f"{str(readout.provider_detail.get('stderr_tail', ''))!r}"
+        )
+    return None
+
+
 #: Every provider the measurement runs against, keyed by the handle
 #: ``docs/gate-record.md`` §5 gives it.
 PROVIDERS: dict[str, ProviderEntry] = {
@@ -91,6 +126,7 @@ PROVIDERS: dict[str, ProviderEntry] = {
         implementation=ClaudeCliSessionProvider,
         factory=_claude_cli,
         unavailable=_claude_cli_unavailable,
+        disqualified=_claude_cli_disqualified,
     ),
     "S3": ProviderEntry(
         id="S3",
