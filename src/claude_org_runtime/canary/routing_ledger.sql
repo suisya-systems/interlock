@@ -125,6 +125,12 @@ BEGIN
     SELECT RAISE(ABORT, 'a run never changes owning system mid-flight (gate item 10)');
 END;
 
+-- NOTE for both delete triggers in this file: they guard the INSERT OR
+-- REPLACE path only on a connection with PRAGMA recursive_triggers = ON --
+-- with it off (SQLite's default) the implicit conflict-resolution DELETE
+-- fires no trigger at all. The pragma is per-connection, so ledger.py sets
+-- it in _configure() on every connection it hands out, and the tests
+-- exercise OR REPLACE through exactly those connections.
 CREATE TRIGGER run_owner_rows_are_never_deleted
 BEFORE DELETE ON run_owner
 BEGIN

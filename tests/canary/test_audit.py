@@ -18,6 +18,7 @@ from claude_org_runtime.canary.audit import (
     canonical_sqlite_bytes,
     compare_across_rollback,
     snapshot_stores,
+    sqlite_run_ids,
     writer_audit,
 )
 from claude_org_runtime.canary.ledger import INTERLOCK, SYNTHETIC_V1, create_routing_ledger
@@ -175,6 +176,44 @@ def test_exclusion_excludes_exactly_the_named_table(ledger, routing):
     assert canonical_sqlite_bytes(ledger, exclude_tables=("routing_decision",)) == without
 
 
+def test_a_blob_value_is_canonicalised_not_crashed_on(interlock):
+    # S5's outbox payload carries no typeof CHECK, so a store can legally
+    # hold bytes -- and the store the canonicaliser most needs to see, one
+    # with an unexpected write in it, must not be the one it cannot
+    # serialise.
+    start_on_interlock(interlock, "run-1")
+    with interlock:
+        interlock.execute(
+            "INSERT INTO outbox (message_id, run_id, recipient, payload, dedup_key, "
+            "status, enqueued_at_ms) VALUES ('msg-1', 'run-1', 'peer', ?, 'dk-1', "
+            "'pending', ?)",
+            (b"\x00\x01\xff", T0),
+        )
+    first = canonical_sqlite_bytes(interlock)
+    assert first == canonical_sqlite_bytes(interlock)
+    assert b"$blob_sha256" in first
+
+
+def test_the_enumeration_reads_every_run_keyed_table(tmp_path):
+    # "Enumeration is capture" has to survive a run that exists only in a
+    # child table: a foreign writer with foreign_keys off can leave one, and
+    # an audit that read only `run` would call that store unwritten.
+    import sqlite3 as sqlite3_module
+
+    scratch = sqlite3_module.connect(tmp_path / "scratch.sqlite3")
+    try:
+        scratch.execute("CREATE TABLE run (run_id TEXT PRIMARY KEY)")
+        scratch.execute("CREATE TABLE outbox (message_id TEXT, run_id TEXT)")
+        scratch.execute("CREATE TABLE unrelated (note TEXT)")
+        scratch.execute("INSERT INTO run VALUES ('run-parent')")
+        scratch.execute("INSERT INTO outbox VALUES ('msg-1', 'run-orphan')")
+        scratch.execute("INSERT INTO outbox VALUES ('msg-2', NULL)")
+        scratch.execute("INSERT INTO unrelated VALUES ('no run key here')")
+        assert sqlite_run_ids(scratch) == ("run-orphan", "run-parent")
+    finally:
+        scratch.close()
+
+
 # --------------------------------------------------------------------------
 # the rollback comparison
 # --------------------------------------------------------------------------
@@ -224,6 +263,20 @@ def test_a_ledger_write_during_the_window_is_seen(routing, ledger, interlock, sy
     comparison = compare_across_rollback(before, after)
     assert not comparison.run_ledger_identical
     assert not comparison.only_the_routing_decision_changed
+
+
+def test_the_predicate_answers_touched_nothing_else_not_rollback_happened(
+    routing, ledger, interlock, synthetic
+):
+    # Two identical snapshots satisfy the predicate vacuously, by design:
+    # it answers "did anything beyond routing change?", and "did a rollback
+    # actually happen?" is appended_decisions' question. A caller asserting
+    # a rollback must ask both -- as the rehearsal test does.
+    routing.route_new_runs_to(INTERLOCK, now_ms=T0, reason="canary")
+    snapshot = snapshot_stores(ledger, interlock, synthetic)
+    comparison = compare_across_rollback(snapshot, snapshot)
+    assert comparison.only_the_routing_decision_changed
+    assert comparison.appended_decisions == ()
 
 
 def test_a_rewritten_history_is_not_an_append(routing, ledger, interlock, synthetic):

@@ -26,6 +26,7 @@ synthetic-side writes rather than a sample (see :mod:`.audit`).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -52,9 +53,15 @@ class SyntheticV1RunStore:
         the same explicit-creation discipline as both real stores (R3)."""
 
         target = Path(path)
-        if target.exists():
-            raise SyntheticStoreRefusal(f"{target} already exists; refusing to create over it")
-        target.write_text("", encoding="utf-8")
+        # O_EXCL, not exists()-then-write: the check-then-create window would
+        # let a racing creator's store be truncated by the loser -- the same
+        # race the ledger and S5 close the same way.
+        try:
+            os.close(os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        except FileExistsError as error:
+            raise SyntheticStoreRefusal(
+                f"{target} already exists; refusing to create over it"
+            ) from error
         return cls(target)
 
     def start_run(self, run_id: str, *, now_ms: int) -> None:
@@ -128,5 +135,12 @@ class SyntheticV1RunStore:
 
     def _append(self, record: Mapping[str, Any]) -> None:
         line = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        # A crash can leave a byte-complete final record missing only its
+        # newline; records() still reads that store, so a legitimate append
+        # must not fuse itself onto the torn tail and turn a readable store
+        # into a refused one.
+        tail = self._path.read_bytes()[-1:]
+        if tail and tail != b"\n":
+            line = "\n" + line
         with self._path.open("a", encoding="utf-8") as handle:
             handle.write(line)

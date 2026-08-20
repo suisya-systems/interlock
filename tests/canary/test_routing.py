@@ -7,6 +7,7 @@ every later policy flip, and make rollback a single appended decision.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -87,6 +88,16 @@ def test_re_routing_under_a_flipped_policy_is_an_owner_change_and_refused(routin
         routing.route_run_start("run-1", now_ms=T0 + 3)
     # The refusal left the ledger row exactly as it was.
     assert routing.routed_run("run-1").owning_system == SYNTHETIC_V1
+
+
+def test_a_non_ownership_integrity_failure_passes_through_as_itself(routing, ledger):
+    # An empty run_id fails the DDL CHECK, which is not an ownership
+    # question: it must surface as the database's own refusal -- not as an
+    # idempotent retry, not as an owner change -- and write nothing.
+    routing.route_new_runs_to(SYNTHETIC_V1, now_ms=T0, reason="baseline")
+    with pytest.raises(sqlite3.IntegrityError):
+        routing.route_run_start("", now_ms=T0 + 1)
+    assert ledger.execute("SELECT COUNT(*) FROM run_owner").fetchone() == (0,)
 
 
 def test_a_run_never_routed_reads_as_such(routing):

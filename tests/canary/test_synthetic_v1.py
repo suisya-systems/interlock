@@ -67,6 +67,19 @@ def test_a_record_without_a_run_id_is_refused(tmp_path):
         SyntheticV1RunStore(keyless).records()
 
 
+def test_an_append_does_not_fuse_onto_a_torn_tail(store):
+    # A crash can leave the final record byte-complete but missing its
+    # newline; records() still reads that store, so the next legitimate
+    # append must not weld two records onto one line and turn a readable
+    # store into a refused one.
+    store.start_run("run-1", now_ms=T0)
+    torn = store.path.read_text(encoding="utf-8").rstrip("\n")
+    store.path.write_text(torn, encoding="utf-8")
+    assert len(store.records()) == 1  # readable despite the torn tail
+    store.start_run("run-2", now_ms=T0 + 1)
+    assert [r["run_id"] for r in store.records()] == ["run-1", "run-2"]
+
+
 def test_run_ids_answer_the_audit_question(store):
     store.start_run("run-b", now_ms=T0)
     store.start_run("run-a", now_ms=T0 + 1)

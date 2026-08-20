@@ -259,3 +259,10 @@ def _schema_fingerprint(connection: sqlite3.Connection) -> str:
 def _configure(connection: sqlite3.Connection) -> None:
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA synchronous = FULL")
+    # Without this, INSERT OR REPLACE resolves a conflict by deleting the
+    # standing row WITHOUT firing the BEFORE DELETE trigger, and the
+    # re-insert then passes every remaining guard -- a mid-flight owner
+    # change reachable in one statement. The triggers are only as good as
+    # the connection's willingness to run them, and this pragma is
+    # per-connection, which is why it lives here beside foreign_keys.
+    connection.execute("PRAGMA recursive_triggers = ON")

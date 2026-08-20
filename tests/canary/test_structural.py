@@ -31,12 +31,29 @@ def _collapsed(text: str) -> str:
 
 
 def _imported_modules(source: Path) -> set:
+    """Every module *source* imports, with relative imports resolved.
+
+    ``ast.walk`` reaches imports inside functions and ``TYPE_CHECKING``
+    blocks, and relative imports are resolved against the canary package
+    rather than reported by their bare tail -- ``from ..control_plane import
+    lease`` names a sibling package and must not slip past a filter keyed on
+    the ``claude_org_runtime`` prefix.
+    """
+
     names = set()
     for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            names.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0:
+                if node.module:
+                    names.add(node.module)
+            elif node.level == 1:
+                # from . / from .sibling -- stays inside the package.
+                names.add("claude_org_runtime.canary")
+            else:
+                # from .. and beyond leaves the package.
+                names.add("claude_org_runtime." + (node.module or ""))
     return names
 
 
@@ -52,6 +69,27 @@ def test_the_routing_layer_imports_no_other_interlock_module():
             f"{source.name} imports {sorted(foreign)}; the routing layer sits "
             "above both systems and the provider, and depends on none of them"
         )
+
+
+def test_the_import_guard_itself_catches_the_ways_around_it(tmp_path):
+    # A guard is only as good as what it would have caught, so the escape
+    # routes are probed against the guard directly: a relative import of a
+    # sibling package, an import inside a function, and one behind
+    # TYPE_CHECKING all must be seen.
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "from typing import TYPE_CHECKING\n"
+        "from ..control_plane import schema\n"
+        "def late():\n"
+        "    import claude_org_runtime.session\n"
+        "if TYPE_CHECKING:\n"
+        "    from claude_org_runtime.dispatcher import anything\n",
+        encoding="utf-8",
+    )
+    seen = _imported_modules(probe)
+    assert "claude_org_runtime.control_plane" in seen
+    assert "claude_org_runtime.session" in seen
+    assert "claude_org_runtime.dispatcher" in seen
 
 
 def test_every_artifact_carries_the_one_marking_sentence():

@@ -111,6 +111,36 @@ def test_a_run_owner_row_is_never_deleted(ledger):
         ledger.execute("DELETE FROM run_owner")
 
 
+def test_or_replace_is_not_a_way_around_the_owner_trigger(ledger):
+    # INSERT OR REPLACE resolves the conflict by deleting the standing row,
+    # and with recursive_triggers off (SQLite's default) that implicit
+    # delete fires no trigger at all -- a mid-flight owner change in one
+    # statement. The connections this module hands out turn the pragma on,
+    # and this test holds them to it.
+    add_decision(ledger)
+    add_run(ledger, owning_system="synthetic_v1")
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        ledger.execute(
+            "INSERT OR REPLACE INTO run_owner (run_id, owning_system, decision_seq, routed_at_ms) "
+            "VALUES ('run-1', 'interlock', 1, ?)",
+            (T0 + 1,),
+        )
+    assert ledger.execute(
+        "SELECT owning_system FROM run_owner WHERE run_id = 'run-1'"
+    ).fetchone() == ("synthetic_v1",)
+
+
+def test_or_replace_is_not_a_way_around_the_decision_history(ledger):
+    add_decision(ledger)
+    with pytest.raises(sqlite3.IntegrityError, match="never deleted"):
+        ledger.execute(
+            "INSERT OR REPLACE INTO routing_decision "
+            "(decision_seq, owning_system, decided_at_ms, reason) "
+            "VALUES (1, 'interlock', ?, 'rewritten')",
+            (T0 + 1,),
+        )
+
+
 def test_one_ledger_row_per_run(ledger):
     add_decision(ledger)
     add_run(ledger, run_id="run-1")
@@ -243,6 +273,30 @@ def test_a_ledger_that_lost_a_trigger_is_refused(ledger_path, ledger):
     ledger.close()
     with pytest.raises(CorruptLedgerRefused, match="trigger"):
         open_routing_ledger(ledger_path)
+
+
+def test_a_ledger_that_lost_a_table_is_missing_state_not_empty(ledger_path, ledger):
+    ledger.execute("DROP TABLE run_owner")
+    ledger.commit()
+    ledger.close()
+    with pytest.raises(CorruptLedgerRefused, match="missing ledger table"):
+        open_routing_ledger(ledger_path)
+
+
+def test_a_dangling_ledger_reference_is_refused(ledger_path, ledger):
+    # foreign_keys is per-connection, so a foreign writer can leave a
+    # run_owner row pointing at a decision that does not exist; opening
+    # refuses the store rather than reading partial state.
+    ledger.execute("PRAGMA foreign_keys = OFF")
+    add_run(ledger, seq=99)
+    ledger.close()
+    with pytest.raises(CorruptLedgerRefused, match="dangling"):
+        open_routing_ledger(ledger_path)
+
+
+def test_a_directory_is_not_a_ledger(tmp_path):
+    with pytest.raises(CorruptLedgerRefused, match="regular file"):
+        open_routing_ledger(tmp_path)
 
 
 def test_a_verifiable_ledger_reopens_with_its_rows(ledger_path, ledger):
