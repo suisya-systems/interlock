@@ -601,3 +601,59 @@ plus the cheap portable lane; the full matrix is a scheduled/gate concern.
   case set (§4.2, §5), the spike driver adapter, the lane markers and budgets wired into CI.
   **What it does not ship:** the full §2 matrix (I-11), the real-component adapters (I-12/I-14
   follow-ups), any recovery logic (the components').
+
+---
+
+## 11. I-11 addendum — what the matrix run corrected (Issue `#16`)
+
+S9 shipped the harness and the seed set; I-11 populated the `ACCEPTANCE.md` §2 matrix on it, as
+§4.2 and §10 say it should. Building the rest of the table established four things this design got
+wrong or left open, and they are recorded here rather than in a commit message because the next
+adapter (I-13, I-15) inherits them.
+
+**11.1 A SIGKILLed holder cannot return as a stale writer.** §5 and §7 describe the returning
+holder's write being refused, and that shape is real — but only for `sigstop-expire`, where the
+paused holder keeps its epoch in memory across the takeover. A holder killed with SIGKILL keeps
+nothing: it re-executes its command line, re-runs its script from `lease-acquire`, and has no token
+left to present. So the lease row's "kill the lease holder without release" injection is discharged
+by a refusal at **`acquire`** rather than at a protected write. `LeaseHeld` is persisted nowhere by
+S6, so the driver appends it to the same refusal ledger §5 already specifies, and the case asserts
+that row. This does not weaken the row: §2 asks that "the returning holder's write attempt is
+refused and that refusal is recorded, not silently dropped", and both halves hold — the attempt is
+refused at the earliest point it can be, and the refusal is a query-answerable persisted record.
+The stale-token half stays where it actually works.
+
+**11.2 Two live writers on one resource are not expressible, and that is the invariant.** A
+`writer-race` case cannot arm two writers at their write windows and release them in a declared
+order, because the second one never reaches a write window: `acquire`'s upsert only replaces a
+lapsed row, so it is refused at the resource boundary. Rather than build a mechanism to defeat that,
+the case asserts it — which is precisely §2's single-writer invariant ("a stale writer is rejected,
+not merged"). The incumbent is held at a sync barrier for the whole race so the racer provably meets
+a *live* lease and not a lapsed one; the ordering is a barrier, never a sleep.
+
+**11.3 A fault injection that every case already performs is not an injection.** The Secretary and
+the other role scripts acked twice unconditionally, as standing evidence that acks are idempotent.
+That made §2's "duplicate the ack" and "ack an already-acked message" true of all 35 seed cases and
+therefore falsifiable by none: a regression in either shape had nowhere to show. Ack multiplicity is
+behaviour-driven now and the baseline acks once. The general rule, for whoever extends this matrix
+next: **an injection the harness performs by default cannot be a case.**
+
+**11.4 An absence is not evidence unless something could have made it present.** The observation
+row's second half — "no termination or restart recommendation is produced from it" — is a count of
+rows, and nothing in the harness or the spike composes such a row, so the count was structurally
+zero and the assertion could not fail. It is made falsifiable by having each observation case
+*declare an escalation policy naming the very fact state its own injection produces*, so the driver
+is asked to escalate and must refuse, recording the refusal. The policy is case data and the driver
+maps no fact state to any verdict, so `Q-0012` (per-state semantics) stays open; the only rule
+encoded is the one D-0006 actually decides. The same shape is the answer whenever a case's
+observable is the absence of something: make the thing possible, then assert it did not happen.
+
+**11.5 Still open, deliberately.** The dedup row's incident-collapse cases are not here.
+`ACCEPTANCE.md` §2 requires the collapse rule *and* the re-notification window to be parameterised
+rather than hard-coded (`Q-0002`), and S9's `validate_case` currently refuses any value at all in
+`incident_params` on the grounds that S9 fixes none. Relaxing that rule — to "a case may carry a
+value, and the matrix must exercise every value in the vocabulary" — is a change to a discipline
+this document set, so it goes to the secretary rather than being taken here (§10). The machinery is
+in place: the driver implements both collapse rules and is told which to apply, the
+`incident-collapse` invariant returns the rows without expressing either rule in SQL, and the
+assertion checks the rule the case declared. What is missing is the manifest diff.
