@@ -90,8 +90,8 @@ distribution on PyPI is the v1 / maintenance line — a different codebase
 ```sh
 git clone https://github.com/suisya-systems/interlock
 cd interlock
-python -m venv .venv && . .venv/bin/activate
-python -m pip install "jsonschema>=4.18" pytest
+python3 -m venv .venv && . .venv/bin/activate
+python3 -m pip install "jsonschema>=4.18" pytest
 ```
 
 `jsonschema` is the only runtime dependency and `pytest` the only test
@@ -102,17 +102,22 @@ Install the dependencies but **not** the package: this is a Python
 stops a stale install from shadowing the tree and importing older code.
 
 ```sh
-PYTHONPATH=src python -m pytest
-PYTHONPATH=src python -m claude_org_runtime.cli --help
+PYTHONPATH=src python3 -m pytest
+PYTHONPATH=src python3 -m claude_org_runtime.cli --help
 ```
 
 ## CLI
 
 The console entry point carries over from the fork base, minus the groups the
-purge deleted. What remains is planners and generators that read and write
-files and JSON. `claude-org-runtime` below is the installed console script;
-from a checkout the equivalent is
-`PYTHONPATH=src python -m claude_org_runtime.cli <group> ...`.
+purge deleted. `dispatcher delegate-plan`, `settings generate` / `show` and
+`migrate v1-to-v2` are planners and generators over files and JSON. The other
+two are not: `sandbox doctor` runs a live `bwrap` canary to see whether the
+sandbox actually comes up on this host, and `attention watch` is a poll loop
+that keeps running until interrupted — its notifications resolve to a stdout
+line, because the desktop backend probe went with the purge and `Q-0017` is
+open. `claude-org-runtime` below is the installed console script; from a
+checkout the equivalent is
+`PYTHONPATH=src python3 -m claude_org_runtime.cli <group> ...`.
 
 ```sh
 # Render a per-role settings.local.json from the bundled role schema:
