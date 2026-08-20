@@ -176,7 +176,7 @@ enumeration**, and the seed's authority is confined to payload and schedule.
 Every case has a stable identifier with the grammar
 
 ```
-<targets>__<operation>__<checkpoint>__<fault>
+<targets>__<operation>__<checkpoint>__<fault>[__<variant>]
 ```
 
 - `targets` — ordered role set: `sup`, `disp`, `sec`, `sup+disp`, `disp+sec`, `sup+sec`,
@@ -187,9 +187,18 @@ Every case has a stable identifier with the grammar
   not checkpoint-anchored (pure clock-skew cases, SIGSTOP-expiry cases).
 - `fault` — the fault kind: `sigkill`, `sigstop-expire`, `clock-fwd`, `clock-back`,
   `drop-delivery`, `dup-delivery`, `lost-ack`, `staggered-sigkill` (§5).
+- `variant` — a short slug, present **whenever two cases would otherwise share the first four
+  segments**: a different occurrence index of the same checkpoint, a different per-role checkpoint
+  assignment in a combination case, a different kill/restart order, or a different clock
+  programme each get their own variant slug (e.g. `occ2`, `killorder-ds`, `skew-claimant`).
 
-`case_id` is the re-run key, the manifest key, and the failure-report key. It never encodes the
-seed.
+The four leading segments are a *classification*, not the whole identity; the identity rule is
+that **`case_id` is unique across the manifest**, enforced at collection time (a duplicate fails
+the run before any case executes). Every field of the case entry that is not derivable from the
+`case_id` lives in the manifest entry the `case_id` keys — so `case_id + manifest_version` always
+denotes exactly one fully-specified case, which is what the re-run and failure-report contracts
+below rely on. `case_id` is the re-run key, the manifest key, and the failure-report key. It never
+encodes the seed.
 
 ### 4.2 The manifest
 
@@ -368,6 +377,20 @@ nor *by how much* — and a host-clock change is a CI-hostile non-answer.
   with `guard_ms` a single named constant. The resolved millisecond values are computed at run
   time from the case's `ttl_ms` and recorded in the reproduction line (§4.4), so a failure is
   replayable exactly while the manifest stays meaningful when a case's TTL changes.
+- **When an offset change takes effect.** The S6/S7 APIs take `now_ms` as a scalar per call: an
+  operation already in flight captured its `now_ms` at the call boundary, and a
+  `set_clock_offset` delivered at a checkpoint *inside* that call cannot and must not rewrite it —
+  a real process does not re-read its clock mid-statement either, so that captured value is the
+  honest semantics, not a defect. The contract therefore fixes two rules, both asserted by the
+  conformance battery: the driver **sources `now_ms` freshly from its `Clock` at every API call**
+  (never caching a value across calls), and a skew case's asserted observation is always made by
+  an API call **issued after** the offset change. Concretely, the two supported shapes are:
+  (a) **cross-role skew** — the target is blocked at an armed checkpoint while a *sibling's*
+  offset is moved and the sibling acts under its new clock (the main case, and unaffected by the
+  capture semantics); (b) **same-role skew** — the offset command is delivered at an armed
+  checkpoint, the process is released with `continue`, and the skew is observed by the script's
+  *next* operation. A case whose expectation depends on an in-flight call seeing a mid-call skew
+  is invalid by construction and refused at manifest validation.
 - Clock faults compose with the barrier: the canonical skew case blocks the holder at an armed
   checkpoint, moves the claimant's (or holder's) offset across the boundary, lets the claimant
   act, then releases or kills the holder — which is precisely the "expiry discovery is
@@ -399,17 +422,34 @@ stopped processes or leaks process groups hangs CI for everyone.
 
 ### 8.2 Process hygiene
 
-- Every role process is spawned with `start_new_session=True`: its own session and process group,
-  so a stray shell or grandchild cannot be confused with it and the group can be signalled as a
-  unit.
-- **Teardown is unconditional and layered**, registered per spawned process in a fixture that runs
-  on pass, fail and error alike: `SIGCONT` first (a stopped process ignores SIGTERM until
-  continued), then `SIGTERM`, then `wait` with a short grace (2 s), then `SIGKILL`, then a final
-  `killpg` sweep of the child's process group for grandchildren — each step skipped once the
-  process is confirmed reaped.
-- **PID-reuse safety**: the controller signals only through retained `Popen` handles until the
-  handle is reaped (`os.kill` on a raw stored PID after reap is forbidden); the `killpg` sweep
-  targets the session id created at spawn and runs only while the leader handle is un-reaped.
+- On POSIX, every role process is spawned with `start_new_session=True`: its own session and
+  process group (pgid = leader pid), so a stray shell or grandchild cannot be confused with it and
+  the group can be signalled as a unit.
+- **Teardown is unconditional, layered, and reaps last.** A fixture registered per spawned
+  process runs on pass, fail and error alike. On POSIX the ladder is applied to the **process
+  group** via `killpg`: `SIGCONT` (a stopped process ignores SIGTERM until continued), then
+  `SIGTERM`, then a short grace (2 s) polling the leader with `WNOHANG`-style checks, then
+  `SIGKILL` — and only **after** the final group `SIGKILL` is the leader reaped with `wait()`.
+  The ordering is the point: an exited-but-unreaped leader is a zombie, a zombie's PID — and
+  therefore the group's pgid — **cannot be reused** until it is reaped, so every `killpg` in the
+  ladder is guaranteed to address the group we created, even when the leader died at the first
+  step while grandchildren survived. Grandchild cleanup is thus never skipped by an early leader
+  exit, and no signal is ever sent to a possibly-recycled id.
+- **PID-reuse safety**: the controller signals only through the retained `Popen` handle (leader)
+  and through `killpg` on the pgid recorded at spawn *while the leader is un-reaped* (see above —
+  the reap is deliberately the last step). `os.kill`/`killpg` against any stored id after the
+  corresponding leader has been reaped is forbidden.
+- **Windows branch (portable lane).** POSIX sessions, `SIGCONT`/`SIGTERM` and `killpg` do not
+  exist on Windows, and `start_new_session` has no effect there, so the contract has an explicit
+  branch rather than a best-effort mapping: role processes are spawned into a **Job Object**
+  created per case with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, crash injection is
+  `Popen.kill()` (`TerminateProcess`), and teardown is `TerminateProcess` on the leader followed
+  by closing the job handle, which kills the whole tree atomically at the kernel — the moral
+  equivalent of the zombie-guarded `killpg`, with the job handle playing the un-reusable-id role.
+  If the Job Object API is unavailable to the harness, the fallback is `taskkill /T /F` on the
+  leader PID *before* the handle is waited on. Signal-shaped cases (`sigstop-expire`, exit-status
+  `-SIGKILL` assertions) never run on this branch (§8.1); only the portable lane's process
+  hygiene needs it.
 - **Watchdogs at three levels**, all on the host monotonic clock: a barrier timeout per armed
   checkpoint, a per-case timeout, and a suite timeout (§9). A watchdog firing runs the same
   teardown ladder and fails the case with the event trace attached — CI hangs are converted into
