@@ -32,6 +32,7 @@ import pytest
 from claude_org_runtime.control_plane import lease as s6
 from claude_org_runtime.control_plane.lease import (
     DESTINATIONS,
+    FENCE_PARAMS,
     FENCE_SQL,
     ClockSkewRefused,
     DestinationFencing,
@@ -48,19 +49,26 @@ from claude_org_runtime.control_plane.lease import (
     StaleWriterRefused,
     UnfencedStatement,
     acquire,
+    and_,
     applied_epoch_regressions,
     authority_timeline,
     claimed_timeline,
     effect_kind,
+    eq,
+    fence_epoch,
     resource_of_kind,
     epoch_regressions,
     fenced_insert,
     fenced_update,
+    is_null,
+    ne,
     overlapping_claims,
+    param,
     protected_write,
     read_lease,
     release,
     renew,
+    value,
     write_history,
 )
 from claude_org_runtime.control_plane.schema import create_control_plane, open_control_plane
@@ -102,28 +110,17 @@ EFFECT_KIND = effect_kind(RESOURCE, "deliver_task")
 
 APPLY_EFFECT = fenced_insert(
     "action",
-    columns=[
-        "action_id",
-        "run_id",
-        "kind",
-        "idempotency_key",
-        "exactly_once_mechanism",
-        "status",
-        "applied_at_ms",
-        "writer_epoch",
-        "created_at_ms",
-    ],
-    values=[
-        ":action_id",
-        "'r1'",
-        ":kind",
-        ":idempotency_key",
-        ":mechanism",
-        "'applied'",
-        ":now_ms",
-        ":fence_epoch",
-        ":now_ms",
-    ],
+    values={
+        "action_id": param("action_id"),
+        "run_id": value("r1"),
+        "kind": param("kind"),
+        "idempotency_key": param("idempotency_key"),
+        "exactly_once_mechanism": param("mechanism"),
+        "status": value("applied"),
+        "applied_at_ms": param("now_ms"),
+        "writer_epoch": fence_epoch,
+        "created_at_ms": param("now_ms"),
+    },
 )
 
 
@@ -423,45 +420,124 @@ def test_a_fenced_statement_that_forgets_the_epoch_is_refused():
     """The history is only readable if every fenced write stamps its epoch."""
 
     with pytest.raises(UnfencedStatement):
-        fenced_update("action", set_clause="status = 'applied'", where="action_id = :a")
-    # Mentioning the column is not stamping it: a predicate that names
-    # writer_epoch, or a constant assigned to it, leaves a row whose epoch means
-    # nothing, and write_history() would then be reading a number it cannot trust.
+        fenced_update("action", set={"status": value("applied")}, where=eq("action_id", param("a")))
+    # Assigning the column is not stamping it: a constant -- or any value other
+    # than the fence_epoch sentinel -- leaves a row whose epoch means nothing,
+    # and write_history() would then be reading a number it cannot trust.
     with pytest.raises(UnfencedStatement):
-        fenced_update("action", set_clause="writer_epoch = 1", where="action_id = :a")
+        fenced_update("action", set={"writer_epoch": value(1)}, where=eq("action_id", param("a")))
     with pytest.raises(UnfencedStatement):
-        fenced_insert("action", columns=["action_id", "writer_epoch"], values=[":a", "1"])
-    # ...and the opt-out is explicit, for a target that genuinely has no such column.
+        fenced_insert("action", values={"action_id": param("a"), "writer_epoch": value(1)})
+    # The mapping shape closes the old duplicate-assignment hole by construction:
+    # "SET writer_epoch = :fence_epoch, writer_epoch = 1" needed two values under
+    # one column name, and a mapping holds exactly one value per key.
+    with pytest.raises(LeaseUsageError):
+        param("fence_epoch")  # the sentinel is the only spelling of the stamp
+    # ...and the opt-out is explicit, for a target that genuinely has no such
+    # column -- and it means what it says: opting out and stamping anyway are
+    # two claims that cannot both be true.
     fenced_update(
-        "run", set_clause="status = 'done'", where="run_id = :r", stamps_writer_epoch=False
+        "run", set={"status": value("done")}, where=eq("run_id", param("r")),
+        stamps_writer_epoch=False,
     )
+    with pytest.raises(UnfencedStatement):
+        fenced_update(
+            "run", set={"status": value("done"), "writer_epoch": fence_epoch},
+            where=eq("run_id", param("r")), stamps_writer_epoch=False,
+        )
 
 
-def test_a_fragment_cannot_hide_its_structure_inside_a_string_literal(cp):
-    """The parenthesis inside `'('` is text; the one that closes the wrapper is not.
-
-    This predicate balances character for character while genuinely closing the
-    parentheses the fence is ANDed onto and putting a true `OR` branch in front
-    of it. The literals are taken out before the structural scan, by SQLite's
-    own quoting rules, so what is scanned is all and only structure.
+def test_no_sql_text_crosses_the_builder_boundary(cp):
+    """The retired lexer proved a fragment could not restructure the statement;
+    the typed builders retire the question. There is no fragment: SQL text
+    offered where a typed object belongs is refused outright, whatever it says.
     """
 
-    with pytest.raises(UnfencedStatement):
+    with pytest.raises(UnfencedStatement):  # a raw predicate, however innocent
         fenced_update(
             "action",
-            set_clause="writer_epoch = :fence_epoch",
-            where="'(' = '(') OR (1 = 1 AND ')' = ')'",
+            set={"writer_epoch": fence_epoch},
+            where="action_id = :a",
         )
-    with pytest.raises(UnfencedStatement):  # a comment hidden the same way
+    with pytest.raises(UnfencedStatement):  # a raw SET clause
         fenced_update(
-            "action", set_clause="writer_epoch = :fence_epoch", where="x = 'a' AND y = 'b'--'"
+            "action",
+            set="writer_epoch = :fence_epoch",
+            where=eq("action_id", param("a")),
         )
-    # ...and an honest literal containing those characters is still accepted.
-    fenced_update(
-        "outbox",
-        set_clause="recipient = 'a(b', writer_epoch = :fence_epoch",
-        where="payload = '--'",
+    with pytest.raises(UnfencedStatement):  # a raw operand inside a typed predicate
+        fenced_update(
+            "action",
+            set={"writer_epoch": fence_epoch},
+            where=eq("action_id", ":a"),
+        )
+    with pytest.raises(UnfencedStatement):  # a raw assignment value
+        fenced_update(
+            "action",
+            set={"status": "'applied'", "writer_epoch": fence_epoch},
+            where=eq("action_id", param("a")),
+        )
+    with pytest.raises(UnfencedStatement):  # a raw VALUES clause on an insert
+        fenced_insert("action", values="(:a, :fence_epoch)")
+
+
+def test_a_hostile_constant_is_rendered_as_an_inert_literal(cp):
+    """The typed answer to the old literal-hiding attacks, proven end to end.
+
+    Under the retired fragment API, `"'(' = '(') OR 1 = 1 --"` was a predicate
+    that balanced character for character while closing the fence's parentheses
+    and commenting the rest away. Under the typed API the same characters can
+    only ever be a value() constant, and the builder renders it by SQLite's own
+    quoting rules -- so the statement executes, the fence still gates it, and
+    the string lands in the column verbatim, structure and all.
+    """
+
+    hostile = "'(' = '(') OR 1 = 1 --"
+    enqueue = ProtectedWrite(
+        kind=EFFECT_KIND,
+        idempotency_key="m-hostile",
+        statement=fenced_insert(
+            "outbox",
+            values={
+                "message_id": value("m-hostile"),
+                "run_id": value("r1"),
+                "recipient": value("a(b"),
+                "payload": value(hostile),
+                "dedup_key": value("d-hostile"),
+                "status": value("pending"),
+                "writer_epoch": fence_epoch,
+                "enqueued_at_ms": param("now_ms"),
+            },
+        ),
+        exactly_once_mechanism="transactional_with_record",
+        params={"now_ms": T0 + 1},
     )
+
+    lease = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
+    assert protected_write(cp, lease, enqueue, now_ms=T0 + 1) == 1
+
+    assert cp.execute(
+        "SELECT recipient, payload FROM outbox WHERE message_id = 'm-hostile'"
+    ).fetchone() == ("a(b", hostile)
+
+
+def test_a_name_is_a_name_and_never_a_fragment():
+    """Identifiers are the one caller string left, so they admit no structure."""
+
+    for hostile in ("a b", "a--", "a'", "a)", "1a", ""):
+        with pytest.raises(LeaseUsageError):
+            param(hostile)
+        with pytest.raises(LeaseUsageError):
+            eq(hostile, value(1))
+        with pytest.raises(LeaseUsageError):
+            ne(hostile, value(1))
+        with pytest.raises(LeaseUsageError):
+            is_null(hostile)
+    # ...and the fence's own parameters cannot be named from outside at all:
+    # the epoch stamp is the fence_epoch sentinel, not a spelling.
+    for reserved in FENCE_PARAMS:
+        with pytest.raises(LeaseUsageError):
+            param(reserved)
 
 
 def test_the_table_is_chosen_from_a_closed_set_not_composed(cp):
@@ -477,11 +553,14 @@ def test_the_table_is_chosen_from_a_closed_set_not_composed(cp):
     with pytest.raises(UnfencedStatement):
         fenced_insert(
             "action (action_id) SELECT 'x' WHERE 1 /*",
-            columns=["action_id", "writer_epoch"],
-            values=[":a", ":fence_epoch"],
+            values={"action_id": param("a"), "writer_epoch": fence_epoch},
         )
     with pytest.raises(UnfencedStatement):
-        fenced_update("sqlite_master", set_clause="writer_epoch = :fence_epoch", where="1 = 1")
+        fenced_update(
+            "sqlite_master",
+            set={"writer_epoch": fence_epoch},
+            where=eq("rootpage", value(1)),
+        )
 
 
 def test_a_protected_write_cannot_rewrite_an_applied_rows_attribution(cp):
@@ -497,8 +576,8 @@ def test_a_protected_write_cannot_rewrite_an_applied_rows_attribution(cp):
         with pytest.raises(UnfencedStatement):
             fenced_update(
                 "action",
-                set_clause=f"{column} = :x, writer_epoch = :fence_epoch",
-                where="action_id = :a",
+                set={column: param("x"), "writer_epoch": fence_epoch},
+                where=eq("action_id", param("a")),
             )
 
     alpha = acquire(cp, resource=RESOURCE, holder="alpha", now_ms=T0, ttl_ms=TTL)
@@ -509,7 +588,9 @@ def test_a_protected_write_cannot_rewrite_an_applied_rows_attribution(cp):
         kind=EFFECT_KIND,
         idempotency_key="a1",
         statement=fenced_update(
-            "action", set_clause="writer_epoch = :fence_epoch", where="action_id = :action_id"
+            "action",
+            set={"writer_epoch": fence_epoch},
+            where=eq("action_id", param("action_id")),
         ),
         exactly_once_mechanism="transactional_with_record",
         params={"action_id": "a1"},
@@ -553,8 +634,8 @@ def test_a_write_that_misses_its_own_where_is_not_recorded_as_a_stale_writer(cp)
         idempotency_key="a1",
         statement=fenced_update(
             "action",
-            set_clause="status = 'applied', writer_epoch = :fence_epoch",
-            where="action_id = :action_id AND status = 'pending'",
+            set={"status": value("applied"), "writer_epoch": fence_epoch},
+            where=and_(eq("action_id", param("action_id")), eq("status", value("pending"))),
         ),
         exactly_once_mechanism="transactional_with_record",
         params={"action_id": "no-such-row"},
@@ -775,26 +856,16 @@ def test_a_protected_write_to_another_table_is_stamped_on_its_own_row(cp):
         idempotency_key="m1",
         statement=fenced_insert(
             "outbox",
-            columns=[
-                "message_id",
-                "run_id",
-                "recipient",
-                "payload",
-                "dedup_key",
-                "status",
-                "writer_epoch",
-                "enqueued_at_ms",
-            ],
-            values=[
-                "'m1'",
-                "'r1'",
-                "'secretary'",
-                "'{}'",
-                "'d1'",
-                "'pending'",
-                ":fence_epoch",
-                ":now_ms",
-            ],
+            values={
+                "message_id": value("m1"),
+                "run_id": value("r1"),
+                "recipient": value("secretary"),
+                "payload": value("{}"),
+                "dedup_key": value("d1"),
+                "status": value("pending"),
+                "writer_epoch": fence_epoch,
+                "enqueued_at_ms": param("now_ms"),
+            },
         ),
         exactly_once_mechanism="transactional_with_record",
         params={"now_ms": T0 + 1},
@@ -1231,10 +1302,12 @@ def test_the_only_exclusion_is_the_lease_and_the_module_says_so():
 def test_fenced_statements_carry_the_fence_verbatim():
     update = fenced_update(
         "outbox",
-        set_clause="status = 'delivered', writer_epoch = :fence_epoch",
-        where="message_id = :m",
+        set={"status": value("delivered"), "writer_epoch": fence_epoch},
+        where=eq("message_id", param("m")),
     )
-    insert = fenced_insert("action", columns=["action_id", "writer_epoch"], values=[":a", ":fence_epoch"])
+    insert = fenced_insert(
+        "action", values={"action_id": param("a"), "writer_epoch": fence_epoch}
+    )
 
     assert FENCE_SQL in update and FENCE_SQL in insert
     # The fence is one constant, not a template rebuilt at each call site: a

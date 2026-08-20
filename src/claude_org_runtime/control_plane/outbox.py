@@ -70,7 +70,23 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, Sequence
 
 from .destination import DeliveryReceipt, DestinationRefusal
-from .lease import Lease, StaleWriterRefused, _immediate, read_lease
+from .lease import (
+    FencedStatement,
+    Lease,
+    StaleWriterRefused,
+    _immediate,
+    and_,
+    eq,
+    fence_epoch,
+    fenced_insert,
+    fenced_update,
+    increment,
+    is_null,
+    ne,
+    param,
+    read_lease,
+    value,
+)
 
 __all__ = [
     "CHECKPOINTS",
@@ -190,20 +206,97 @@ _LOAD_QUERY = """
      WHERE message_id = :message_id
 """
 
-#: The fence, in the single-statement form ``spike_schema.sql`` specifies on the
-#: ``lease`` table. The ``EXISTS`` clause is inside the ``UPDATE`` and not a
-#: preceding ``SELECT``: check-then-write leaves precisely the race in which the
-#: lease expires between the check and the write, which is the case
-#: ``ACCEPTANCE.md`` section 2 injects into.
-_FENCE_PREDICATE = """
-       AND writer_epoch = :epoch
-       AND EXISTS (SELECT 1
-                     FROM lease
-                    WHERE resource      = :resource
-                      AND holder        = :holder
-                      AND epoch         = :epoch
-                      AND expires_at_ms > :now_ms)
-"""
+#: Every protected statement below is issued by the typed builders in
+#: :mod:`.lease` (#42): the fence is a clause of the write itself, in the
+#: single-statement form ``spike_schema.sql`` specifies on the ``lease`` table,
+#: and no SQL text is synthesised here -- ``fenced_update`` / ``fenced_insert``
+#: render every character, this module only binds parameters. The ``EXISTS``
+#: clause is inside the write and not a preceding ``SELECT``: check-then-write
+#: leaves precisely the race in which the lease expires between the check and
+#: the write, which is the case ``ACCEPTANCE.md`` section 2 injects into.
+#:
+#: The updates that advance a live row also match ``writer_epoch`` against the
+#: fence's own epoch: the row must be *owned* by the writing epoch, not merely
+#: written while some lease is live. Re-assigning ``writer_epoch = fence_epoch``
+#: on those statements stores the value the predicate just proved the row
+#: already carries; it is the builder's stamp rule made explicit, never a
+#: change of attribution.
+_ENQUEUE = fenced_insert(
+    "outbox",
+    values={
+        "message_id": param("message_id"),
+        "run_id": param("run_id"),
+        "recipient": param("recipient"),
+        "payload": param("payload"),
+        "dedup_key": param("dedup_key"),
+        "status": value("pending"),
+        "retry_count": value(0),
+        "writer_epoch": fence_epoch,
+        "enqueued_at_ms": param("enqueued_at_ms"),
+    },
+)
+
+_COUNT_ATTEMPT = fenced_update(
+    "outbox",
+    set={"retry_count": increment("retry_count"), "writer_epoch": fence_epoch},
+    where=and_(
+        eq("message_id", param("message_id")),
+        ne("status", value("acked")),
+        eq("writer_epoch", fence_epoch),
+    ),
+)
+
+_MARK_DELIVERED = fenced_update(
+    "outbox",
+    set={
+        "status": value("delivered"),
+        "delivered_at_ms": param("delivered_at_ms"),
+        "writer_epoch": fence_epoch,
+    },
+    where=and_(
+        eq("message_id", param("message_id")),
+        is_null("delivered_at_ms"),
+        eq("writer_epoch", fence_epoch),
+    ),
+)
+
+_PENDING_ACTION = fenced_insert(
+    "action",
+    values={
+        "action_id": param("action_id"),
+        "run_id": param("run_id"),
+        "kind": param("kind"),
+        "idempotency_key": param("idempotency_key"),
+        "exactly_once_mechanism": param("mechanism"),
+        "status": value("pending"),
+        "writer_epoch": fence_epoch,
+        "created_at_ms": param("created_at_ms"),
+    },
+)
+
+#: ``stamps_writer_epoch=False``, deliberately: the pending row keeps the epoch
+#: it was *recorded* under. A crash can leave a pending action adopted by a
+#: later holder, and restamping it here would rewrite the attribution
+#: ``write_history()`` reads the single-writer property out of.
+_RECORD_RESULT = fenced_update(
+    "action",
+    set={
+        "status": value("applied"),
+        "applied_at_ms": param("applied_at_ms"),
+        "result": param("result"),
+    },
+    where=and_(eq("action_id", param("action_id")), eq("status", value("pending"))),
+    stamps_writer_epoch=False,
+)
+
+#: No ownership predicate, deliberately: adoption re-stamps whatever epoch the
+#: row carried, including one whose lease row was itself lost -- see
+#: :meth:`Outbox.recover`.
+_ADOPT = fenced_update(
+    "outbox",
+    set={"writer_epoch": fence_epoch},
+    where=and_(eq("message_id", param("message_id")), ne("status", value("acked"))),
+)
 
 
 class HandlerRejected(Exception):
@@ -519,29 +612,15 @@ class Outbox:
 
         with self._connection:
             cursor = self._connection.execute(
-                """
-                INSERT INTO outbox (message_id, run_id, recipient, payload,
-                                    dedup_key, status, retry_count, writer_epoch,
-                                    enqueued_at_ms)
-                SELECT :message_id, :run_id, :recipient, :payload,
-                       :dedup_key, 'pending', 0, :epoch, :now_ms
-                 WHERE EXISTS (SELECT 1
-                                 FROM lease
-                                WHERE resource      = :resource
-                                  AND holder        = :holder
-                                  AND epoch         = :epoch
-                                  AND expires_at_ms > :now_ms)
-                """,
+                _ENQUEUE,
                 {
                     "message_id": message_id,
                     "run_id": run_id,
                     "recipient": recipient,
                     "payload": payload,
                     "dedup_key": dedup_key,
-                    "epoch": epoch,
-                    "now_ms": now_ms,
-                    "resource": self._resource,
-                    "holder": self._holder,
+                    "enqueued_at_ms": now_ms,
+                    **self._fence_params(epoch=epoch, now_ms=now_ms),
                 },
             )
             enqueued = cursor.rowcount == 1
@@ -657,8 +736,7 @@ class Outbox:
 
         # (1) the durable write, fenced.
         self._fenced(
-            "UPDATE outbox SET retry_count = retry_count + 1 "
-            " WHERE message_id = :message_id AND status <> 'acked'",
+            _COUNT_ATTEMPT,
             {"message_id": message_id},
             now_ms=now_ms,
             epoch=epoch,
@@ -726,18 +804,7 @@ class Outbox:
             receipt_ref = receipt.receipt_ref if receipt is not None else None
             with self._connection:
                 cursor = self._connection.execute(
-                    """
-                    UPDATE action
-                       SET status = 'applied', applied_at_ms = :applied_at_ms,
-                           result = :result
-                     WHERE action_id = :action_id AND status = 'pending'
-                       AND EXISTS (SELECT 1
-                                     FROM lease
-                                    WHERE resource      = :resource
-                                      AND holder        = :holder
-                                      AND epoch         = :epoch
-                                      AND expires_at_ms > :now_ms)
-                    """,
+                    _RECORD_RESULT,
                     {
                         "action_id": action_id,
                         # A restarted process retrying with a clock behind the
@@ -749,10 +816,7 @@ class Outbox:
                         # records lifecycle order, not a wall-clock measurement.
                         "applied_at_ms": max(now_ms, created_at_ms),
                         "result": receipt_ref,
-                        "resource": self._resource,
-                        "holder": self._holder,
-                        "epoch": epoch,
-                        "now_ms": now_ms,
+                        **self._fence_params(epoch=epoch, now_ms=now_ms),
                     },
                 )
                 recorded = cursor.rowcount == 1
@@ -873,24 +937,10 @@ class Outbox:
         for message_id in candidates:
             with self._connection:
                 cursor = self._connection.execute(
-                    """
-                    UPDATE outbox
-                       SET writer_epoch = :epoch
-                     WHERE message_id = :message_id
-                       AND status <> 'acked'
-                       AND EXISTS (SELECT 1
-                                     FROM lease
-                                    WHERE resource      = :resource
-                                      AND holder        = :holder
-                                      AND epoch         = :epoch
-                                      AND expires_at_ms > :now_ms)
-                    """,
+                    _ADOPT,
                     {
                         "message_id": message_id,
-                        "epoch": epoch,
-                        "resource": self._resource,
-                        "holder": self._holder,
-                        "now_ms": now_ms,
+                        **self._fence_params(epoch=epoch, now_ms=now_ms),
                     },
                 )
                 if cursor.rowcount == 1:
@@ -931,29 +981,15 @@ class Outbox:
         try:
             with self._connection:
                 cursor = self._connection.execute(
-                    """
-                    INSERT INTO action (action_id, run_id, kind, idempotency_key,
-                                        exactly_once_mechanism, status,
-                                        writer_epoch, created_at_ms)
-                    SELECT :action_id, :run_id, :kind, :idempotency_key,
-                           :mechanism, 'pending', :epoch, :now_ms
-                     WHERE EXISTS (SELECT 1
-                                     FROM lease
-                                    WHERE resource      = :resource
-                                      AND holder        = :holder
-                                      AND epoch         = :epoch
-                                      AND expires_at_ms > :now_ms)
-                    """,
+                    _PENDING_ACTION,
                     {
                         "action_id": action_id,
                         "run_id": message.run_id,
                         "kind": handler.action_kind,
                         "idempotency_key": idempotency_key,
                         "mechanism": handler.exactly_once_mechanism,
-                        "epoch": epoch,
-                        "now_ms": now_ms,
-                        "resource": self._resource,
-                        "holder": self._holder,
+                        "created_at_ms": now_ms,
+                        **self._fence_params(epoch=epoch, now_ms=now_ms),
                     },
                 )
             if cursor.rowcount == 1:
@@ -1004,8 +1040,7 @@ class Outbox:
         """
 
         self._fenced(
-            "UPDATE outbox SET status = 'delivered', delivered_at_ms = :delivered_at_ms "
-            " WHERE message_id = :message_id AND delivered_at_ms IS NULL",
+            _MARK_DELIVERED,
             {
                 "message_id": message_id,
                 # An enqueue instant later than the delivery instant is the
@@ -1021,9 +1056,19 @@ class Outbox:
             allow_no_row=True,
         )
 
+    def _fence_params(self, *, epoch: int, now_ms: int) -> Mapping[str, object]:
+        """The fence's own bindings, under the names the builders reserve."""
+
+        return {
+            "fence_resource": self._resource,
+            "fence_holder": self._holder,
+            "fence_epoch": epoch,
+            "fence_now_ms": now_ms,
+        }
+
     def _fenced(
         self,
-        statement: str,
+        statement: FencedStatement,
         params: Mapping[str, object],
         *,
         now_ms: int,
@@ -1033,7 +1078,11 @@ class Outbox:
         what: str,
         allow_no_row: bool = False,
     ) -> None:
-        """Run *statement* with the fence appended, refusing a stale writer.
+        """Run one builder-issued *statement*, refusing a stale writer.
+
+        *statement* is a :class:`.lease.FencedStatement`: the fence is already a
+        clause of the write, put there by the typed builder, and this method
+        only binds the fence's parameters. Nothing is appended to SQL text here.
 
         *allow_no_row* distinguishes "the fence rejected me" from "the predicate
         was already satisfied". The two are indistinguishable from ``rowcount``
@@ -1043,11 +1092,9 @@ class Outbox:
         """
 
         bound = dict(params)
-        bound.update(
-            epoch=epoch, resource=self._resource, holder=self._holder, now_ms=now_ms
-        )
+        bound.update(self._fence_params(epoch=epoch, now_ms=now_ms))
         with self._connection:
-            cursor = self._connection.execute(statement + _FENCE_PREDICATE, bound)
+            cursor = self._connection.execute(statement, bound)
             changed = cursor.rowcount
 
         if changed >= 1:

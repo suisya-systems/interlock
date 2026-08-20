@@ -29,18 +29,21 @@ UPDATE outbox
 ```
 
 `protected_write()` accepts only a `FencedStatement`, which `fenced_update()` / `fenced_insert()`
-alone can issue. Those builders pick the table from a closed set (a name is interpolated, and one
-carrying its own SQL can comment the fence out of the statement entirely), and they refuse a fragment
-carrying a comment, a statement separator, or an unbalanced parenthesis — checked after the quoted
-literals have been blanked out by SQLite's own quoting rules, so neither a comment nor a parenthesis
-can hide inside a string. They also refuse to assign the columns a row is attributed by, and an
+alone can issue. The builders take **no SQL text from a caller** (#42): a statement is composed from
+typed column / operator / value objects — `param()`, `value()`, `increment()`, `fence_epoch`, and
+predicates from `eq()` / `ne()` / `is_null()` / `and_()` — and the builder renders every character of
+SQL itself. The table is picked from a closed set (a name is interpolated, and one carrying its own
+SQL can comment the fence out of the statement entirely); column and parameter names must be bare
+identifiers, which cannot close a parenthesis, open a comment, or smuggle a quote; and a `value()`
+constant is rendered by SQLite's own quoting rules, so however it is spelled it is data, not
+structure. The builders also refuse to assign the columns a row is attributed by, and an
 update to `action` carries `applied_at_ms IS NULL`, so finished evidence is added to and never
 replaced — a substring check over SQL text is not enough, because a statement can carry
 `FENCE_SQL` verbatim inside a `SET` expression while its `WHERE` gates nothing, change its row under
 a stale token, and report a positive `rowcount`. The builders put the fence in the write's own
-predicate and nowhere else, and they also require `writer_epoch = :fence_epoch` among the
-assignments (mentioning the column is not stamping it). So neither the unfenced shape nor an
-unreadable history reaches the database through this module. The transaction is `BEGIN IMMEDIATE`: the write lock is held from
+predicate and nowhere else, and they also require `writer_epoch` to be assigned `fence_epoch` (the
+mapping holds one value per column, so a second assignment cannot hide behind the first). So neither
+the unfenced shape nor an unreadable history reaches the database through this module. The transaction is `BEGIN IMMEDIATE`: the write lock is held from
 before the statement until after its outcome has been classified, which is what makes "the token was
 stale" distinguishable from "the caller's own `WHERE` matched nothing" without a second connection
 changing the lease in between.
@@ -157,12 +160,12 @@ package rather than one shadowing the other.
 - **A protected write must own its transaction.** A lease operation nested inside somebody else's
   open transaction would commit on their schedule, and a recorded refusal would be exactly as durable
   as whatever they decide to do next; the module refuses rather than inheriting a transaction.
-- **The fence is composed into caller-supplied SQL fragments by text.** The builders make that safe
-  structurally — closed table set, literals blanked before the structural scan, the fence ANDed onto
-  the caller's parenthesised predicate — but the fully structural answer is a typed predicate builder
-  that never takes raw SQL from a caller at all. That is a larger API change than S6 needs and is
-  recorded here rather than started; the fragments come from the developer writing the call, not from
-  untrusted input.
+- **~~The fence is composed into caller-supplied SQL fragments by text.~~ Discharged by #42.** The
+  builders now take no SQL text from a caller at all: statements are composed from typed column /
+  operator / value objects and the builder renders every character itself, so the S6 lexer defences
+  (literal blanking, the structural scan over fragments) are unnecessary by construction and were
+  removed. What remains textual is the table name, still chosen from a closed set, and identifiers,
+  which the identifier check keeps names rather than fragments.
 - **The applied-evidence guard is this module's, not the schema's.** A protected write cannot restamp
   an applied `action` row, but a direct `UPDATE` outside this module still can: the schema freezes the
   idempotency key, the applied instant and the refusal, and not `writer_epoch` or `kind`. Making it a

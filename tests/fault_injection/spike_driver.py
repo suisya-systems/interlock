@@ -69,12 +69,19 @@ from claude_org_runtime.control_plane.lease import (
     LeaseHeld,
     LeaseNotHeld,
     acquire,
+    and_,
     effect_kind,
+    eq,
+    fence_epoch,
     fenced_insert,
     fenced_update,
+    increment,
+    is_null,
+    param,
     protected_write,
     read_lease,
     renew,
+    value,
     ProtectedWrite,
 )
 from claude_org_runtime.control_plane.outbox import Outbox
@@ -880,22 +887,14 @@ def op_bind(ctx: Context) -> None:
     now_ms = ctx.clock.advance()
     statement = fenced_insert(
         "session",
-        columns=(
-            "session_id",
-            "run_id",
-            "provider",
-            "observation",
-            "provider_state",
-            "bound_at_ms",
-        ),
-        values=(
-            ":session_id",
-            ":run_id",
-            ":provider",
-            ":observation",
-            ":provider_state",
-            ":bound_at_ms",
-        ),
+        values={
+            "session_id": param("session_id"),
+            "run_id": param("run_id"),
+            "provider": param("provider"),
+            "observation": param("observation"),
+            "provider_state": param("provider_state"),
+            "bound_at_ms": param("bound_at_ms"),
+        },
         # ``session`` genuinely has no ``writer_epoch`` column; the fence is
         # still a clause of the write itself.
         stamps_writer_epoch=False,
@@ -1057,8 +1056,14 @@ def raise_incident(
         root = open_rows[0]
         statement = fenced_update(
             "incident",
-            set_clause="retry_count = retry_count + 1, updated_at_ms = :updated_at_ms",
-            where="incident_id = :incident_id AND resolved_at_ms IS NULL",
+            set={
+                "retry_count": increment("retry_count"),
+                "updated_at_ms": param("updated_at_ms"),
+            },
+            where=and_(
+                eq("incident_id", param("incident_id")),
+                is_null("resolved_at_ms"),
+            ),
             # ``incident`` has no ``writer_epoch`` column, so the fence is a
             # clause of the write without stamping one.
             stamps_writer_epoch=False,
@@ -1071,30 +1076,18 @@ def raise_incident(
         related = str(open_rows[0]["incident_id"]) if within_window else None
         statement = fenced_insert(
             "incident",
-            columns=(
-                "incident_id",
-                "run_id",
-                "session_id",
-                "fact_state",
-                "detector_version",
-                "dedup_key",
-                "retry_count",
-                "related_incident_id",
-                "created_at_ms",
-                "updated_at_ms",
-            ),
-            values=(
-                ":incident_id",
-                ":run_id",
-                ":session_id",
-                ":fact_state",
-                ":detector_version",
-                ":dedup_key",
-                "0",
-                ":related_incident_id",
-                ":created_at_ms",
-                ":updated_at_ms",
-            ),
+            values={
+                "incident_id": param("incident_id"),
+                "run_id": param("run_id"),
+                "session_id": param("session_id"),
+                "fact_state": param("fact_state"),
+                "detector_version": param("detector_version"),
+                "dedup_key": param("dedup_key"),
+                "retry_count": value(0),
+                "related_incident_id": param("related_incident_id"),
+                "created_at_ms": param("created_at_ms"),
+                "updated_at_ms": param("updated_at_ms"),
+            },
             stamps_writer_epoch=False,
         )
         params = {
@@ -1183,34 +1176,23 @@ def escalate(ctx: Context, *, fact_state: str, incident_id: str, now_ms: int) ->
     # supposed to catch it.
     statement = fenced_insert(
         "action",
-        columns=(
-            "action_id",
-            "run_id",
-            "kind",
-            "idempotency_key",
-            "exactly_once_mechanism",
-            "status",
+        values={
+            "action_id": param("action_id"),
+            "run_id": param("run_id"),
+            "kind": param("kind"),
+            "idempotency_key": param("idempotency_key"),
+            "exactly_once_mechanism": param("exactly_once_mechanism"),
+            "status": value("applied"),
             # ``action`` really does carry a ``writer_epoch``, so the fence
             # stamps one. Omitting the column while leaving the builder's
             # default in place raises ``UnfencedStatement`` before the row is
             # ever written -- which would make this whole path unreachable, and
             # a "no recommendation was produced" assertion means nothing if a
             # recommendation could not have been produced either way.
-            "writer_epoch",
-            "created_at_ms",
-            "applied_at_ms",
-        ),
-        values=(
-            ":action_id",
-            ":run_id",
-            ":kind",
-            ":idempotency_key",
-            ":exactly_once_mechanism",
-            "'applied'",
-            ":fence_epoch",
-            ":created_at_ms",
-            ":applied_at_ms",
-        ),
+            "writer_epoch": fence_epoch,
+            "created_at_ms": param("created_at_ms"),
+            "applied_at_ms": param("applied_at_ms"),
+        },
     )
     escalation_id = f"{incident_id}-escalation"
     kind = effect_kind(ctx.resource, ESCALATION_EFFECT)

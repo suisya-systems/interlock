@@ -42,6 +42,7 @@ from claude_org_runtime.control_plane.lease import (
     acquire,
     effect_kind,
     fenced_insert,
+    param,
     protected_write,
 )
 from claude_org_runtime.control_plane.outbox import Outbox
@@ -140,24 +141,15 @@ def bind_session(
     row = session_row(readout, run_id=run_id, provider=provider, bound_at_ms=now_ms)
     statement = fenced_insert(
         "session",
-        columns=(
-            "session_id",
-            "run_id",
-            "provider",
-            "observation",
-            "provider_state",
-            "observation_reason",
-            "bound_at_ms",
-        ),
-        values=(
-            ":session_id",
-            ":run_id",
-            ":provider",
-            ":observation",
-            ":provider_state",
-            ":observation_reason",
-            ":bound_at_ms",
-        ),
+        values={
+            "session_id": param("session_id"),
+            "run_id": param("run_id"),
+            "provider": param("provider"),
+            "observation": param("observation"),
+            "provider_state": param("provider_state"),
+            "observation_reason": param("observation_reason"),
+            "bound_at_ms": param("bound_at_ms"),
+        },
         stamps_writer_epoch=False,
     )
     write = ProtectedWrite(

@@ -597,6 +597,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The fenced-write builders take typed predicates, never raw SQL fragments**
+  (#42). `fenced_update()` now takes a mapping of columns to typed values and
+  a typed predicate (`param()` / `value()` / `increment()` / `fence_epoch`,
+  composed with `eq()` / `ne()` / `is_null()` / `and_()`), and
+  `fenced_insert()` a single ordered column-to-value mapping; the builder
+  renders every character of SQL itself. The S6 lexer defences — literal
+  blanking and the structural scan over caller fragments — are unnecessary by
+  construction and were removed, discharging the residual recorded in
+  `docs/lease-fencing.md` §5. `Outbox` no longer synthesises fence SQL either:
+  `_FENCE_PREDICATE` and its text concatenation are gone, every protected
+  outbox statement is issued by the builders at module load, and the ownership
+  predicate (`writer_epoch` must match the fence's epoch on row-advancing
+  updates) is expressed as a typed comparison. Rendered statement shapes,
+  `protected_write()` semantics and the refusal-recording contract
+  (`StaleWriterRefused(action_id=..., observed=...)`) are unchanged.
+
 - **The two `StaleWriterRefused` classes are one class, the lease's** (#45).
   S7 grew its own while S6 was in flight; `control_plane.outbox` now imports
   and re-exports `lease.StaleWriterRefused`, and every outbox refusal path
