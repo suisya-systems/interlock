@@ -63,7 +63,7 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | # | Item (short) | Verdict | D-0022 label | Provider | Evidence | Discharge point |
 |---|---|---|---|---|---|---|
 | 1 | Public CLI alone can start / read state / stop / resume | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#6`, `#7` — not yet landed | The spike (phases 1a/1b) |
-| 2 | Unique session↔run re-match across the crash window; no duplicate writer | `failed` on C1; `pending` on C2 | `n/a — failed` (C1); `pending` (C2) | `C1 (Agent View)` → `C2 (claude -p subprocesses)` | D-0027; `investigation/u1-session-id-bg-experiment.md`; `investigation/pre-spawn-fence-search.md`. C2 re-proof: `#18` (provider `#17`) — not yet landed | The spike (phase 6), on C2 |
+| 2 | Unique session↔run re-match across the crash window; no duplicate writer | `failed` on C1; `pending` on C2 | `n/a — failed` (C1); `pending` (C2) | `C1 (Agent View)` → `C2 (claude -p subprocesses)` | D-0027; `investigation/u1-session-id-bg-experiment.md`; `investigation/pre-spawn-fence-search.md`. C2 re-proof: `#18` — not yet landed; its provider (`#17`, S2) landed 2026-08-21 | The spike (phase 6), on C2 |
 | 3 | Per-role permission / sandbox / hooks survive restart and fail closed | `discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#9`; `docs/per-role-fencing.md`; `src/claude_org_runtime/fencing/`; `tests/fencing/`; `investigation/i04-pretooluse-fence-probe.md` (U15, U35, U42). `#8` closed as **moot** under C2, not passed | The spike (phase 2b) |
 | 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `pending` | `pending` | `pending` | `#12` (S5), `#13` (S6, the lease and fencing token) and `#14` (S7 outbox + one declared handler) landed 2026-08-19; `#16` — not yet landed | The spike (phases 4–5) |
 | 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#12` (S5), `#13` (S6) and `#14` (S7) landed 2026-08-19; `#15`, `#16` — not yet landed | The spike (phases 4–5) |
@@ -72,7 +72,7 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | 8 | Secretary window responsiveness under worker load | `rehearsed — not discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#21` — `tests/secretary/`; `docs/secretary-intake-boundary.md`; `investigation/i16-item8-rehearsal.md` | **Before the canary starts** (D-0022) |
 | 9 | Curator output cannot reach a skill without human approval | `discharged` | `proven on the spike slice` | `provider-independent` | `#22`, PR `#27`; `docs/curator-promotion-gate.md`; `tests/curator/`; `investigation/u8-skill-hot-reload-probe.md` (U8) | **Discharged 2026-08-18**, independently of the spike |
 | 10 | One-worker canary and run-boundary rollback | `rehearsed — not discharged` | `proven on the spike slice` | `provider-independent` | `#23` — `tests/canary/`; `docs/canary-routing-rehearsal.md`; `src/claude_org_runtime/canary/` (synthetic counterparty rehearsal) | **At the canary itself** (D-0022) |
-| 11 | Only the `SessionProvider` need be swapped | `discharged` | `proven on the spike slice` | `provider-independent` | `#10` (S1) and `#11` (S3) landed 2026-08-19; `#20` landed 2026-08-20 — `tests/gate_item11/`, and the control-plane suite in CI with a provider bound. Zero test modifications; the S2 half of `#20`'s fourth criterion is residual until `#17` lands | The spike (phase 8) |
+| 11 | Only the `SessionProvider` need be swapped | `discharged` | `proven on the spike slice` | `provider-independent` | `#10` (S1) and `#11` (S3) landed 2026-08-19; `#20` landed 2026-08-20 — `tests/gate_item11/`, and the control-plane suite in CI with a provider bound. Zero test modifications; the S2 half of `#20`'s fourth criterion was discharged 2026-08-21 when `#17` landed the S2 registry row (see §3, item 11) | The spike (phase 8) |
 
 All eleven items are present. None is omitted and none is merged into another.
 
@@ -111,7 +111,7 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
     claimed: anything outside §3.1 is *unsearched*, not *absent*.
   - D-0027 records the verdict, its falsification conditions, and the adoption of C2.
 - **Evidence (C2, pending):** `#18` proves single-writer re-identification across the crash window
-  on C2; `#17` builds the C2 provider it runs against. Neither has landed. `#12` (S5) landed
+  on C2; `#17` builds the C2 provider it runs against. `#17` landed 2026-08-21; `#18` has not. `#12` (S5) landed
   2026-08-19 and supplies the durable half the proof is read out of — the session↔run binding is a
   row in `session`, and *at most one active binding per run* is a partial unique index there rather
   than a check-then-insert, since a check-then-insert leaves exactly the window this item injects
@@ -442,11 +442,14 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   backend and the control plane*, and discovers `SessionProvider` implementations so that one
   shipping without a registry entry fails the build rather than silently narrowing the measurement
   back to the provider it was already known to pass.
-- **Residual:** the S2 half of `#20`'s fourth criterion. The comparison is currently between two
-  runs of the same suite that differ in whether a provider is bound, not between S3 and S2, because
-  `#17` has not landed. The registry tripwire above is what forces the second row to be added the
-  day it does. No test needed modification, so the leak clause below has nothing recorded against
-  it.
+- **Residual — discharged 2026-08-21:** the S2 half of `#20`'s fourth criterion. `#17` landed and
+  the registry tripwire forced the S2 row exactly as designed: `tests/gate_item11/registry.py` now
+  carries S2, so the unchanged-suite comparison and the substitution scenarios both run against S3
+  *and* S2 from the same artifact. No test under `tests/control_plane/` was modified; the only edits
+  were the registry entry and a backend-availability skip in the two parameterised fixtures — on a
+  machine without the claude CLI the whole S2 row skips (as the bwrap-dependent sandbox tests do),
+  never an individual test under a bound provider. The leak clause below still has nothing recorded
+  against it.
 - **Notes:** D-0020's B+ ordering — S3 written before S2 — exists so that item 11 measures a
   structural property rather than a retrofit. The C1→C2 switch is the first real test of D-0019's
   promise that a gate failure costs a provider and not a design, and item 11 is where that promise
@@ -487,7 +490,7 @@ anything.
 |---|---|---|
 | S1 — the provisional `SessionProvider` interface | **durable (contract)** | `#10` — marked provisional in the file itself (D-0021); promoted to a settled contract only by a later `D-` entry. Landed 2026-08-19: `src/claude_org_runtime/session/provider.py`, tests `tests/session/`. Being written does not promote it |
 | Tests — fault injection, recovery, accident-derived fixtures, the control-plane suite | **durable (tests)** | `#15`, `#16`, `#18`, `#19`, `#20`, `tests/curator/`, `tests/fencing/`. `#20` landed 2026-08-20: `tests/gate_item11/` is durable test material — the provider registry, the substitution adapter and the two plugins are the fixture half a second provider re-uses, not an implementation to throw away with S3 |
-| S2 — the C2 `SessionProvider` | throwaway | `#17` |
+| S2 — the C2 `SessionProvider` | throwaway | `#17` — landed 2026-08-21: `src/claude_org_runtime/session/claude_cli_provider.py`, tests `tests/session/test_claude_cli_provider.py` (hermetic, against a fake CLI — the failure shapes a live healthy CLI will not produce on demand), plus the S2 registry row in `tests/gate_item11/`. Identity read-back and refusal only: the `already in use` refusal is never a lock (U27/U38), `--resume` is unguarded (U32), and exclusion stays with the lease — orchestration and the crash-window proof are `#18`'s |
 | S3 — the stub provider | throwaway | `#11` — landed 2026-08-19: `src/claude_org_runtime/session/stub_provider.py`, tests `tests/session/test_stub_provider.py`. Local child processes only: no Claude CLI, no network. Throwaway under D-0026, but it survives a C2 switch untouched |
 | S4 — the probe harnesses | throwaway | `#6`, `#7` |
 | **S5 — the spike SQLite schema** | **throwaway — named explicitly by D-0026** | `#12` — landed 2026-08-19: `src/claude_org_runtime/control_plane/spike_schema.sql`, tests `tests/control_plane/`. The file carries its own note, at the top, that it is a spike schema and that **no migration path is promised from it**, and the loader refuses DDL whose marking has been removed. A database at another revision is **refused, never migrated**. `Q-0001` stays open and is not answered by inertia: no column, CHECK or index names a component or a role, and `Q-0002` stays open too — `dedup_key` is indexed but not unique, so neither collapse rule is forced |

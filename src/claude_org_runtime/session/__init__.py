@@ -5,10 +5,13 @@
 point (see ``provider.DELIVERY_ABSENCE_IS_DELIBERATE``).
 
 ``LocalProcessSessionProvider`` (S3) is the deliberately trivial implementation
-over local child processes; the contract it implements stays provisional
-(D-0021) whether or not something implements it.
+over local child processes; ``ClaudeCliSessionProvider`` (S2) is the C2
+implementation over Interlock-supervised ``claude -p`` subprocesses (D-0025,
+D-0027). The contract they implement stays provisional (D-0021) whether or not
+something implements it.
 """
 
+from .claude_cli_provider import ClaudeCliSessionProvider, claude_session_uuid
 from .provider import (
     CAPABILITY_ASSIGNMENTS,
     D0009_VERBS,
@@ -53,6 +56,7 @@ __all__ = [
     "VERB_IMPLEMENTATION_HOOKS",
     "CapabilityAssignment",
     "CapabilityReport",
+    "ClaudeCliSessionProvider",
     "ContractViolation",
     "Failure",
     "FailureKind",
@@ -69,4 +73,5 @@ __all__ = [
     "WorkspaceTransition",
     "WorkspaceVerdict",
     "check_spawn_precondition",
+    "claude_session_uuid",
 ]

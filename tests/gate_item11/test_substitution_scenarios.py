@@ -52,7 +52,11 @@ NEVER_ANNOUNCES = 3600
 
 @pytest.fixture(params=sorted(registry.PROVIDERS), ids=lambda key: key)
 def entry(request) -> registry.ProviderEntry:
-    return registry.PROVIDERS[request.param]
+    selected = registry.PROVIDERS[request.param]
+    reason = selected.unavailable()
+    if reason is not None:
+        pytest.skip(reason)
+    return selected
 
 
 @pytest.fixture

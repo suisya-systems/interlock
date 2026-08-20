@@ -17,14 +17,20 @@ from __future__ import annotations
 
 import inspect
 import pkgutil
+import shutil
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Callable
 
 from claude_org_runtime import session as session_package
+from claude_org_runtime.session.claude_cli_provider import ClaudeCliSessionProvider
 from claude_org_runtime.session.provider import SessionProvider
 from claude_org_runtime.session.stub_provider import LocalProcessSessionProvider
+
+
+def _always_available() -> str | None:
+    return None
 
 
 @dataclass(frozen=True)
@@ -45,15 +51,47 @@ class ProviderEntry:
     #: location would read another run's children, which is the one way a stub
     #: can make this suite lie (see ``LocalProcessSessionProvider``).
     factory: Callable[[Path], SessionProvider]
+    #: Why this environment cannot run this provider, or ``None`` when it can.
+    #: A backend-availability precondition, not an escape hatch: the *tests*
+    #: are never skipped selectively (issue ``#20`` forbids that), only a
+    #: whole provider row on a machine that does not carry its backend --
+    #: exactly as the bwrap-dependent sandbox tests skip where bwrap cannot
+    #: run. S3 exists so that at least one row runs everywhere.
+    unavailable: Callable[[], str | None] = _always_available
 
 
 def _stub(state_root: Path) -> SessionProvider:
     return LocalProcessSessionProvider(state_root)
 
 
+def _claude_cli(state_root: Path) -> SessionProvider:
+    # ``--model haiku`` pins the measurement's live sessions to the cheapest
+    # model tier. Provider-wide spawn configuration, not per-role settings:
+    # which model a *worker* runs is a role concern that arrives through
+    # ``StartRequest.settings``, and nothing in this suite measures models.
+    return ClaudeCliSessionProvider(state_root, base_cli_args=("--model", "haiku"))
+
+
+def _claude_cli_unavailable() -> str | None:
+    if shutil.which("claude") is None:
+        return (
+            "the claude CLI is not on PATH; the C2 provider (S2, issue #17) "
+            "spawns real `claude -p` children and cannot run here"
+        )
+    return None
+
+
 #: Every provider the measurement runs against, keyed by the handle
 #: ``docs/gate-record.md`` §5 gives it.
 PROVIDERS: dict[str, ProviderEntry] = {
+    "S2": ProviderEntry(
+        id="S2",
+        scaffold="S2 -- the C2 provider over Interlock-supervised claude -p subprocesses",
+        issue="#17",
+        implementation=ClaudeCliSessionProvider,
+        factory=_claude_cli,
+        unavailable=_claude_cli_unavailable,
+    ),
     "S3": ProviderEntry(
         id="S3",
         scaffold="S3 -- the stub provider over local child processes",

@@ -124,6 +124,9 @@ def bound_run(request, tmp_path_factory) -> dict:
     """
 
     provider = request.param
+    reason = registry.PROVIDERS[provider].unavailable()
+    if reason is not None:
+        pytest.skip(reason)
     return _run(tmp_path_factory.mktemp(f"item11-{provider}"), provider=provider)
 
 
