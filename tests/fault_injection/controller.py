@@ -96,10 +96,22 @@ def repro_line(
     windows, the same payloads and the same schedule decisions.
     """
 
-    command = (
-        f"S9_PROFILE={profile or 'fast'} S9_SUITE_SEED={suite_seed} "
-        f"pytest '{CASE_NODE_ID.format(case_id=case_id)}'"
-    )
+    # Spelled for the shell of the host that printed it. The line exists to be
+    # pasted, and POSIX ``VAR=value cmd`` is a syntax error in both PowerShell
+    # and cmd.exe -- so on the Windows jobs the advertised way to reproduce a
+    # failure would not run.
+    node_id = CASE_NODE_ID.format(case_id=case_id)
+    if os.name == "nt":  # pragma: no cover - Windows jobs only
+        command = (
+            f"$env:S9_PROFILE='{profile or 'fast'}'; "
+            f"$env:S9_SUITE_SEED='{suite_seed}'; "
+            f'python -m pytest "{node_id}"'
+        )
+    else:
+        command = (
+            f"S9_PROFILE={profile or 'fast'} S9_SUITE_SEED={suite_seed} "
+            f"python -m pytest '{node_id}'"
+        )
     return (
         f"S9-REPRO case_id={case_id} suite_seed={suite_seed} "
         f"manifest_version={manifest_version} contract_version={contract_version} "
@@ -862,6 +874,18 @@ def epoch_regressions(history: Sequence[Mapping[str, Any]]) -> list[tuple[dict, 
     ]
 
 
+#: How many times the destination must have been asked, per fault kind.
+#:
+#: ``drop-delivery``: the refused attempt and the resend that followed it.
+#: ``dup-delivery``: both copies of the message, under one key.
+#: ``lost-ack``: the first delivery and the re-delivery the missing ack caused.
+_ATTEMPT_FLOOR: Mapping[str, int] = {
+    "drop-delivery": 2,
+    "dup-delivery": 2,
+    "lost-ack": 2,
+}
+
+
 def _armed(case: Mapping[str, Any], role: str) -> list[ArmedAnchor]:
     return [ArmedAnchor.parse(wire) for wire in case["arms"].get(role, ())]
 
@@ -1214,6 +1238,22 @@ def assert_invariants(
                     if count != 1:
                         fail(f"{role}: {key!r} produced {count} effects, not one")
             elif name == contract.INVARIANT_DELIVERED_IMPLIES_EFFECT:
+                # A delivery-surface fault is *about* the repeat: the resend
+                # after a drop, the second copy of a duplicate, the re-delivery
+                # after a lost ack. Counting one attempt would accept a run in
+                # which the repeat never happened -- the case would then be
+                # reporting coverage of a fault it did not inject. The floor is
+                # therefore stated per fault kind and read from the
+                # destination's own attempt log.
+                floor = _ATTEMPT_FLOOR.get(case["fault"], 1)
+                for key in keys:
+                    attempts = observer.attempt_count(key)
+                    if attempts < floor:
+                        fail(
+                            f"{role}: {key!r} was attempted {attempts} time(s) at "
+                            f"the destination; a {case['fault']} case requires at "
+                            f"least {floor}, because the repeat is the evidence"
+                        )
                 # One effect *record* per delivery dedup key, counted over the
                 # destination's whole store and not only over the keys we
                 # expected: a per-key existence test cannot see an extra effect

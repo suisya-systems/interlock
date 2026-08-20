@@ -455,10 +455,16 @@ def check_invariant_queries_bind_the_contract_parameters(adapter: Any) -> None:
     for name, sql in queries.items():
         declared = set(contract.INVARIANT_PARAMETERS[name])
         used = set(re.findall(r":([a-z_]+)", sql))
-        if not used <= declared:
+        # Equality, not containment. A subset check only catches the harmless
+        # direction: an adapter that *omitted* a parameter would pass, and the
+        # omission is the dangerous one -- a ``lease-single-holder`` query
+        # without ``:now_ms`` reads expired leases as live and reports a
+        # single-holder violation that is not there, or misses one that is.
+        if used != declared:
             raise ContractViolation(
-                f"{name} binds {sorted(used - declared)}, which the contract "
-                f"does not name; it names {sorted(declared)}"
+                f"{name} binds {sorted(used)}; the contract names "
+                f"{sorted(declared)}. Missing: {sorted(declared - used)}; "
+                f"unexpected: {sorted(used - declared)}"
             )
 
 

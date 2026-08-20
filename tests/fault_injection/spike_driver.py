@@ -44,6 +44,7 @@ means in a script.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -295,8 +296,9 @@ class _DroppingDropbox:
     our own code path.
     """
 
-    def __init__(self, inner: KeyedDropbox, *, drop_attempt: int) -> None:
+    def __init__(self, inner: KeyedDropbox, *, root: Path, drop_attempt: int) -> None:
         self._inner = inner
+        self._root = Path(root)
         self._drop_attempt = drop_attempt
         self._seen: dict[str, int] = {}
         self.name = inner.name
@@ -311,10 +313,34 @@ class _DroppingDropbox:
         seen = self._seen.get(idempotency_key, 0) + 1
         self._seen[idempotency_key] = seen
         if seen == self._drop_attempt:
+            # The dropped attempt is recorded at the destination before it is
+            # refused. Without it the destination's own log would show a single
+            # attempt for the whole case, and "the resend happened" would be
+            # unprovable from the counterparty's record -- which is the only
+            # record ACCEPTANCE.md section 2 accepts for an external effect.
+            self._log_dropped(idempotency_key, payload)
             raise DestinationRefusal(
                 f"the harness dropped attempt {seen} for {idempotency_key!r}"
             )
         return self._inner.apply(idempotency_key, payload, fencing_token, fence_scope)
+
+    def _log_dropped(self, idempotency_key: str, payload: str) -> None:
+        line = json.dumps(
+            {
+                "fencing_token": None,
+                "idempotency_key": idempotency_key,
+                "payload_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            },
+            sort_keys=True,
+        )
+        log = Path(self._root) / destination_module.ATTEMPT_LOG_NAME
+        log.parent.mkdir(parents=True, exist_ok=True)
+        handle = os.open(log, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        try:
+            os.write(handle, (line + "\n").encode("utf-8"))
+            os.fsync(handle)
+        finally:
+            os.close(handle)
 
     def effect_count(self, idempotency_key: str) -> int:
         return self._inner.effect_count(idempotency_key)
@@ -719,7 +745,7 @@ def _outbox(ctx: Context) -> Outbox:
         # Only the first generation drops: a restart's job is to drive the
         # unfinished work to resolution, and a destination that keeps refusing
         # would be testing the harness's patience rather than the resend.
-        dropbox = _DroppingDropbox(dropbox, drop_attempt=1)
+        dropbox = _DroppingDropbox(dropbox, root=root, drop_attempt=1)
     return Outbox(
         ctx.connection,
         resource=ctx.resource,
