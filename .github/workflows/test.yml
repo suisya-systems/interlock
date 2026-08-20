@@ -41,3 +41,11 @@ jobs:
           python -m pip install -e .[dev]
       - name: Run pytest
         run: python -m pytest -x -q
+      - name: Control-plane suite against the S3 provider (gate item 11)
+        # Issue #20: from this point on the control-plane suite is also run with
+        # a live SessionProvider bound, so a session-backend detail leaking into
+        # the control plane fails the build on the day it is introduced rather
+        # than on the day the next provider arrives. Deliberately not -q: the
+        # plugin's header line names the provider, its version and the session's
+        # own state word, and that line is the run's evidence.
+        run: python -m pytest tests/control_plane -p tests.gate_item11.provider_plugin
