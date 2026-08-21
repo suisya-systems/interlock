@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Item 2 discharged on C2 -- single-writer re-identification across the
+  crash window** (Issue #18, gate item 2, phase 6 exit condition; throwaway
+  implementation under D-0026, durable tests). The `session` row gains staged
+  `binding_phase` (`prepared -> spawned -> identity_confirmed`, CHECK-tied to
+  `observation`, forward-only), so a pre-spawn binding commit is expressible
+  honestly; `control_plane/session_binding.py` walks it in fenced transitions
+  and `supervisor/session_orchestrator.py` is the D-0009 join layer: the
+  spawn-admission critical section (fenced admission commit before any
+  provider verb, fenced validation right after; a claimant caught stale inside
+  it terminates its own child with the latency measured), and the recovery
+  protocol (lease first -- epoch up -- then the binding row decides; resume,
+  never a fresh `--session-id` claim, per U28). The fault harness gains
+  `session-start` (contract v3, manifest v3): four cases SIGKILL a real
+  supervisor at each injection point -- before the binding commit, between
+  commit and spawn, between spawn and the read-back commit, after the
+  read-back commit -- through `session_driver.py`, the second adapter, over
+  the real orchestrator and the real C2 provider with a fake CLI that refuses
+  nothing; one new SQL invariant reads the reopened control plane
+  (`one-binding-per-run`: at-most-one is the index's, non-empty-and-confirmed
+  is asserted after recovery) and two new destination observables read the
+  destination's own records (`live-processes-per-session` from the spawn
+  ledger's interval overlap plus a live scan, `transcript-single-writer` from
+  the captured event streams). `tests/gate_item2/` carries the mediated U27 /
+  U32 / SIGSTOP-takeover shapes, and
+  `investigation/i18-crash-window-characterisation.md` re-measures the hazard
+  live on CLI 2.1.238 (U27 3/3 both-admitted; window edge between 2 s and 3 s
+  on this machine today; U32 both resumes admitted) without any figure
+  becoming a test constant (U34). `ACCEPTANCE.md`'s item 2 row was
+  re-synchronised to D-0024's commit-before-spawn ordering (it previously
+  said "between spawn and commit"), disclosed in the row itself; the
+  `gate_item11` leak tests now name what they forbid -- knowledge of a session
+  *backend* -- so the contract-only join layer is legal while backend imports
+  beside the control plane still fail the build. `docs/gate-record.md` records
+  the verdict, and the residual as what it is: the admission-to-exec window is
+  open by construction, bounded by measured termination, never claimed closed.
+
 - **S2 -- the C2 `SessionProvider` over Interlock-supervised `claude -p`
   subprocesses** (Issue #17, D-0025, D-0027, throwaway under D-0026).
   `src/claude_org_runtime/session/claude_cli_provider.py` implements every S1

@@ -36,7 +36,6 @@ def _timeout(case: Mapping[str, Any], profile: Mapping[str, Any]) -> float:
 def test_manifest_case(
     case: Mapping[str, Any],
     tmp_path: Path,
-    adapter: Any,
     profile: Mapping[str, Any],
 ) -> None:
     """Run one manifest case and assert exactly what it declared.
@@ -54,7 +53,7 @@ def test_manifest_case(
 
     with Controller(
         workdir=tmp_path / "case",
-        adapter=adapter,
+        adapter=policy.adapter_for(case),
         case=case,
         suite_seed=policy.suite_seed(),
         barrier_timeout_s=float(profile["barrier_timeout_s"]),

@@ -891,6 +891,7 @@ def op_bind(ctx: Context) -> None:
             "session_id": param("session_id"),
             "run_id": param("run_id"),
             "provider": param("provider"),
+            "binding_phase": param("binding_phase"),
             "observation": param("observation"),
             "provider_state": param("provider_state"),
             "bound_at_ms": param("bound_at_ms"),
@@ -908,6 +909,10 @@ def op_bind(ctx: Context) -> None:
             "session_id": session_id,
             "run_id": ctx.run_id,
             "provider": "harness",
+            # The spike roles' bind is a one-step bind of an already-observed
+            # session; the staged prepared -> spawned -> identity_confirmed
+            # walk is the session-start operation's (issue #18), not this one's.
+            "binding_phase": "identity_confirmed",
             "observation": "observed",
             "provider_state": "running",
             "bound_at_ms": now_ms,
@@ -1751,6 +1756,15 @@ _INVARIANT_QUERIES: Mapping[str, str] = {
           FROM action
          WHERE run_id = :scope
          ORDER BY write_seq
+    """,
+    # Gate item 2 (#18): the run's active session bindings, with the count the
+    # partial unique index already caps at one. The query reports; "exactly
+    # one" -- non-empty included -- is the assertion's, made after recovery.
+    contract.INVARIANT_ONE_BINDING_PER_RUN: """
+        SELECT session_id, run_id, binding_phase, observation, bound_at_ms
+          FROM session
+         WHERE run_id = :scope AND released_at_ms IS NULL
+         ORDER BY bound_at_ms, session_id
     """,
     # The refusal of a stale writer, durable and query-answerable. This is a
     # SQL query over a persisted row, not a harness event-trace line: the trace
