@@ -62,9 +62,11 @@ Every component under test is a **role process**:
    between roles. A SIGKILL therefore takes down a *connection* mid-transaction, which is the crash
    SQLite's journal has to recover from — the thing an in-process exception can never produce.
 3. **Own lease identity.** Each role process acquires and writes under its own lease
-   (`resource`/`holder` supplied by the case definition, §4). Which role may hold which resource is
-   `Q-0001` and stays open: resource names are **per-case data**, not a role table baked into the
-   harness.
+   (`resource`/`holder` supplied by the case definition, §4). Which role may hold which resource was
+   `Q-0001` and open at the time this was written: resource names are **per-case data**, not a role
+   table baked into the harness. D-0029 has since answered `Q-0001` (production-schema.md §4.2's
+   writer table names `lease`'s writer as "the acquiring claimant", never a role), confirming this
+   harness's choice rather than overriding it.
 4. **Restart entrypoint.** Restart is re-executing the same command line with the same database
    path and role identity plus a `--restart-generation N` argument. The entrypoint's contract: on
    start it must **recover before it proceeds** — reconstruct its view by query from SQLite alone
@@ -592,8 +594,10 @@ plus the cheap portable lane; the full matrix is a scheduled/gate concern.
   issue's body currently names a fault-runner adapter as a deliverable. Making that explicit is a
   change to those issues, owned by the plan, not by this document — it goes to the secretary with
   this design.
-- **Open questions stay open.** `Q-0001` (writer assignment): resource names are per-case data
-  (§2.1). `Q-0002`/`Q-0003` (incident collapse semantics, reconcile interval): incident-dedup
+- **Open questions, as of this design.** `Q-0001` (writer assignment): resource names are per-case
+  data (§2.1) — D-0029 has since answered `Q-0001` (production-schema.md §4.2), confirming this
+  choice rather than overriding it; see §2.1 above. `Q-0002`/`Q-0003` (incident collapse semantics,
+  reconcile interval), which stay open: incident-dedup
   cases must parameterise both, per `ACCEPTANCE.md` §2's dedup row — the manifest schema carries
   the parameter, S9 fixes no value.
 - **What S9 (the implementation issue, once dispatched) ships against this design:** the contract,
@@ -679,7 +683,9 @@ ruling rather than in passing. The relaxation is narrow and its scope is the poi
 - A **case** names its collapse rule, its window, and its dedup key. The driver implements both
   rules and is *told* which to apply; it never picks, and it never composes the dedup key, because a
   driver-side formula would answer `Q-0002`'s "what composes the key" half by inertia — the same way
-  a role-to-resource table would have answered `Q-0001`.
+  a role-to-resource table would have answered `Q-0001` by inertia rather than by decision, back when
+  `Q-0001` was still open. (D-0029 has since answered `Q-0001` on its own terms, per §2.1 above; the
+  avoided-by-inertia shape of the argument here is unchanged by that.)
 - The **matrix** is held to covering the question rather than answering it: manifest validation
   refuses a matrix in which the set of collapse rules is not the whole vocabulary, or in which every
   case declares the same window. One value being load-bearing on a pass is what "hard-coded" means.

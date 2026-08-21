@@ -4,7 +4,11 @@
 
    **Spike scaffold, throwaway by default (D-0026).** Like the S5 schema it sits
    on, nothing in this module is promoted by being depended on, by being
-   imported, or by having survived a gate run. ``Q-0001`` stays open.
+   imported, or by having survived a gate run. ``Q-0001`` was open when this
+   module was written; D-0029 has since resolved it in the production schema
+   (docs/production-schema.md section 4.2,
+   ``control_plane/migrations/0001_initial.sql``), but this module still sits
+   on the S5 spike schema that predates that answer.
 
 Why this module exists at all, and why it is a separate file from the handler
 that uses it.

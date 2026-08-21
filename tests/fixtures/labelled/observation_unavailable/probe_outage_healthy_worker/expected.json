@@ -1,0 +1,9 @@
+{
+  "incident_class": "none",
+  "onset_offset_ms": null,
+  "tolerance_ms": null,
+  "budget_ms": null,
+  "fact_state": "OBSERVATION_UNAVAILABLE",
+  "must_not_recommend": ["terminate_session", "restart_session"],
+  "provenance": "constructed_edge: the observation path fails while the worker is genuinely healthy (ACCEPTANCE.md AC-3). An incident carrying fact_state OBSERVATION_UNAVAILABLE is the REQUIRED output and is not a false positive; any anomaly fact here is, and applying a terminate on it is the v1 failure D-0006 was written against."
+}

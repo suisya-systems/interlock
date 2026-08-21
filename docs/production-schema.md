@@ -54,7 +54,7 @@ re-derived".
 | `run` | **re-derived** | The spike left `status` unconstrained text *because* the writer assignment was open. §4 closes it, so the production table carries a `CHECK` on a closed status set and a forward-only trigger. |
 | `session` | **carried verbatim** | The staged binding (`prepared` → `spawned` → `identity_confirmed`), the one-active-binding-per-run partial unique index, and the observation/`provider_state` equality pair are re-confirmed unchanged. They were derived from gate item 2 under injection (`docs/crash-window-orchestration.md`), not from convenience. |
 | `lease` | **carried verbatim** | Epoch monotonicity, holder-change raising the epoch, resource immutability, no-delete. `docs/lease-fencing.md` is the derivation and it is unaffected by anything here. |
-| `outbox` | **carried verbatim** | Including the deliberate non-uniqueness of `dedup_key`; §9.4 adds gate relay identity in a separate table rather than by tightening this one. |
+| `outbox` | **carried verbatim, then extended** | Carried including the deliberate non-uniqueness of `dedup_key`; §9.4 adds gate relay identity in a separate table rather than by tightening this one. Extended once since: `0003_outbox_cancelled_status.sql` adds the terminal `cancelled` status (§5.7), which the spike vocabulary has no counterpart for and which is therefore the one place this table is **not** what the spike says. |
 | `incident` | **carried verbatim** | `Q-0002` is still open; nothing here narrows it. |
 | `action` | **carried verbatim** | `exactly_once_mechanism` and the one-effect-per-key partial unique index are the `ACCEPTANCE.md` §2 clause and are unchanged. |
 | `task` | **new** | Named by `D-0001` but absent from the spike (the gate items did not exercise it). Out of scope for G3/G4; §12 records it as a known hole rather than inventing it here. |
@@ -188,7 +188,7 @@ event spine unusable — `#64`'s whole point is that several producers write CI 
 
 | State item | Mutability | Single writer | Fence |
 |---|---|---|---|
-| `run.status` | in-place | **Secretary** | run lease epoch |
+| `run.status` | in-place, forward-only over the §4.3 vocabulary | **Secretary** | run lease epoch |
 | `run` (creation) | append | Secretary | — |
 | `session` binding phase | in-place, forward-only | **Supervisor** | session lease epoch |
 | `lease` | in-place (CAS) | the acquiring claimant | epoch monotonicity trigger |
@@ -214,7 +214,8 @@ event spine unusable — `#64`'s whole point is that several producers write CI 
 
 Two rows deserve a sentence each.
 
-**`run.status` stays exclusively the Secretary's.** `Q-0001` records that v1's 2026-07-20 review
+**`run.status` stays exclusively the Secretary's**, and §4.3 says which words it may write. `Q-0001`
+records that v1's 2026-07-20 review
 required exactly this and that neither 2026-08-17 comment restated it, leaving it unstated for
 Interlock. It is restated here. Concretely it means the CI watcher does **not** move a run to
 `completed` when it sees a merge: it appends a `pr_merged` event, and the Secretary — as a consumer
@@ -226,6 +227,48 @@ repo-resolution mistake write a foreign PR's metadata onto a run row (§7.1).
 is recorded (`actor_kind`, `actor_id`); the *writer* is Core, because the transition's admissibility
 is a deterministic check against the transition table (§9.3) and `D-0008` puts deterministic
 evaluation in Core's row. A human answering a question is an actor, not a writer to SQLite.
+
+### 4.3 The run status vocabulary
+
+§2's disposition table promises that the production `run` table carries "a `CHECK` on a closed status
+set and a forward-only trigger", and then never says what the set is. A closed set nobody enumerated
+is unconstrained text with a promise stapled to it — which is the exact state the spike was in, and
+the state §2 exists to leave. The implementation found the gap by having nothing to implement, so the
+set is recorded here:
+
+```
+'created', 'running', 'suspended', 'completed', 'failed', 'cancelled'
+```
+
+**The terminal set is `{completed, failed, cancelled}`, and it is terminal in the strong sense.** The
+trigger refuses any update that *leaves* a terminal status, and it has to check that separately from
+the ordering: `completed → failed` is a reversal no rank comparison catches, because the two ranks are
+equal. Which terminal status a run reached is a fact. A wrong fact is corrected by opening a new run,
+not by an `UPDATE` that erases the completion the Secretary already published and that a report may
+already have counted.
+
+**`running ↔ suspended` moves in both directions; no other reversal does.** A suspend is a pause, not
+a step forward, so the trigger ranks `running` and `suspended` at the same level and resuming is
+therefore not a reversal. Everything else moves up or stands still. `running → created` is refused in
+particular: it rewrites the run's start, and a run whose start moves has no measurable lifetime.
+
+Four things already read this vocabulary, which is why it is a constraint rather than a convention.
+
+- **§9.4's `subject_gone` sweep** closes a gate whose subject run "reached a terminal state". Without
+  a schema-level terminal set that sentence names nothing the sweep can select on, and the outcome
+  stays an enumeration value that never gets used — the permanent-open-row problem with extra
+  vocabulary, which is what §9.4 was written to avoid.
+- **`D-0038`'s AC-9 cohort** is runs "terminal before period end". A denominator computed from an open
+  vocabulary silently changes whenever a writer invents a status word.
+- **[`time-base-policy.md`](./time-base-policy.md) §3.4's suspension rule** says a deliberately paused
+  run suspends its session-class predicates **by moving to a status the predicates exclude**, never by
+  adjusting or suppressing a tolerance, because excluding by status is auditable and a suppressed
+  tolerance is not. `suspended` is the status that rule needs to exist, and it is why `suspended` must
+  *not* be terminal: a pause that could not be resumed would make the auditable form unusable and push
+  the implementation back to suppressing tolerances.
+- **[`measurement-harness.md`](./measurement-harness.md) §2.1's `terminal_status_unknown`
+  excluded-reason bucket** is the honest disposal of a run the cohort cannot classify. With a closed set the bucket
+  should stay empty, and a non-zero count is then a schema-integrity signal rather than routine noise.
 
 ---
 
@@ -485,7 +528,7 @@ watcher liveness. Its G3/G4 obligations, each a deterministic query with no AI i
 | Pass | Query | On a hit |
 |---|---|---|
 | Undrained events | consumption rows `pending`/`failed` whose head-of-line age exceeds the class tolerance | Raise a `consumer_backlog` incident against the consumer, and re-attempt `failed` rows |
-| Orphaned outbox | outbox rows not `acked` older than the delivery tolerance | Re-attempt; the retry count is already durable and monotonic |
+| Orphaned outbox | outbox rows still `pending` or `delivered` (§5.7 — **not** merely "not `acked`": a `cancelled` row is finished) older than the delivery tolerance | Re-attempt; the retry count is already durable and monotonic |
 | Watcher silence | §8.4 | Raise a `watcher_silence` incident against the scope |
 | Scope coverage | §8.4 | Raise a `watcher_scope_uncovered` incident |
 | Gate relay gaps | §9.5 | Raise a `relay_gap` incident against the gate |
@@ -494,6 +537,64 @@ watcher liveness. Its G3/G4 obligations, each a deterministic query with no AI i
 The last row is the crash-window recovery step and is the reason the reconcile pass is not only a
 detector. It is idempotent: the advance it completes is guarded by the same transition-admissibility
 check as any other advance, so running it twice is a no-op.
+
+### 5.7 `outbox.status`: the cancellation vocabulary
+
+The spike's `outbox.status` ran `pending → delivered → acked`, and
+`outbox_status_is_forward_only` refused any step that lowered the rank. That vocabulary has no
+state meaning **"this message is no longer wanted"**, and the omission showed up one section over:
+closing a gate (§9.4) left the relay it had enqueued sitting at `pending` forever. A delivery
+worker reading the outbox was still instructed to present a withdrawn question, and the
+stalled-relay query of §9.6 went on naming that relay with an age that grew without bound — the
+"alarms forever" failure `subject_gone` exists to end, reproduced in the delivery table.
+
+So the vocabulary is `pending`, `delivered`, `acked`, **`cancelled`**, added by
+`0003_outbox_cancelled_status.sql`. SQLite cannot alter a `CHECK`, so the step is the documented
+12-step table rebuild; the step file carries the reasoning, including why `PRAGMA foreign_keys` had
+to move out to the migrator (it is a no-op inside a transaction, and every step runs inside one)
+and what replaces it (a whole-database `PRAGMA foreign_key_check` inside each step's transaction).
+
+**The status graph is now a lattice, not a total order.**
+
+| From | To |
+|---|---|
+| `pending` | `delivered`, `cancelled` |
+| `delivered` | `acked`, `cancelled` |
+| `acked` | — terminal |
+| `cancelled` | — terminal |
+
+The forward-only trigger is therefore written edge by edge rather than as a comparison of ranks,
+because `acked` and `cancelled` are both terminal and neither is reachable from the other. The
+argument the total order was protecting survives the change intact: **a cancellation is a terminal
+status change and never an erasure.** `delivered_at_ms` and `retry_count` survive it untouched —
+`outbox_delivery_is_set_once` and `outbox_retry_count_is_monotonic` still hold, and a `cancelled`
+row can carry no ack at all, because `acked_at_ms` is set if and only if the status is `acked`. A
+retired relay therefore still says, truthfully and forever, that it was sent and how many attempts
+it took; what it stops saying is that somebody is still waiting for it.
+
+Two consequences are load-bearing rather than incidental:
+
+- **A `delivered` relay may be cancelled, not only a `pending` one.** `delivered` means *sent*, not
+  *answered*. A question put in front of a human and not yet acked can become moot — the gate is
+  withdrawn while they are reading it — and §9.5's whole point is that the stage advances on the
+  **ack**, so an unacked `delivered` relay is precisely a relay still waiting for something that
+  will now never come. Refusing to cancel it would leave the alarms-forever half of the defect open
+  for every relay that happened to be delivered first, which is most of them. What cancellation does
+  not do is erase that it *was* delivered. An **acked** relay is never cancelled: the answer
+  arrived, and §9.5 justifies the stage advance by that ack.
+- **The `outbox_undelivered` partial index and every reader of it name the two live statuses.**
+  The index predicate is `status IN ('pending', 'delivered')` and both readers — the orphaned-outbox
+  pass (§5.6) and the stalled-relay query (§9.6) — carry that exact text, because SQLite may use a
+  partial index only when the query's `WHERE` contains the index's own predicate as a term. Writing
+  it as the complement (`status NOT IN ('acked', 'cancelled')`) would return the same rows and lose
+  the index.
+
+The delivery-side counterpart is still owed and is named here rather than assumed: **a delivery
+worker must re-check `gate.closed_at_ms` at send time**, even with cancellation in the schema. The
+cancellation is a fact in the database and the send is an act outside it, so a worker that read the
+outbox row before the closure committed is holding a row that is already stale and no constraint can
+reach into its memory. The status is the belt and the send-time re-check is the braces. No component
+in this branch performs it, because the delivery driver does not exist yet.
 
 ---
 
@@ -528,7 +629,17 @@ CREATE TABLE ci_observation (
     occurred_at_ms  INTEGER NOT NULL,
     ingested_at_ms  INTEGER NOT NULL,
 
-    CHECK (length(provider) > 0),
+    -- provider is CHECKed to 'github' alone, exactly as it is on repository:
+    -- D-0033 says "a second provider widens the CHECK in a migration step and
+    -- brings its substitution test then". Mere non-emptiness would not be a
+    -- weaker version of that rule, it would defeat the projection. provider is
+    -- part of ci_observation_identity, so an unnarrowed column admits the SAME
+    -- fact a second time under a spelling variant ('GITHUB'); the
+    -- ci_current_verdict per-scope subquery does not discriminate on provider,
+    -- so the duplicate competes on (attempt, occurred_at_ms, event_seq) and a
+    -- later-timestamped bogus row wins -- a red PR projected GREEN, which is
+    -- the section 6.1 verdict-honesty failure in its most direct form.
+    CHECK (provider IN ('github')),
     CHECK (typeof(pr_number) = 'integer' AND pr_number > 0),
     -- a full commit SHA, lowercased at the adapter edge. An abbreviated SHA is
     -- not an identity: two heads can share a prefix, and the observation would
@@ -760,6 +871,21 @@ the same transaction that clears `closed_at_ms`. Without that the PR is watched 
 The reconcile pass's scope-coverage query (§8.4) is the backstop that catches it if the transaction
 is ever written incompletely.
 
+**The ordering rule is the provider's order, and it covers the state as well as the head.** The
+trigger above fires on `head_sha` / `head_observed_at_ms` / `head_event_seq`, so an observation whose
+head stood still reaches none of it however late it arrives. That leaves the sequence
+close → reopen → close: a delayed poll from the intervening open period carries the same `head_sha`
+and its own `observed_at_ms`, so it is admitted as a *second* reopen — rewinding `state`, clearing
+`closed_at_ms`, and un-retiring the §8.2 watcher scope, which puts a watcher back on a pull request
+the provider has closed. The writer (`repo_link._plan`) therefore refuses **any** transition, head
+moving or not, whose `observed_at_ms` does not advance past `head_observed_at_ms`. No column is added
+for it: `head_observed_at_ms` is written as `max(observed_at_ms, current)` on every transition, so it
+already is the instant of the newest observation projected onto the row — which is what "re-observing
+the SAME head may refresh the timestamp and no more" above describes. The rule is in the writer
+rather than in a trigger because a trigger cannot tell a transition from a no-op refresh; the residual
+limit is that two late observations both post-dating the last projected one are still ordered only by
+their own timestamps, which needs a provider cursor this schema does not define.
+
 `head_event_seq` is what makes a head update auditable — the projection rule in §6.3 turns on
 `head_sha`, so the event that moved it must be identifiable, not merely a timestamp.
 
@@ -854,6 +980,13 @@ CREATE TABLE watcher_scope (
     CHECK (typeof(expected_interval_ms) = 'integer' AND expected_interval_ms > 0),
     CHECK (enabled IN (0, 1)),
     CHECK ((scope_kind = 'ci_pull_request') = (pr_id IS NOT NULL)),
+    -- Every scope names a subject. The pr_id biconditional above only binds the
+    -- ci_pull_request kind, so without this a 'ci_repository' row could carry
+    -- repo_id AND pr_id both NULL: a roster entry for nothing at all. Such a row
+    -- can never be covered, and the 8.4 coverage query would name it as
+    -- uncovered forever -- a roster that permanently alarms is a roster nobody
+    -- reads.
+    CHECK (repo_id IS NOT NULL),
     CHECK (retired_at_ms IS NULL OR retired_at_ms >= registered_at_ms)
 );
 
@@ -1241,6 +1374,13 @@ leaves a permanently open row that either alarms forever or is silently ignored.
 has reached a terminal status. Without that sweep the outcome exists in the enumeration and never
 gets used, which is the same permanent-open-row problem with extra vocabulary.
 
+Closing a gate also **retires the relay it enqueued**, in the same transaction as the closure: every
+`gate_relay` of that gate whose `outbox` row is not yet `acked` moves to `cancelled` (§5.7). That is
+the same argument as `subject_gone` itself, applied one table over — an outcome that closes the gate
+but leaves a live message behind has moved the permanently-alarming row from `gate` to `outbox`
+rather than removed it, and the message would still be sent. An `acked` relay is left exactly as it
+was; a gate that closed *because* it was answered must not have its answered relay rewritten.
+
 ### 9.5 A relay stage advances on the **ack**, never on the send
 
 This is the crash-window rule, and it is the one place where getting the ordering wrong produces
@@ -1332,14 +1472,15 @@ effective **now**, a report binds the revision effective over its period
 second revision and asserts the detector still emits one row per gate.
 
 `p.tolerance_ms IS NULL` is how `presented` opts out — the "slow human is not a gap" case is data,
-not a special case in the query. A separate query covers the relay that was enqueued and never
-acked, which is a delivery stall rather than a stage stall:
+not a special case in the query. A separate query covers the relay that was enqueued and is
+still waiting to be sent or acked, which is a delivery stall rather than a stage stall:
 
 ```sql
 SELECT r.gate_id, r.to_stage, o.retry_count, :now_ms - r.enqueued_at_ms AS age_ms
   FROM gate_relay r
   JOIN outbox o ON o.message_id = r.message_id
- WHERE o.status <> 'acked'
+ WHERE o.status IN ('pending', 'delivered')   -- not "<> 'acked'": a cancelled relay is
+                                              -- retired, and §5.7 is where it goes
    AND :now_ms - r.enqueued_at_ms > :delivery_tolerance_ms;
 ```
 
@@ -1378,6 +1519,19 @@ CREATE TABLE policy_detection_latency (
     -- since a CHECK cannot reach another table for the period.
     reconcile_period_ms INTEGER NOT NULL,
     budget_ms           INTEGER NOT NULL,   -- L: onset-to-alarm ceiling; T + P <= L
+    -- L is not always an absolute duration either, and this column is the
+    -- symmetric partner of threshold_kind one column to the left. Section 3.2 of
+    -- time-base-policy.md gives lease_orphan the budget "2 x lease TTL", which no
+    -- absolute millisecond value can hold: a lease's TTL is a per-acquire
+    -- parameter with no default anywhere in the code, so folding it into
+    -- milliseconds would bake one lease's TTL into a row every other lease also
+    -- reads -- the identical mistake threshold_kind already exists to prevent on
+    -- the T side. Defaulted to 'absolute_ms' so every class whose budget IS a
+    -- duration reads exactly as it did before this column existed.
+    --
+    --   'absolute_ms'        -- L = budget_ms, in milliseconds
+    --   'lease_ttl_multiple' -- L = budget_ms * (expires_at_ms - acquired_at_ms)
+    budget_kind      TEXT    NOT NULL DEFAULT 'absolute_ms',
 
     PRIMARY KEY (revision_id, incident_class),
     -- T is not always a duration, and a single tolerance_ms column cannot say
@@ -1395,17 +1549,23 @@ CREATE TABLE policy_detection_latency (
     --                                from the threshold_value-th consecutive failure
     CHECK (threshold_kind IN ('absolute_ms', 'scope_interval_multiple',
                               'lease_ttl_multiple', 'consecutive_count')),
+    CHECK (budget_kind IN ('absolute_ms', 'lease_ttl_multiple')),
     CHECK (threshold_value >= 0),
     CHECK (reconcile_period_ms > 0),
     CHECK (budget_ms > 0),
-    -- The T + P <= L invariant is only checkable in DDL for absolute rows. For
-    -- the relative kinds it is a PER-SUBJECT obligation evaluated at reconcile
-    -- time, because T depends on the subject's own interval or TTL -- see the
-    -- policy_budget_violation pass below.
+    -- The T + P <= L invariant is only checkable in DDL when BOTH sides are
+    -- absolute. For every other combination it is a PER-SUBJECT obligation
+    -- evaluated at reconcile time, because T or L depends on the subject's own
+    -- interval or TTL -- see the policy_budget_violation pass below. Without the
+    -- budget_kind conjunct this CHECK would compare an absolute T in
+    -- milliseconds against a TTL MULTIPLE sitting in budget_ms and refuse the
+    -- lease_orphan row outright, or admit it only by mangling the multiple into
+    -- some assumed TTL.
     -- The FULL inequality, not `T <= L`. A row with T = L passes the weaker
     -- form and still lets the detector alarm a whole pass after its own declared
     -- ceiling, which is the ceiling being meaningless.
     CHECK (threshold_kind <> 'absolute_ms'
+           OR budget_kind <> 'absolute_ms'
            OR threshold_value + reconcile_period_ms <= budget_ms)
 );
 
@@ -1436,10 +1596,11 @@ CREATE TABLE policy_gate_stage_owner (
 The detector joins the **currently effective** revision; a report joins the revision that was
 effective over its period. Rows are never updated or deleted — a change is a new `revision_id`.
 
-Because a relative threshold's `T` is only known per subject, the reconcile pass carries one more
-deterministic check — **`policy_budget_violation`**: for every live subject of a relative class,
-assert `T(subject) + reconcile_period_ms <= budget_ms` — the same inequality the `CHECK` above
-enforces for absolute rows. A watcher scope registered with an `expected_interval_ms` so large
+Because a relative `T` — and, for `lease_orphan`, a relative `L` as well — is only known per subject,
+the reconcile pass carries one more deterministic check — **`policy_budget_violation`**: for every
+live subject of a row whose `threshold_kind` or `budget_kind` is not `'absolute_ms'`, assert
+`T(subject) + reconcile_period_ms <= L(subject)` — the same inequality the `CHECK` above enforces for
+the rows where both sides are absolute. A watcher scope registered with an `expected_interval_ms` so large
 that three missed polls exceed the `watcher_silence` budget is a misconfiguration that would
 otherwise present as a detector that is quietly slower than its stated ceiling for that one scope.
 Reporting it as its own incident class keeps the budget an assertion rather than an aspiration.
@@ -1448,11 +1609,22 @@ Reporting it as its own incident class keeps the budget an assertion rather than
 
 ## 11. What has been checked about this DDL
 
-The DDL above is a design, and no implementation accompanies it — but a design whose SQL does not
-parse, or whose constraints do not constrain, is not usable by the Issue that picks it up. So the
-blocks in this document and in [`measurement-harness.md`](./measurement-harness.md) were applied to
-an in-memory SQLite database on top of the spike schema, every parameterised query in them was
-prepared, and the load-bearing constraints were exercised directly:
+This section is the record of what was checked against SQLite **before** the implementation existed,
+and the shipped migration is held to it. When the DDL above was written it was a design ahead of any
+code — and a design whose SQL does not parse, or whose constraints do not constrain, is not usable by
+the Issue that picks it up. So the blocks in this document and in
+[`measurement-harness.md`](./measurement-harness.md) were applied to an in-memory SQLite database,
+every parameterised query in them was prepared, and the load-bearing constraints were exercised
+directly. The table below is that log, kept rather than retired.
+
+The DDL now ships as `src/claude_org_runtime/control_plane/migrations/0001_initial.sql`, extended by
+the numbered steps after it, and is applied by the migrator, so this table is no longer the only place the claims live: every row of it
+is reproduced as a named test in `tests/control_plane/test_production_schema.py` — or, for the rows
+about migration mechanics rather than about the shape, in `tests/control_plane/test_migrator.py` —
+each reading the migrations the runtime reads. A claim recorded here that the migration stops satisfying is now a test
+failure rather than a stale sentence — which is the point of not deleting the log. Where a row was
+added *after* the implementation found the design underspecified, it is marked `D-0041` and was
+verified the same way, against a database built by the migrator itself.
 
 | Claim | Observed |
 |---|---|
@@ -1464,7 +1636,7 @@ prepared, and the load-bearing constraints were exercised directly:
 | A second **live** primary PR per run is refused; a re-point after unlinking is accepted and both links survive (§7.3) | `UNIQUE constraint failed: run_pr_link.run_id`, then the re-point succeeds with `p1` retained as unlinked history |
 | `resolution` cannot say "we guessed from the working directory" (§7.4) | `CHECK constraint failed: resolution IN ('project_registry', …)` |
 | A stale watcher's heartbeat is refused by the fence (§8.3) | The current holder's fenced `UPDATE` affects 1 row; the same statement at epoch 3 against epoch 7 affects **0** |
-| `gate.stage` may only name an `advance` transition of its own gate (§9.2) | Trigger fires when pointed at the `open` transition |
+| `gate.stage` may only name an `open` or `advance` transition **of its own gate**, landing on the stage it claims (§9.2) | Trigger fires when pointed at another gate's transition, at a `seq` that does not exist, or at a transition whose `to_stage` differs from the claimed stage — and admits the `open` transition, which it must, because a gate is created with a null `stage_seq` and only its opening transition can establish the projection |
 | A gate stage projection never walks backwards | Trigger fires |
 | Gate transitions are immutable and undeletable (§9.3) | Both triggers fire |
 | An outcome outside the terminal taxonomy is refused (§9.4) | `CHECK constraint failed: outcome IS NULL OR outcome IN (…)` |
@@ -1480,12 +1652,27 @@ prepared, and the load-bearing constraints were exercised directly:
 | A gate can be opened end to end: create with a null projection, append the `open` transition, then point the projection at it (§9.2) | Accepted — and the projection still cannot claim a stage no transition reached, nor be asserted at creation |
 | A closed, unmerged PR reopens; a merged one does not (§7.2) | `closed → open` accepted with `closed_at_ms` cleared; `merged → open` aborts |
 | A scope-relative multiple, a consecutive-failure count and a TTL multiple all store losslessly, and an absolute `T` above its own budget is refused (§10) | All four rows land; the over-budget row and an unknown `threshold_kind` both raise |
+| A `lease_ttl_multiple` budget stores as a multiple rather than as milliseconds, and the `T + P ≤ L` `CHECK` stands down for it (§10) | `lease_orphan` with `budget_kind='lease_ttl_multiple'` and `budget_ms=2` lands; an unknown `budget_kind` raises; the same numbers with `budget_kind='absolute_ms'` are refused by the inequality |
 | An invocation's output-token ceiling scales with its response count ([`measurement-harness.md`](./measurement-harness.md) §2.3) | 3000 tokens over 4 responses at a 1024 cap is accepted; the same 3000 over 1 response aborts |
 | A watcher holding scope B's lease cannot heartbeat scope A (§8.3) | The upsert affects 1 row for B and **0** for A; A keeps no liveness row and stays `watcher_scope_uncovered` |
 | A late, older head observation cannot revive superseded CI evidence (§7.2) | The newer head advances; the older one aborts, and the projection still reads the newer head |
 | A `delivery` subscription without a recipient — and a `compute` subscription with one — are both refused at registration (§5.3) | Both abort; the two well-formed rows land |
-| The budget `CHECK` includes the reconcile period (§10) | `T=180s + P=120s = L=300s` accepted; `T = L` and `T + P > L` both abort |
+| The budget `CHECK` includes the reconcile period, and applies only where `threshold_kind` **and** `budget_kind` are both absolute (§10) | `T=180s + P=120s = L=300s` accepted; `T = L` and `T + P > L` both abort; a row relative on either side is admitted for the `policy_budget_violation` pass to assert per subject |
 | The silence query reads its multiple from the effective policy revision and scales it by the scope's own interval (§8.4) | Quiet for 2 intervals returns nothing; quiet for 3.3 intervals returns the scope |
+| `run.status` refuses a value outside the closed set (`D-0041`, §4.3) | `CHECK constraint failed: status IN ('created', 'running', 'suspended', 'completed', 'failed', 'cancelled')` |
+| A run does not leave a terminal status — including `completed → failed`, whose ranks are equal so no ordering comparison catches it (`D-0041`, §4.3) | Both `completed → failed` and `completed → running` abort with `run.status walks created -> running/suspended -> terminal; a terminal run is never reopened` |
+| A started run does not rewind to `created`, because a run whose start moves has no measurable lifetime (`D-0041`, §4.3) | `running → created` aborts with the same trigger |
+| `running` and `suspended` interconvert in **both** directions, because a suspend is a pause rather than a step (`D-0041`, §4.3) | `running → suspended` and `suspended → running` each affect 1 row |
+| `policy_detection_latency.budget_kind` is `CHECK`ed to its two values (`D-0041`, §10) | `CHECK constraint failed: budget_kind IN ('absolute_ms', 'lease_ttl_multiple')` |
+| The `T + P ≤ L` `CHECK` now applies only when `threshold_kind` **and** `budget_kind` are both `absolute_ms` (`D-0041`, §10) | `T=200s + P=120s > L=300s` aborts when both are absolute; the same `T` and `P` against `budget_kind='lease_ttl_multiple'`, `budget_ms=2` lands, for the `policy_budget_violation` pass to assert per subject |
+| A `pending` and a `delivered` message may both be cancelled, and `cancelled` is terminal (step `0003`, §5.7) | Both `UPDATE`s land; `cancelled → pending`, `cancelled → delivered` and `cancelled → acked` each abort with `outbox status walks pending -> delivered -> acked, or is cancelled from pending or delivered; acked and cancelled are terminal` |
+| An `acked` message is never cancelled (step `0003`, §5.7) | `acked → cancelled` aborts with the same trigger; and inserting a `cancelled` row carrying an `acked_at_ms` aborts with `CHECK constraint failed: (status = 'acked') = (acked_at_ms IS NOT NULL)` |
+| Cancelling a `delivered` message erases nothing (step `0003`, §5.7) | The row keeps `delivered_at_ms` and `retry_count`; clearing `delivered_at_ms` afterwards aborts with `a delivered message is delivered once`, and lowering `retry_count` with `outbox retry_count must not decrease` |
+| A message never recorded as `delivered` cannot jump straight to `acked` (step `0003`, §5.7) | Aborts with the forward-only trigger — a tightening over `0001`, whose rank comparison admitted the jump |
+| The status vocabulary is closed at four values (step `0003`, §5.7) | `CHECK constraint failed: status IN ('pending', 'delivered', 'acked', 'cancelled')` |
+| The `outbox_undelivered` predicate is what makes the orphan pass indexable, and its complement is not (step `0003`, §5.6/§5.7) | `EXPLAIN QUERY PLAN` over `status IN ('pending', 'delivered') AND enqueued_at_ms < ?` reads `SEARCH outbox USING INDEX outbox_undelivered (enqueued_at_ms<?)`; the same query written `status <> 'acked'` reads `SCAN outbox` |
+| The `outbox` rebuild carries every row and every reference forward (step `0003`, §3.2) | A database written at `0002` with a `delivered` row at `retry_count=4` and a child row referencing it migrates to head with all columns intact, `PRAGMA foreign_key_check` empty and `PRAGMA integrity_check` `ok` |
+| Turning `PRAGMA foreign_keys` off for the migration is not a hole, because each step is `foreign_key_check`ed inside its own transaction (step `0003`, §3.2) | A step inserting a row with a dangling reference is refused with `migration step … leaves 1 foreign key violation(s)` and the database is left at the previous version |
 
 Two things this does **not** establish, and they are the reasons it is not a substitute for the
 implementation Issue's tests. It does not exercise the `T + P ≤ L` timing behaviour, which needs the
@@ -1511,6 +1698,25 @@ implementation carries.
   enforced by permission rather than by discipline for the AI's rows. Until then, AC-6's exclusion
   of `approve`/`restart`/`close`/`reassign` from the AI's tools is the enforcement, and the writer
   table records the intent.
+- **The gate policy seed is deliberately partial, and the gaps are data rather than special cases.**
+  **Neither** policy table carries a `forwarded` row. `forwarded` is terminal — the gate is closed,
+  there is nothing left to be late for, and nobody is left holding the ball — which is exactly what
+  [`time-base-policy.md`](./time-base-policy.md)'s stage table records by giving the stage a dash in
+  every column. So `policy_gate_stage_tolerance` has no tolerance to state, and §9.6's detector simply
+  never names the stage, exactly as its `p.tolerance_ms IS NULL` opt-out never names `presented`.
+  `policy_gate_stage_owner` is silent for the same reason and not for a weaker one: the relay-gap
+  detector reaches both tables through the same tolerance join, so a stage with no tolerance row is
+  never asked who holds its ball, and an owner row for `forwarded` would be a row nothing reads. Its
+  `ball_holder` being `NOT NULL` is not an argument for inventing one — a value invented to satisfy a
+  `NOT NULL` is a value a report would then cite, which is worse than the absence it was papering
+  over. `0002_policy_seed.sql` seeds no such row and says so at length: deciding, in a migration file,
+  that the Secretary still holds a ball it has already put down is deciding policy where `D-0031` says
+  policy is versioned data. Neither table is seeded for `gate_type` `'plan_approval'`
+  or `'risk_approval'`: [`time-base-policy.md`](./time-base-policy.md) decides no numbers for them, and
+  inserting one anyway would be a policy decision taken in a migration file, which is the thing
+  `D-0031` puts values in versioned data to avoid. A relay-gap detector that never names a gate type is
+  the correct behaviour for a type nobody has set a tolerance for; a later revision adds the rows once a
+  `D-` entry decides them.
 - **Multi-provider CI.** `repository.provider` and `ci_observation.provider` are `CHECK`ed to
   `'github'` alone. That is deliberate: `#64` says `gh` is the interface to GitHub, and gate item
   11's target shape is a thin seam plus one substitution test, not everything abstracted. A second

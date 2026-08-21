@@ -2,8 +2,12 @@
 
 .. warning::
 
-   **Spike scaffold, throwaway by default (D-0026).** ``Q-0001`` stays open and
-   nothing here answers it. The durable half of Issue ``#14`` is the suite.
+   **Spike scaffold, throwaway by default (D-0026).** At spike time ``Q-0001``
+   was open and nothing here answered it; D-0029 has since resolved it (the
+   per-item single-writer table is docs/production-schema.md section 4.2, the
+   DDL is ``control_plane/migrations/0001_initial.sql``), but this module still
+   sits on the throwaway S5 schema and was never updated to the production one.
+   The durable half of Issue ``#14`` is the suite.
 
 Issue ``#14`` asks for **one** handler, and is specific about what makes it
 count:
@@ -85,8 +89,10 @@ __all__ = [
 #: The ``outbox.recipient`` value :class:`NotifyDestinationHandler` serves.
 #:
 #: A recipient name, not a role name. Which component sends to which recipient
-#: is the per-item writer assignment ``Q-0001`` leaves open, and S5 kept every
-#: role out of the DDL for the same reason.
+#: was the per-item writer assignment ``Q-0001`` left open at spike time (S5
+#: kept every role out of the DDL for the same reason), and D-0029 has since
+#: answered it in the production schema -- but this spike scaffold was never
+#: migrated onto it, so the recipient name here is still a name, not a role.
 NOTIFY_RECIPIENT = "external-notify"
 
 #: The recipient :class:`HumanGatedHandler` serves. See that class: it delivers

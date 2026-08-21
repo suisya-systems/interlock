@@ -4,7 +4,11 @@
 the marking in the file itself: it is a spike schema and **no migration path is
 promised from it**. Promotion into the real implementation takes a new ``D-``
 entry; being imported, being depended on, or having survived a gate run promotes
-nothing, and ``Q-0001`` stays open. That covers S6 -- :mod:`.lease` -- and S7 --
+nothing. ``Q-0001`` was open when this package was written; D-0029 has since
+resolved it in the production schema (docs/production-schema.md section 4.2,
+``control_plane/migrations/0001_initial.sql``), but this package still runs
+against the S5 spike schema that predates that answer. That covers S6 --
+:mod:`.lease` -- and S7 --
 :mod:`.outbox`, :mod:`.handlers` and :mod:`.destination` -- exactly as it covers
 the schema they sit on. The durable half of all three issues is the test suite.
 

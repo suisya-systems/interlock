@@ -9,8 +9,12 @@ Durable halves: `tests/gate_item2/`, the `session-start` cases in
 `investigation/i18-crash-window-characterisation.md`.
 
 **Status: spike scaffold, throwaway by default (D-0026).** The tests are the
-durable half. Q-0001 stays open — `binding_phase` is a spike expression of the
-injection seams, not the real schema.
+durable half. Q-0001 was open at spike time — `binding_phase` here is a spike
+expression of the injection seams, not the real schema. D-0029 has since
+answered it: production schema section 4.2's writer table names the
+Supervisor as `session` binding phase's single writer, fenced by the session
+lease epoch, and `migrations/0001_initial.sql`'s `session` table carries a
+real `binding_phase` column with a forward-only trigger.
 
 ---
 

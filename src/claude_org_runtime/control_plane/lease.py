@@ -4,9 +4,13 @@
 
    **Spike scaffold, throwaway by default (D-0026).** This implementation may be
    discarded; its *tests* are the durable half. Nothing here is promoted into the
-   real implementation by having discharged a gate item, and ``Q-0001`` -- which
-   component may hold which resource -- stays open: :data:`holder` is an opaque
-   claimant identity here and deliberately not a role.
+   real implementation by having discharged a gate item. ``Q-0001`` -- which
+   component may hold which resource -- was open when this module was written;
+   D-0029 has since resolved it in the production schema
+   (docs/production-schema.md section 4.2, ``migrations/0001_initial.sql``), but
+   this module still runs against the S5 spike schema that predates the answer,
+   so :data:`holder` stays an opaque claimant identity here and deliberately not
+   a role.
 
 ``ACCEPTANCE.md`` section 2 states the requirement and names the wrong answer in
 the same breath: **expiry discovery alone is insufficient**, because the lease
@@ -150,12 +154,14 @@ EXACTLY_ONCE_MECHANISMS = (
 )
 
 #: The write history, as data, so it can be run by hand against a database
-#: recovered from a crash (D-0001). ``action`` has no resource column -- which
-#: component owns which state item is ``Q-0001`` and open -- so the caller names
-#: the effect *kind* it wants the history of, and :func:`effect_kind` is how a
-#: kind carries the resource whose epochs its rows were written under -- which is
-#: also what lets this filter by resource across every effect taken under one
-#: lease.
+#: recovered from a crash (D-0001). The spike ``action`` table has no resource
+#: column -- which component owns which state item was ``Q-0001`` and open on
+#: this schema (D-0029 has since answered it in the production schema, section
+#: 4.2, but this module still runs against the spike table) -- so the caller
+#: names the effect *kind* it wants the history of, and :func:`effect_kind` is
+#: how a kind carries the resource whose epochs its rows were written under --
+#: which is also what lets this filter by resource across every effect taken
+#: under one lease.
 #:
 #: The order is ``rowid``, the database's own insertion order, and **not**
 #: ``created_at_ms``. The timestamp is the caller's clock (that is the point of
@@ -566,8 +572,10 @@ class ProtectedWrite:
     *kind* and *idempotency_key* identify the effect, and they are what a
     refusal is recorded under, so they must be meaningful for an attempt that
     never landed. Because the spike ``action`` table has no resource column
-    (``Q-0001``), *kind* is also what scopes the write history to one leased
-    resource -- build it with :func:`effect_kind` rather than by hand.
+    (``Q-0001`` was open on this schema; D-0029 has since answered it in the
+    production schema, section 4.2), *kind* is also what scopes the write
+    history to one leased resource -- build it with :func:`effect_kind` rather
+    than by hand.
 
     *exactly_once_mechanism* is the answer ``ACCEPTANCE.md`` section 2 requires
     every handler to give; there is no default, because "the handler did not
@@ -1140,10 +1148,14 @@ def effect_kind(resource: str, effect: str) -> str:
     """The ``action.kind`` for *effect* performed under the lease on *resource*.
 
     The spike ``action`` table has **no resource column** -- which component owns
-    which state item is ``Q-0001`` and open -- so nothing in a row says which
-    lease its ``writer_epoch`` was allocated by. Two resources' histories share a
-    table and their epochs are independent, which would make any comparison
-    across them meaningless.
+    which state item (the writer assignment) was ``Q-0001`` and open on this
+    schema; D-0029 has since answered that part in the production schema's
+    writer table, section 4.2. It has not answered the *column*: production
+    ``action`` (migrations/0001_initial.sql) has no resource column either,
+    so nothing in a row -- spike or production -- says which lease its
+    ``writer_epoch`` was allocated by. Two resources'
+    histories share a table and their epochs are independent, which would make
+    any comparison across them meaningless.
 
     Encoding the resource in ``kind`` is the spike's way out, and it is a
     workaround rather than a design: a real schema would carry the resource as a
@@ -1168,7 +1180,8 @@ def resource_of_kind(kind: str) -> str:
     :raises LeaseUsageError: if *kind* was not composed by :func:`effect_kind`.
         A row whose kind does not name a resource cannot say which lease
         allocated its epoch, and the spike ``action`` table has no other column
-        that could (``Q-0001``).
+        that could (``Q-0001`` was open on this schema; D-0029 has since
+        answered it in the production schema, section 4.2).
     """
 
     _require_identifier("kind", kind)
@@ -1397,9 +1410,12 @@ def authority_timeline(observations: Sequence[Lease]) -> tuple[Authority, ...]:
 
     *observations* is every state the lease row passed through, in any order.
     The spike schema keeps one row per resource and no history table -- which
-    table records lease history is ``Q-0001`` and open -- so the caller collects
-    the rows as they are written. What is durable, and readable from SQLite
-    alone afterwards, is :func:`write_history`.
+    table records lease history is ``Q-0001`` and still open. Production schema
+    section 4.2's writer table lists ``lease`` as "in-place (CAS)" with no
+    history table beside it, and section 12's known holes does not name this
+    question either, so it has not been answered anywhere -- the caller
+    collects the rows as they are written. What is durable, and readable from
+    SQLite alone afterwards, is :func:`write_history`.
     """
 
     ordered = _by_epoch(observations)

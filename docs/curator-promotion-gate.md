@@ -124,7 +124,10 @@ The tests and this document are the durable output. `curator/gate.py`, `curator/
 `curator/stub.py`, `curator/records.py`, `curator/digest.py`, `curator/skill_root.py` and
 `curator/audit.py` are **spike implementations, throwaway by default**; promoting any of them into
 the real implementation needs a new `D-` entry that says so. The ledger format in particular is not
-a schema commitment — Q-0001 stays open.
+a schema commitment. `Q-0001` itself was left open at spike time and D-0029 has since resolved it —
+but only for the entity list `D-0001`/`D-0029` name (production-schema.md §4.1), which does not
+include the curator ledger. Nothing in D-0029 commits this ledger to a schema, so the point stands
+on its own terms rather than as an open `Q-0001`.
 
 ## 6. Known limits
 

@@ -5,9 +5,12 @@ the injection matrix itself is `#16`. Implementation:
 `src/claude_org_runtime/control_plane/lease.py`, tests `tests/control_plane/test_lease.py`.
 
 **Status: spike scaffold, throwaway by default (D-0026).** The implementation may be discarded and
-its tests are the durable half. Nothing here is promoted by having discharged a gate item, and
-`Q-0001` — which component may hold which resource — stays open: `holder` is an opaque claimant
-identity throughout and deliberately never a role.
+its tests are the durable half. Nothing here is promoted by having discharged a gate item.
+`Q-0001` — which component may hold which resource — was open at spike time: `holder` is an opaque
+claimant identity throughout and deliberately never a role. D-0029 has since answered this, in the
+production schema's writer table (section 4.2): `lease`'s single writer is "the acquiring claimant",
+not a role, so this module's choice stands as the answer rather than a deferral. (Which *table*
+records lease history is a separate question and stays open -- §5 below.)
 
 ---
 
@@ -130,7 +133,9 @@ package rather than one shadowing the other.
 - **The spike schema keeps one lease row per resource and no history table.** `authority_timeline()`
   therefore reconstructs the timeline from the row states the caller observed, while the durable,
   query-answerable evidence is `write_history()` over `action`. Which table records lease history is
-  `Q-0001` and open; adding one here would answer it by inertia.
+  `Q-0001` and stays open: production schema section 4.2's writer table lists `lease` only as
+  "in-place (CAS)", `migrations/0001_initial.sql` has no lease-history table, and section 12's known
+  holes does not name this question either -- adding a history table here would answer it by inertia.
 - **`write_history()` reads `action`, and only `action`.** A protected write to another table — S7's
   `outbox` is the case in point — stamps `writer_epoch` on its own row, and its history is read there
   by the same shape of query. Nothing synthesises an action row per protected write, deliberately:

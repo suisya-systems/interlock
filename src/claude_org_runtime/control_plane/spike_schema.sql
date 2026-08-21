@@ -13,10 +13,15 @@
 --  What that means concretely, and it is not a formality:
 --
 --    * Q-0001 (the real DDL, keys, indices, per-item single-writer table and
---      migration policy) STAYS OPEN. Nothing below is an answer to it. The
---      failure mode D-0026 was written against is a spike schema becoming
---      *the* schema by inertia, so that Q-0001 gets answered by accident
---      rather than by decision.
+--      migration policy) WAS OPEN at spike time. Nothing below was an answer
+--      to it. The failure mode D-0026 was written against is a spike schema
+--      becoming *the* schema by inertia, so that Q-0001 gets answered by
+--      accident rather than by decision -- which is exactly why D-0029
+--      answers it deliberately, on its own terms, in a hand-authored
+--      production schema rather than by promoting this file (see
+--      docs/production-schema.md section 4.2 and
+--      control_plane/migrations/0001_initial.sql). This spike file is
+--      unchanged by that decision and still does not answer Q-0001.
 --    * There is NO migration. A database written by one revision of this file
 --      is not upgraded by the next one; it is REFUSED (see the user_version
 --      check in schema.py). Refusing is the point: a migration path would be
@@ -51,9 +56,12 @@
 -- resumes from it.
 --
 -- status is deliberately unconstrained text. Which run statuses exist, and
--- which component may move a run between them, is exactly the per-item writer
--- assignment Q-0001 leaves open; a CHECK enumerating them here would answer it
--- in DDL.
+-- which component may move a run between them, was exactly the per-item
+-- writer assignment Q-0001 left open at spike time; a CHECK enumerating them
+-- here would have answered it in DDL. D-0029 has since answered Q-0001 in the
+-- production schema (docs/production-schema.md section 4.3), which is why
+-- migrations/0001_initial.sql's run table does carry that CHECK -- this spike
+-- table deliberately still does not.
 -- --------------------------------------------------------------------------
 CREATE TABLE run (
     run_id         TEXT    PRIMARY KEY,
@@ -107,7 +115,10 @@ CREATE TABLE run (
 -- Only 'identity_confirmed' may claim an observation; 'prepared' and 'spawned'
 -- rows are honestly 'unobserved' with a reason. This is a spike expression of
 -- the crash-window seams, not an answer to Q-0001: the real schema's DDL and
--- writer table stay open, per the header of this file.
+-- writer table were open when this file was written, per its header, and have
+-- since been answered by D-0029 in docs/production-schema.md section 4.2 and
+-- migrations/0001_initial.sql -- this spike table is unaffected by that and
+-- still does not answer Q-0001.
 -- --------------------------------------------------------------------------
 CREATE TABLE session (
     session_id          TEXT    PRIMARY KEY,
@@ -189,8 +200,10 @@ END;
 -- results.
 --
 -- holder is an opaque claimant identity, deliberately not a role. WHICH
--- component may hold WHICH resource is the per-item single-writer table Q-0001
--- leaves open.
+-- component may hold WHICH resource was the per-item single-writer table
+-- Q-0001 left open at spike time; D-0029 has since answered it in the
+-- production schema (docs/production-schema.md section 4.2), but this spike
+-- table predates that answer and still does not carry it.
 -- --------------------------------------------------------------------------
 CREATE TABLE lease (
     resource        TEXT    PRIMARY KEY,

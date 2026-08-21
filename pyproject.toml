@@ -42,4 +42,7 @@ where = ["src"]
 "claude_org_runtime.settings" = ["*.json"]
 "claude_org_runtime.fencing" = ["*.json"]
 "claude_org_runtime.control_plane" = ["*.sql"]
+# The production DDL ledger travels with the package: without this the wheel
+# ships a migrator whose steps are missing, which every opener then refuses.
+"claude_org_runtime.control_plane.migrations" = ["*.sql"]
 "claude_org_runtime.canary" = ["*.sql"]

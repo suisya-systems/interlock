@@ -1,0 +1,9 @@
+{
+  "incident_class": "relay_gap",
+  "onset_offset_ms": 30000,
+  "tolerance_ms": 180000,
+  "budget_ms": 300000,
+  "fact_state": "EXPLICIT_BLOCK",
+  "must_not_recommend": ["terminate_session", "restart_session"],
+  "provenance": "constructed_edge: an escalation reaches stage 'received' at +30s and is never presented; the worker is blocked on an answer that is not coming, which is v1's relay gap. onset is the receipt (the state entry), NOT the T=180s crossing at +210s -- labelling the crossing would grade an alarm at +510s (T+L past onset) as inside a 300s budget."
+}

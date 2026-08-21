@@ -304,9 +304,13 @@ def test_an_incident_retry_count_is_never_null_and_never_decreases(cp):
 
 
 def test_no_table_assigns_a_writer_to_a_state_item(cp):
-    # Q-0001 leaves the per-item single-writer table open. A column naming which
-    # component owns which state item would answer it in DDL, and every
-    # downstream test would then inherit the answer without anyone deciding it.
+    # Q-0001 left the per-item single-writer table open on this spike schema.
+    # D-0029 has since answered it in prose, in the production schema's writer
+    # table (docs/production-schema.md section 4.2) -- not as a column here or
+    # there. A column naming which component owns which state item would
+    # answer it in DDL instead, and every downstream test would then inherit
+    # the answer without anyone deciding it, which is what this asserts never
+    # happens on this (deliberately frozen) spike schema.
     forbidden = ("role", "component", "secretary", "dispatcher", "curator", "supervisor", "layer")
     for table in STATE_TABLES:
         for row in cp.execute(f"PRAGMA table_info({table})"):
