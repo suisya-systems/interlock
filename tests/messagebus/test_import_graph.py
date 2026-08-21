@@ -141,6 +141,38 @@ def test_session_knowledge_in_this_suite_stays_in_the_stale_readout_case(path: P
     )
 
 
+@pytest.mark.parametrize(
+    "path", _python_files(MESSAGEBUS_PACKAGE), ids=lambda path: path.name
+)
+def test_no_messagebus_module_imports_dynamically(path: Path):
+    """The evasion route the AST scan cannot follow, closed separately.
+
+    ``importlib.import_module("...")`` and ``__import__("...")`` create edges
+    no import statement records, so the statement scan above would miss them.
+    Rather than pretend to resolve dynamic strings, this bans the primitives
+    from the package outright -- a spike delivery layer has no business
+    importing anything it cannot name statically.
+    """
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    offenders = sorted(
+        {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id == "__import__"
+        }
+        | {
+            name
+            for name in _imported_modules(path)
+            if name.split(".")[0] == "importlib"
+        }
+    )
+    assert offenders == [], (
+        f"{path.name} uses {offenders}; dynamic imports would evade the "
+        "no-edge assertion above and are banned from this package"
+    )
+
+
 def test_the_stale_readout_case_does_not_import_the_control_plane():
     """The other half of the split ``_env.py`` documents.
 

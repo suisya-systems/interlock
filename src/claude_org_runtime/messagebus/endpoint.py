@@ -123,7 +123,7 @@ class EndpointConfig:
         if not self.holder:
             gaps.append("INTERLOCK_MESSAGEBUS_HOLDER")
         if self.epoch is None:
-            gaps.append("INTERLOCK_MESSAGEBUS_EPOCH")
+            gaps.append("INTERLOCK_MESSAGEBUS_EPOCH (unset or not an integer)")
         if not self.destination_dir:
             gaps.append("INTERLOCK_MESSAGEBUS_DESTINATION_DIR")
         return gaps
@@ -253,6 +253,10 @@ def _serve(endpoint: Endpoint, stdin, stdout) -> None:
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(msg, dict):
+            # Valid JSON that is not a message object gets the same silence as
+            # malformed JSON: one bad line must not take the transport down.
             continue
         resp = endpoint.handle(msg)
         if resp is not None:

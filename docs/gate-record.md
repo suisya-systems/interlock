@@ -42,7 +42,8 @@ Three things follow, and every row below is read in their light:
    therefore names its provider. Items 4, 5, 6, 9 and 11 are control-plane properties: they are
    re-run for regression, not redesigned.
 
-**Where the sequence stands.** Item 9 is discharged (independently of any provider). **Item 3 is
+**Where the sequence stands.** Items 9, 11 and 6 are discharged (each a provider-independent,
+control-plane property — item 6 with the F1 caveat its §3 row states). **Item 3 is
 discharged on C2**, on the weakened observable D-0023 defines — and its residual is stated in §3 in
 D-0023's own terms rather than folded into the verdict. Item 2 carries a **failed** verdict on C1
 and is **pending** on C2. **Item 8 is rehearsed on C2 — explicitly not discharged** (D-0022): its

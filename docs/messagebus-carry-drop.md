@@ -1,7 +1,9 @@
 # The quarantined broker suites, assertion by assertion (Q-0023 -> D-0028)
 
 Issue `#19` deliverable. Five test files were quarantined by the v1 purge
-(`PORTING_LEDGER.md`, purge rows 408-413): their assertions are kept verbatim
+(`PORTING_LEDGER.md`, purge rows 408-412; the sixth quarantined row, 413, is
+`tests/test_migrate.py`, quarantined only partially and out of this table's
+scope): their assertions are kept verbatim
 but never run, because the module they drive -- `broker/server.py` -- was
 deleted. The ledger classified them at file granularity and named individual
 carve-outs in prose; per the operator direction of 2026-08-21 on Q-0023 (Issue
