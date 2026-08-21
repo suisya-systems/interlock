@@ -125,7 +125,14 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
     binding commit, between commit and spawn, between spawn and the read-back commit, and after the
     read-back commit ("after the read-back" is defined as after that commit) — restarts it, and
     asserts from the reopened database that re-identification yields exactly one session for the
-    run (`one-binding-per-run`: the index's at-most-one plus a non-empty read after recovery).
+    run (`one-binding-per-run`: the index's at-most-one, plus a non-empty read after recovery,
+    plus the surviving row confirmed — a recovery that never committed its read-back fails). The
+    kill's placement is itself evidenced: the destination's spawn ledger is sampled between the
+    kill and the restart, and a kill claimed inside a window whose spawn count disagrees fails
+    the case. One granularity note: the armed "between commit and spawn" anchor sits after *both*
+    admission writes (the prepare and the write-ahead mark commit back to back, with no anchor
+    between them), so the narrower `prepared`-committed-mark-not state is exercised by
+    constructed rows in `tests/gate_item2/`, not by a real kill.
   - **The mediated crash-and-retry shapes.** `tests/gate_item2/` runs the U27 shape (claimant dies
     inside the admission window, retry lands inside it) and the U32 shape (recovery of a dead
     holder's session) through the control plane, against providers that refuse nothing by
@@ -169,16 +176,25 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
   - **The admission→exec window is open by construction.** A process creation cannot be made
     transactional with a SQLite commit, so a claimant that loses its lease *between* its fenced
-    admission commit and its `exec` (SIGSTOP across an expiry, in the tested shape) can bring a
-    process into existence. What is guaranteed — and tested — is that the very next fenced write
-    detects the stale token and the child is terminated at once; in the deterministic suite the
-    measured detection→termination latency is carried on the refusal
-    (`LoserTerminated.termination_latency_ms`) rather than implied to be zero. Against a live
-    model-backed child, termination speed bounds the exposure; it does not re-classify it — if such
-    a child ever took a model turn on a session id it did not own, that would be the violation this
-    item names, not an accepted cost.
-  - U34 (what sets the window's width) and U36 (what the refusal is keyed to) stay open; the
-    re-measurement confirms the hazard, not an explanation.
+    admission commit and its `exec` can bring a process into existence. What is guaranteed — and
+    tested — is that the very next fenced write detects the stale token and the child is ordered
+    stopped at once; the refusal carries the measured detection→stop latency **and the provider's
+    own stop verdict** (`LoserTerminated.stop_confirmed`) — a stop the provider could not confirm
+    is surfaced as unconfirmed, never dressed up as a termination that happened. Two scope
+    caveats, stated: the stopped-claimant shapes are exercised deterministically — the pause is
+    simulated by advancing the injected clock and raising the epoch at the exact seam a stopped
+    process would resume from, on both sides of the admission write and during the read-back
+    stall — no real `SIGSTOP` is delivered in this suite (the harness's real signals are the
+    `SIGKILL` cases). And against a live model-backed child, termination speed bounds the
+    exposure; it does not re-classify it — if such a child ever took a model turn on a session id
+    it did not own, that would be the violation this item names, not an accepted cost.
+  - The window's *mechanism* was answered by `investigation/i01-supervisor-probe.md`: U34 — the
+    window is bounded by session persistence, the transcript's creation (~2.9 s there), not the
+    first API response — and U36 — the refusal is keyed to the persisted transcript in the
+    cwd-derived project directory, with the deletion half re-proposed as U38. What stays open is the
+    *number*: the width is a one-machine, one-load measurement (U45), so no retry delay is designed
+    on it, and the re-measurement here confirms the hazard is live on the current CLI, not a new
+    explanation.
 
   **An interleaved transcript is not an accepted residual.** If two processes were ever concurrently
   live on one session id, **item 2 failed**, and this record says so.
@@ -192,7 +208,13 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   session rather than confirming it. One document correction rode with the discharge and is
   disclosed here as in the PR: `ACCEPTANCE.md`'s item 2 row previously said "between spawn and
   commit", which D-0024's commit-before-spawn ordering had already superseded; the row was
-  re-synchronised to the four injection points, with the change noted in the row itself.
+  re-synchronised to the four injection points, with the change noted in the row itself. The same
+  row's "enumerate sessions via the public CLI" became "via the provider's public surface", and
+  that is a **weakening, stated as one**: under C2 the CLI lists no `-p` children (i01 §3.6), so
+  the roster is the provider's own durable per-session records — Interlock-supervised state, not
+  an independent surface. The orphan/no-double-adoption assertions therefore rest on the provider's
+  record discipline (record-before-`Popen`, validated against directory name and identity on
+  discovery) rather than on a second observer.
 
 ### Item 3 — per-role permission / sandbox / hooks survive restart and fail closed
 

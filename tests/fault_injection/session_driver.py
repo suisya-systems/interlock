@@ -100,7 +100,7 @@ _SEAM_ANCHORS: Mapping[str, tuple[str, str]] = {
 #: assumed absent by construction), logs every spawn, and emits the minimal
 #: stream-json walk (init -> result) so the identity read-back is positive.
 _FAKE_CLI = """
-import json, os, sys
+import json, os, sys, time
 
 args = sys.argv[1:]
 
@@ -117,15 +117,26 @@ if "--help" in args:
     print("  --verbose                  Override verbose mode")
     sys.exit(0)
 
-log = os.environ.get("SESSION_DRIVER_SPAWN_LOG")
-if log:
-    with open(log, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"argv": args, "cwd": os.getcwd()}) + "\\n")
-
 def value_of(flag):
     return args[args.index(flag) + 1] if flag in args else None
 
 claimed = value_of("--session-id") or value_of("--resume")
+
+# The destination's own effect record: one start line at spawn, one exit line
+# at exit, each stamped with the destination's wall clock. The observer reads
+# concurrent liveness back out of these intervals, so two overlapping
+# processes on one id are detectable even after both have exited. (This is
+# the fake's clock, not the driver's -- no injected-clock rule applies to the
+# destination's own ledger.)
+log = os.environ.get("SESSION_DRIVER_SPAWN_LOG")
+def ledger(event):
+    if log:
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"event": event, "uuid": claimed,
+                                     "pid": os.getpid(), "t": time.time(),
+                                     "argv": args}) + "\\n")
+
+ledger("start")
 
 def emit(payload):
     sys.stdout.write(json.dumps(payload) + "\\n")
@@ -134,6 +145,7 @@ def emit(payload):
 emit({"type": "system", "subtype": "init", "session_id": claimed})
 emit({"type": "result", "subtype": "success", "terminal_reason": "completed",
       "session_id": claimed})
+ledger("exit")
 sys.exit(0)
 """
 
@@ -201,6 +213,7 @@ def _run_walk(
     ttl_ms: int,
     clock: Clock,
     barrier: Barrier,
+    armed: Sequence[contract.ArmedAnchor],
     emit: Callable[[Mapping[str, Any]], None],
 ) -> None:
     os.environ["SESSION_DRIVER_SPAWN_LOG"] = str(spawn_log_path(workdir))
@@ -209,9 +222,29 @@ def _run_walk(
         claude_command=(sys.executable, str(fake_cli_path(workdir))),
         stop_timeout=2.0,
     )
+    effect_window_armed = any(
+        anchor.anchor == contract.CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD
+        for anchor in armed
+    )
 
     def seam(name: str) -> None:
         anchor, kind = _SEAM_ANCHORS[name]
+        if (
+            anchor == contract.CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD
+            and effect_window_armed
+        ):
+            # "After the effect" must be true *at the barrier*, not merely
+            # after Popen returned: the controller samples the destination's
+            # ledger between the kill and the restart, and a child that had
+            # not yet written its start line would make a genuinely-entered
+            # window read as never entered. IO pacing only -- the ledger is
+            # the destination's own record, and no timestamp from here
+            # reaches a row.
+            log = spawn_log_path(workdir)
+            for _ in range(1_000):
+                if log.exists() and '"start"' in log.read_text(encoding="utf-8"):
+                    break
+                time.sleep(0.01)
         barrier.hit(anchor, operation=contract.OPERATION_SESSION_START, kind=kind)
 
     orchestrator = SessionOrchestrator(
@@ -309,6 +342,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ttl_ms=arguments.ttl_ms,
             clock=clock,
             barrier=barrier,
+            armed=armed,
             emit=emit,
         )
         emit({"event": EVENT_DONE, "now_ms": clock.now_ms()})
@@ -351,27 +385,78 @@ class _SessionObserver:
             return []
         return sorted(entry.name for entry in root.iterdir() if entry.is_dir())
 
-    def live_process_report(self) -> Mapping[str, int]:
-        """``{session_uuid: live process count}``, read from /proc."""
+    def _ledger(self) -> list[dict]:
+        log = spawn_log_path(self._workdir)
+        if not log.exists():
+            return []
+        entries = []
+        for line in log.read_text(encoding="utf-8").splitlines():
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return entries
 
-        report: dict[str, int] = {}
-        for session_uuid in self._session_uuids():
-            report[session_uuid] = 0
-        if not report:
-            return report
-        proc = Path("/proc")
-        for entry in proc.iterdir():
+    def _live_now(self, session_uuid: str) -> int:
+        """Processes live right now on this id -- filtered to this workdir,
+        so a concurrent run of the same case elsewhere is never counted."""
+
+        count = 0
+        marker = str(fake_cli_path(self._workdir))
+        for entry in Path("/proc").iterdir():
             if not entry.name.isdigit():
                 continue
             try:
-                cmdline = (entry / "cmdline").read_bytes().decode(
-                    "utf-8", "replace"
-                )
+                cmdline = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
             except OSError:
                 continue
-            for session_uuid in report:
-                if session_uuid in cmdline:
-                    report[session_uuid] += 1
+            if session_uuid in cmdline and marker in cmdline:
+                count += 1
+        return count
+
+    def live_process_report(self) -> Mapping[str, int]:
+        """``{session_uuid: max concurrently-live process count}``.
+
+        Read from the destination's own start/exit ledger, not from our rows:
+        each spawn writes a start line and (on a normal exit) an exit line, so
+        the maximum interval overlap per id is answerable *after* every child
+        has exited -- a post-hoc /proc scan alone would report 0 for a
+        violation whose two processes both finished (the U27 shape does
+        exactly that). A start with no exit line is treated as still open if
+        the process is live now, and as an unknowable point otherwise (a
+        SIGKILLed child writes no exit; its interval is not invented).
+        """
+
+        report: dict[str, int] = {uuid_: 0 for uuid_ in self._session_uuids()}
+        intervals: dict[str, list[tuple[float, float]]] = {}
+        opens: dict[tuple[str, int], float] = {}
+        for entry in self._ledger():
+            uuid_ = entry.get("uuid")
+            pid = entry.get("pid")
+            if not uuid_:
+                continue
+            report.setdefault(uuid_, 0)
+            if entry.get("event") == "start":
+                opens[(uuid_, pid)] = float(entry["t"])
+            elif entry.get("event") == "exit":
+                started = opens.pop((uuid_, pid), None)
+                if started is not None:
+                    intervals.setdefault(uuid_, []).append((started, float(entry["t"])))
+        for (uuid_, _pid), started in opens.items():
+            live_now = self._live_now(uuid_)
+            if live_now:
+                intervals.setdefault(uuid_, []).append((started, float("inf")))
+        for uuid_ in report:
+            spans = sorted(intervals.get(uuid_, ()))
+            peak = 0
+            for index, (start, end) in enumerate(spans):
+                overlap = 1 + sum(
+                    1
+                    for other_start, other_end in spans[:index]
+                    if other_end > start
+                )
+                peak = max(peak, overlap)
+            report[uuid_] = max(peak, self._live_now(uuid_))
         return report
 
     def transcript_report(self) -> Mapping[str, Mapping[str, Any]]:
@@ -407,13 +492,28 @@ class _SessionObserver:
             }
         return report
 
-    # -- the generic observer surface (unused by #18's cases) ---------------
+    # -- the generic observer surface ---------------------------------------
 
-    def effect_count(self, key: str) -> int:  # pragma: no cover - no keys
-        return 0
+    def effect_count(self, key: str) -> int:
+        """Spawns on one session id, counted from the destination's ledger.
 
-    def attempt_count(self, key: str) -> int:  # pragma: no cover - no keys
-        return 0
+        The key shape is ``spawn:<session_uuid>``. This is what lets the
+        controller's window-landing gate prove the kill really fell where the
+        case claims: a kill before the effect window must find zero spawn
+        records, and one after it exactly one.
+        """
+
+        if not key.startswith("spawn:"):
+            return 0
+        session_uuid = key[len("spawn:"):]
+        return sum(
+            1
+            for entry in self._ledger()
+            if entry.get("event") == "start" and entry.get("uuid") == session_uuid
+        )
+
+    def attempt_count(self, key: str) -> int:
+        return self.effect_count(key)
 
     def unwedge(self) -> None:  # pragma: no cover - no delivery surface
         return None
@@ -477,9 +577,12 @@ class SessionAdapter:
         *,
         holder_suffix: str | None = None,
     ) -> tuple[str, ...]:
-        # The #18 destination observables are whole-store reports
-        # (live_process_report / transcript_report), not per-key counters.
-        return ()
+        # One key: the generation-0 spawn. The controller samples its count
+        # between the kill and the restart, which is what proves the kill
+        # landed inside the claimed window (zero spawns before the effect
+        # window, exactly one after it). The whole-store reports
+        # (live_process_report / transcript_report) ride beside it.
+        return (f"spawn:{session_uuid_for(case['case_id'], 0)}",)
 
     def holder_of(self, role: str) -> str:
         return HOLDER

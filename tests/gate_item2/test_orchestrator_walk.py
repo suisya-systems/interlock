@@ -407,6 +407,75 @@ def test_an_orphan_the_binding_does_not_name_is_never_adopted(
     assert orphan in roster
 
 
+def test_a_claimant_that_stalls_in_the_readback_never_returns_success(
+    cp, clock, provider, make_orchestrator
+):
+    """Takeover *during the read-back poll* -- after the last mid-walk fence.
+
+    Claimant A passes the post-spawn gate, then stalls polling for its
+    identity while its lease expires and a recovering claimant B resumes and
+    confirms the same binding. A's walk must not end in an unfenced
+    read-then-skip that returns success: its final step is a fenced write, so
+    A is refused, recorded, and terminates its own child -- it never reports
+    the session as its own alongside B.
+    """
+
+    stalled: dict = {}
+
+    def takeover_during_wait():
+        if "b" in stalled:
+            return
+        clock.advance_past_expiry()  # A's lease dies while A is stalled
+        # From here the provider reports the session normally -- which is
+        # exactly what a stale A sees on waking.
+        for session in provider.sessions.values():
+            session.readouts = []
+        # B's full recovery, run inline while A is stalled: resume the
+        # session and confirm the binding under B's (live) lease.
+        stalled["b"] = make_orchestrator("sup-b").recover()
+
+    # A's readouts stay unconfirmed until B has taken over.
+    provider.next_readouts = [unconfirmed("pending")] * 4
+    a = make_orchestrator("sup-a", wait=takeover_during_wait, readback_attempts=3)
+    with pytest.raises(LoserTerminated) as caught:
+        a.start()
+
+    assert stalled["b"].session_id == caught.value.session_id
+    # A stopped its own child and left a durable refusal; B's confirmed
+    # binding is untouched and remains the run's single active one.
+    assert caught.value.session_id in provider.stop_calls
+    assert any("post_spawn_gate" in row["kind"] for row in refusals(cp))
+    assert [tuple(row) for row in active_rows(cp)] == [
+        (stalled["b"].session_id, "identity_confirmed", "observed")
+    ]
+
+
+def test_an_unconfirmed_stop_is_reported_as_unconfirmed(
+    cp, clock, provider, make_orchestrator
+):
+    """A loser's stop that the provider cannot confirm is never dressed up."""
+
+    from claude_org_runtime.session.provider import Failure, FailureKind
+
+    def takeover_inside(request):
+        take_over(cp, clock, "sup-b")
+        return None
+
+    provider.on_start = takeover_inside
+    real_stop = provider.stop
+
+    def failing_stop(session_id):
+        provider.stop_calls.append(session_id)
+        return Failure(FailureKind.TIMED_OUT, "child did not exit within 2s of SIGKILL")
+
+    provider.stop = failing_stop
+    with pytest.raises(LoserTerminated) as caught:
+        make_orchestrator("sup-a").start()
+    assert caught.value.stop_confirmed is False
+    assert "NOT confirmed" in str(caught.value)
+    provider.stop = real_stop
+
+
 def test_refusals_are_rows_not_log_lines(cp, clock, provider, make_orchestrator):
     """Every refusal in these shapes is a durable action row (D-0001)."""
 

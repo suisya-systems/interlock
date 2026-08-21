@@ -71,10 +71,15 @@ post-spawn validation, both fenced. Two shapes follow:
 - Stopped **inside the critical section** (admission committed, lease lost
   before the `exec`) — the process can come to exist. SQLite cannot make an
   `exec` transactional with a commit (`ACCEPTANCE.md` §2), so this window is
-  not claimed closed: the post-spawn validation detects the stale token on its
-  first write, the just-created child is terminated at once, and the measured
-  detection→termination latency is carried on `LoserTerminated` and reported
-  in the gate record as the residual it is.
+  not claimed closed: the next fenced write — the post-spawn validation, or
+  the read-back commit itself (the walk's final step is *always* a fenced
+  write; a phase that needs no confirm still ends in a fenced gate, so a
+  claimant whose binding was moved by the takeover is refused rather than
+  returned as success) — detects the stale token, the just-created child is
+  ordered stopped at once, and `LoserTerminated` carries both the measured
+  detection→stop latency and the provider's own stop verdict
+  (`stop_confirmed`): an unconfirmed stop is reported as unconfirmed, never
+  as a termination that happened.
 
 ## 4. The recovery protocol (resolve first, resume only, adopt when alive)
 
@@ -99,9 +104,17 @@ anything.
 ## 5. What is tested where
 
 - `tests/gate_item2/test_orchestrator_walk.py` — the mediated shapes against a
-  scripted provider that refuses nothing: U27 and U32 mediated, SIGSTOP →
-  expiry → takeover → return on both sides of the admission write, recovery at
-  all four points, orphan non-adoption, durable refusals.
+  scripted provider that refuses nothing: U27 and U32 mediated, the stopped
+  claimant returning on both sides of the admission write *and* during the
+  read-back stall (simulated deterministically: the injected clock advances
+  past expiry and the epoch is raised at the exact seam a stopped process
+  would resume from; no real `SIGSTOP` is sent), recovery at all four points,
+  orphan non-adoption, durable refusals, and the honest stop verdict on an
+  unconfirmable termination.
+- `tests/gate_item2/test_session_driver_harness.py` — the session driver's own
+  battery (its substitute for the three-role conformance suite): anchor
+  reachability, kill-and-recover per injection point, and trace determinism,
+  in the default profile.
 - `tests/gate_item2/test_mediated_real_provider.py` — the same over the real
   C2 provider and its fake CLI: argv/binding/stream carry one identity;
   supervisor-only kill → adoption without a second spawn; supervisor+child
@@ -130,3 +143,10 @@ anything.
 - The orchestrator's `default_identity_confirmation` withholds confirmation on
   `exited-N` readouts (an exit is not an identity); a different provider
   vocabulary needs its own policy, injected at construction.
+- The harness's "between commit and spawn" anchor sits after both admission
+  writes; the narrower `prepared`-committed-mark-not crash state is exercised
+  by constructed rows in the mediated suite, not by a real kill (there is no
+  anchor between the two commits, deliberately — the mark is part of the
+  admission).
+- The stopped-claimant shapes are deterministic simulations (clock + epoch at
+  the resume seam); the harness's real signals are the `SIGKILL` cases.

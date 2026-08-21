@@ -168,11 +168,14 @@ class IdentityUnconfirmed(OrchestrationRefused):
 class LoserTerminated(OrchestrationRefused):
     """A claimant lost its lease inside the spawn-admission critical section.
 
-    The post-spawn validation was refused (``StaleWriterRefused``), so the
-    process this claimant had just created was terminated immediately. The
-    refusal is already durable (an ``action`` row, written by the lease
-    module); this exception carries the measured termination latency, which
-    the gate record's residual reports rather than implies away.
+    A fenced write was refused (``StaleWriterRefused``), so the process this
+    claimant had created was ordered stopped immediately. The refusal is
+    already durable (an ``action`` row, written by the lease module); this
+    exception carries the stop verdict and the measured latency, and it never
+    overstates them: ``stop_confirmed`` is the provider's own answer, and a
+    stop the provider could not confirm (S1's ``stop`` contract: acceptance is
+    not evidence the session stopped) is surfaced as exactly that rather than
+    reported as a termination that happened.
     """
 
     def __init__(
@@ -184,6 +187,7 @@ class LoserTerminated(OrchestrationRefused):
         detected_at_ms: int,
         terminated_at_ms: int,
         stop_answer: object,
+        stop_confirmed: bool,
     ) -> None:
         super().__init__(message)
         self.session_id = session_id
@@ -191,9 +195,12 @@ class LoserTerminated(OrchestrationRefused):
         self.detected_at_ms = detected_at_ms
         self.terminated_at_ms = terminated_at_ms
         self.stop_answer = stop_answer
+        self.stop_confirmed = stop_confirmed
 
     @property
     def termination_latency_ms(self) -> int:
+        """Detection to the provider's stop answer -- not a claim beyond it."""
+
         return self.terminated_at_ms - self.detected_at_ms
 
 
@@ -332,26 +339,78 @@ class SessionOrchestrator:
             self._connection, lease, write, now_ms=now, attempt_id=self._attempt_id()
         )
 
+    def _refuse_and_terminate(
+        self, refusal: StaleWriterRefused, session_id: str
+    ) -> "LoserTerminated":
+        detected = self._now_ms()
+        stop_answer = self._provider.stop(session_id)
+        terminated = self._now_ms()
+        # The provider's own verdict, never assumed: an Ok is the post-stop
+        # readout of a session the provider reports stopped; a Failure means
+        # the child may still be live, and saying otherwise here would put a
+        # fabricated termination into the very record the residual is read
+        # out of.
+        stop_confirmed = isinstance(stop_answer, Ok)
+        outcome = (
+            f"was terminated ({terminated - detected} ms after detection)"
+            if stop_confirmed
+            else (
+                f"was ordered stopped but the stop is NOT confirmed "
+                f"({terminated - detected} ms after detection): {stop_answer!r}"
+            )
+        )
+        return LoserTerminated(
+            f"claimant {self._holder!r} lost the lease on "
+            f"{self._resource!r} inside the spawn-admission critical section; "
+            f"the process for session {session_id!r} {outcome}",
+            session_id=session_id,
+            refusal=refusal,
+            detected_at_ms=detected,
+            terminated_at_ms=terminated,
+            stop_answer=stop_answer,
+            stop_confirmed=stop_confirmed,
+        )
+
     def _validate_after_spawn(self, lease: Lease, session_id: str, *, moment: str) -> None:
         """Post-spawn half of the critical section: refuse-and-terminate."""
 
         try:
             self._post_spawn_gate(lease, moment=moment)
         except StaleWriterRefused as refusal:
-            detected = self._now_ms()
-            stop_answer = self._provider.stop(session_id)
-            terminated = self._now_ms()
-            raise LoserTerminated(
-                f"claimant {self._holder!r} lost the lease on {lease.resource!r} "
-                f"inside the spawn-admission critical section; the process for "
-                f"session {session_id!r} was terminated "
-                f"({terminated - detected} ms after detection)",
-                session_id=session_id,
-                refusal=refusal,
-                detected_at_ms=detected,
-                terminated_at_ms=terminated,
-                stop_answer=stop_answer,
-            ) from refusal
+            raise self._refuse_and_terminate(refusal, session_id) from refusal
+
+    def _commit_readback(
+        self, lease: Lease, session_id: str, readout: SessionReadout
+    ) -> None:
+        """The walk's final step is always a fenced write, whatever the phase.
+
+        The naive shape here -- read the phase, skip the commit when it is
+        already ``identity_confirmed`` -- is an unfenced read-then-decide, and
+        it is wrong in exactly the case that matters: the one writer that
+        finds the phase already confirmed *without having confirmed it* is a
+        stale claimant whose binding was moved by the takeover. So when the
+        confirm itself has nothing left to write, the walk still ends in a
+        fenced gate write: a live holder passes, and a stale one is refused,
+        recorded, and its process terminated -- never returned as success.
+        """
+
+        current = session_binding.binding_for_session(self._connection, session_id)
+        try:
+            if current is not None and current.binding_phase == PHASE_SPAWNED:
+                session_binding.confirm_identity(
+                    self._connection,
+                    lease,
+                    session_id=session_id,
+                    run_id=self._run_id,
+                    provider_state=readout.provider_state or "",
+                    now_ms=self._now_ms(),
+                    attempt_id=self._attempt_id(),
+                )
+            else:
+                self._post_spawn_gate(lease, moment="readback-final")
+        except StaleWriterRefused as refusal:
+            raise self._refuse_and_terminate(refusal, session_id) from refusal
+        self._cross(SEAM_AFTER_READBACK_COMMIT)
 
     # -- provider answers ----------------------------------------------------
 
@@ -408,8 +467,12 @@ class SessionOrchestrator:
 
         lease = self._acquire()
         session_id = self._uuid_factory()
-        now = self._now_ms()
         self._cross(SEAM_BEFORE_ADMISSION_COMMIT)
+        # The fence's now_ms is captured *after* the seam: the seam is an
+        # arbitrary external delay, and a timestamp taken before it would let
+        # a claimant stopped across its own expiry pass the fence's liveness
+        # test with a stale clock.
+        now = self._now_ms()
         session_binding.prepare_binding(
             self._connection,
             lease,
@@ -449,18 +512,7 @@ class SessionOrchestrator:
         self._cross(SEAM_AFTER_SPAWN_BEFORE_READBACK_COMMIT)
         self._validate_after_spawn(lease, session_id, moment="after-start")
         readout = self._await_identity(session_id)
-        current = session_binding.binding_for_session(self._connection, session_id)
-        if current is not None and current.binding_phase != PHASE_IDENTITY_CONFIRMED:
-            session_binding.confirm_identity(
-                self._connection,
-                lease,
-                session_id=session_id,
-                run_id=self._run_id,
-                provider_state=readout.provider_state or "",
-                now_ms=self._now_ms(),
-                attempt_id=self._attempt_id(),
-            )
-            self._cross(SEAM_AFTER_READBACK_COMMIT)
+        self._commit_readback(lease, session_id, readout)
         return self._outcome(session_id, path, readout)
 
     def recover(self) -> OrchestrationOutcome:
@@ -525,16 +577,7 @@ class SessionOrchestrator:
         self._unwrap("resume", answer)
         self._validate_after_spawn(lease, session_id, moment="after-resume")
         readout = self._await_identity(session_id)
-        if binding.binding_phase == PHASE_SPAWNED:
-            session_binding.confirm_identity(
-                self._connection,
-                lease,
-                session_id=session_id,
-                run_id=self._run_id,
-                provider_state=readout.provider_state or "",
-                now_ms=self._now_ms(),
-                attempt_id=self._attempt_id(),
-            )
+        self._commit_readback(lease, session_id, readout)
         return self._outcome(session_id, "resumed", readout)
 
     def _outcome(

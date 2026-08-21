@@ -1633,6 +1633,19 @@ def assert_invariants(
                         "re-identification yielded nothing; exactly-one is "
                         "at-most-one plus this non-empty read"
                     )
+                for row in rows:
+                    # A surviving binding that never reached the read-back
+                    # commit re-identified nothing: the row exists, but the
+                    # identity was never reconciled with what the provider
+                    # actually assigned (D-0027), which is the specific thing
+                    # this invariant is cited as evidence for.
+                    if case["restart_after"] and row["binding_phase"] != "identity_confirmed":
+                        fail(
+                            f"{role}: the surviving binding for "
+                            f"{row['session_id']!r} is {row['binding_phase']!r}, "
+                            "not identity_confirmed -- recovery finished "
+                            "without committing the read-back"
+                        )
             else:  # pragma: no cover - guarded by the vocabulary check below
                 raise ContractViolation(
                     f"{name!r} is a named invariant with no assertion behind it. "
@@ -1824,11 +1837,16 @@ def assert_invariants(
             anchor = anchors[0].anchor
             if anchor not in contract.CHECKPOINTS:
                 continue
-            if anchors[0].operation != contract.OPERATION_ATTEMPT:
-                # Only the delivery path has effect windows. A kill armed on
-                # ``ack`` sits *after* that role's delivery by construction, so
-                # counting effects against the anchor's name would be reading a
-                # window that operation does not have.
+            if anchors[0].operation not in (
+                contract.OPERATION_ATTEMPT,
+                contract.OPERATION_SESSION_START,
+            ):
+                # Only record -> effect -> result paths have effect windows: the
+                # delivery attempt, and #18's session-start (whose effect is
+                # the spawn, counted from the destination's own ledger). A kill
+                # armed on ``ack`` sits *after* that role's delivery by
+                # construction, so counting effects against the anchor's name
+                # would be reading a window that operation does not have.
                 continue
             occurrence = anchors[0].occurrence
             present = sum(counted.values())

@@ -26,9 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commit and spawn, between spawn and the read-back commit, after the
   read-back commit -- through `session_driver.py`, the second adapter, over
   the real orchestrator and the real C2 provider with a fake CLI that refuses
-  nothing; new observables read the destination's own records
-  (`one-binding-per-run`, `live-processes-per-session`,
-  `transcript-single-writer`). `tests/gate_item2/` carries the mediated U27 /
+  nothing; one new SQL invariant reads the reopened control plane
+  (`one-binding-per-run`: at-most-one is the index's, non-empty-and-confirmed
+  is asserted after recovery) and two new destination observables read the
+  destination's own records (`live-processes-per-session` from the spawn
+  ledger's interval overlap plus a live scan, `transcript-single-writer` from
+  the captured event streams). `tests/gate_item2/` carries the mediated U27 /
   U32 / SIGSTOP-takeover shapes, and
   `investigation/i18-crash-window-characterisation.md` re-measures the hazard
   live on CLI 2.1.238 (U27 3/3 both-admitted; window edge between 2 s and 3 s
