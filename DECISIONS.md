@@ -70,9 +70,21 @@ figures are **measured baseline**.
 | D-0026 | The spike's durable output is the interface and the tests; implementations are throwaway by default | accepted |
 | D-0027 | Gate item 2 fails on Agent View; C2 becomes the spike's `SessionProvider` | accepted |
 | D-0028 | Carried end-to-end tests land as failing specifications; pane-liveness lease release is discarded with the pane | accepted |
-| Q-0001 | SQLite schema/DDL and migration policy for the SoT tables | proposed |
+| D-0029 | The production schema is authored and migrated on its own terms; the spike schema is not promoted | accepted |
+| D-0030 | The event spine fans out per consumer at append time, in one transaction with the enqueue | accepted |
+| D-0031 | The time base: detection latency budgets per incident class, and a reconcile period derived from them | accepted |
+| D-0032 | Owners for the retired loop's non-detection duties, and gate ownership as stage-derived policy data | accepted |
+| D-0033 | CI observations carry a full identity and project monotonically; arrival order never decides a verdict | accepted |
+| D-0034 | run↔PR linkage is many-to-many with exactly one live primary, and a repository is never resolved by working directory | accepted |
+| D-0035 | Watcher liveness is a fenced, unconditional trace against an expected scope roster | accepted |
+| D-0036 | A `Gate` is an entity whose stage is a projection of an immutable transition history, with a closed terminal taxonomy | accepted |
+| D-0037 | A gate's relay stages advance on the delivery ack, never on the send | accepted |
+| D-0038 | AC-9's cohort is terminal-in-period Interlock-owned runs, its unit is the AI invocation, and coverage is required output | accepted |
+| D-0039 | AC-10's ground truth is external: a labelled fixture suite and shadow reconciliation, with false termination counted at the applied action | accepted |
+| D-0040 | A measurement report records its own provenance, and the harness is read-only by capability | accepted |
+| Q-0001 | SQLite schema/DDL and migration policy for the SoT tables | resolved by D-0029 |
 | Q-0002 | Incident dedup key composition and re-notification rate in absolute time | proposed |
-| Q-0003 | Reconcile interval and the tolerable detection latency that justifies it | proposed |
+| Q-0003 | Reconcile interval and the tolerable detection latency that justifies it | resolved by D-0031 |
 | Q-0004 | Which concrete alternative `SessionProvider` if the Agent View gate fails | resolved by D-0025 |
 | Q-0005 | Canary duration, sample size, and numeric exit criteria | proposed |
 | Q-0006 | Retention and scrubbing policy for evidence references and incident history | proposed |
@@ -88,7 +100,7 @@ figures are **measured baseline**.
 | Q-0016 | Which quarry lessons from `discard` rows become decisions | proposed |
 | Q-0017 | What replaces the discarded desktop human-notification path | proposed |
 | Q-0018 | Whether repository-root, packaging, and CI files need a classification pass | proposed |
-| Q-0019 | Who owns each of the retired loop's non-detection duties | proposed |
+| Q-0019 | Who owns each of the retired loop's non-detection duties | resolved by D-0032 |
 | Q-0020 | What an incompatible CLI capability probe implies for already-running sessions | proposed |
 | Q-0021 | What scaffold makes each Agent View gate item checkable before implementation | resolved by D-0020 |
 | Q-0022 | Whether a carried artifact may keep enumerating v1 pane vocabulary as a normative list | proposed |
@@ -1201,6 +1213,566 @@ with. Not drawn from Issue #740.
 
 ---
 
+## D-0029 — The production schema is authored and migrated on its own terms; the spike schema is not promoted
+
+**Context.** `Q-0001` has been open since the beginning: `D-0001` names the SoT entities but not
+their columns, keys, indices, per-item single-writer assignment, or how schema changes reach a live
+database. `D-0026` says the spike's `spike_schema.sql` is throwaway by default and that the failure
+mode to avoid is a spike schema becoming *the* schema by inertia. G3 (`#64`) and G4 (`#65`) need
+tables for events, CI observations, run↔PR linkage and gates; adding them to the spike schema would
+promote it by accident, which is the one outcome `D-0026` was written to prevent. `Gate` was
+additionally absent from `D-0001`'s entity list while both Issues treat it as first-class.
+
+**Decision.** The production control-plane schema is **authored**, not copied from the spike, and it
+lives in `src/claude_org_runtime/control_plane/migrations/` as numbered, forward-only steps with a
+`schema_migration` ledger, a distinct `PRAGMA application_id`, checksum verification of
+already-applied steps, refusal of a database ahead of the code, and migration as an explicit call
+separate from opening. There are no down migrations and there is no spike-to-production converter.
+`docs/production-schema.md` is the DDL, and it records for every table whether its semantics are
+carried verbatim from the spike, re-derived, or new — which is the record `Q-0001` asks for.
+
+The `D-0001` SoT entity list is extended with `event`, `event_consumption`, `consumer`,
+`consumer_subscription`, `repository`, `pull_request`, `run_pr_link`, `ci_observation`,
+`watcher_scope`, `watcher_liveness`, `gate`, `gate_transition`, `gate_relay`, and `ai_invocation`.
+
+The per-item single-writer table is `docs/production-schema.md` §4.2, and it turns on one
+distinction `Q-0001` does not make: **single-writer discipline governs state items that are updated
+in place; append-only tables are governed by identity uniqueness instead.** Without that
+distinction the event spine could not have several producers, which is what `#64` requires of it.
+`run.status` transitions stay exclusively the Secretary's — v1's 2026-07-20 review requirement,
+which `Q-0001` records as never having been restated for Interlock, is restated here.
+
+**Consequences.**
+- `Q-0001` is resolved by this entry. Nothing in the spike is promoted; where the production schema
+  agrees with the spike, the agreement is recorded per table as a re-derivation, not inherited.
+- A CI watcher observing a merge may not complete a run: it appends an event, and the Secretary
+  makes the transition. v1 collapsed those roles and the collapse is how a repo-resolution mistake
+  wrote a foreign PR's metadata onto a run row.
+- The measurement harness can be read-only by construction, because migration is not a side effect
+  of opening (`D-0040`).
+- `Q-0002` and `Q-0006` stay open and are not narrowed: `incident.dedup_key` stays non-unique, no
+  re-notification window appears in any table, and every table forbids `DELETE` — a posture, not a
+  retention policy.
+- `task` and `assessment` remain without DDL. They are named by `D-0001` and exercised by neither G3
+  nor G4; the first Issue that needs them writes their step.
+- Costs: a migration ledger and its checksum discipline are machinery the spike did not need, and
+  every future schema change is a file rather than an edit.
+
+**Status.** accepted
+
+**Source.** `docs/production-schema.md` §§2–4; Issues `#64`, `#65`; pre-implementation design review
+of the G3/G4/G6 drafts, 2026-08-21 (Blocker: "Q-0001 を解決せずに実装できない"). Resolves `Q-0001`.
+Not drawn from Issue #740.
+
+---
+
+## D-0030 — The event spine fans out per consumer at append time, in one transaction with the enqueue
+
+**Context.** `#64` asks for a single event spine: CI outcomes written once, every consumer reading
+from the same table, which removes v1's push-vs-poll duplication by construction. The design review
+found the hole: **"undrained" is undefined until it is defined per consumer.** With one `drained_at`
+column on the event, the first consumer to finish hides every other consumer's backlog — which
+reproduces `tools/relay_scan.py`'s documented failure, 134 terminal events accumulating undelivered
+for twenty days, through a different mechanism. A silent no-op is again indistinguishable from a
+clean scan.
+
+**Decision.** Consumption is **fanned out at append time**: appending one event is one transaction
+that inserts the event, reads the subscription table inside that same transaction, inserts one
+`event_consumption` row per subscribed consumer, and — for consumers whose consumption *is* a
+delivery — inserts the `outbox` row in the same transaction and links it. Any typed side table the
+event carries commits with it. The whole thing commits or none of it does.
+
+**"Undrained by C"** means a row in `event_consumption` with `consumer_id = C` and
+`status IN ('pending','failed')`. There is no global "undrained"; the phrase is only used with a
+consumer named. The cursor-shaped view — a consumer's drain frontier — is derived as
+`MIN(event_seq)` over its undrained rows, never stored, so it cannot disagree with the rows.
+
+**Consequences.**
+- There is no window in which an event exists with no delivery record, so the outbox is the only
+  delivery path and the reconcile pass is a backstop over the same rows rather than a second path.
+  This is what removes the push-vs-poll duplication; without the shared transaction, "single spine"
+  would be a table layout rather than a property.
+- Two exactly-once steps, each naming its `ACCEPTANCE.md` §2 mechanism: fact→enqueued is
+  `transactional_with_record`; enqueued→delivered stays the outbox's `destination_idempotency_key`.
+- Per-consumer rows were chosen over a per-consumer cursor because a cursor cannot express "event 5
+  failed, event 6 succeeded" and forces head-of-line blocking on every failure. The cost is N rows
+  per event, which is acceptable only because consumers are few — consistent with `D-0017`'s
+  premise that this system is not a unit of scale.
+- The spine's `seq` is an `AUTOINCREMENT` integer and a cursor over it is sound **only because
+  SQLite serialises write transactions**, so a committed gap is permanent and never back-filled.
+  This is a dependency, not folklore: the implementation carries a test that interleaves two
+  appending transactions and asserts no committed `seq` is observed out of commit order.
+- A `skipped` consumption must append a `consumption_skipped` event, so that a skip is
+  distinguishable from a consumer quietly dropping work.
+- A late-registering consumer's back-fill decision is made once, in its registration transaction,
+  and is visible in the rows.
+
+**Status.** accepted
+
+**Source.** `docs/production-schema.md` §5; Issue `#64`; Issue `#60` operator direction (single
+event spine); design review 2026-08-21 (Blocker: "「undrained」の意味が consumer ごとに定義されていない").
+Not drawn from Issue #740.
+
+---
+
+## D-0031 — The time base: detection latency budgets per incident class, and a reconcile period derived from them
+
+**Context.** `Q-0003` asks for the reconcile interval and the tolerable detection latency that
+justifies it, and records the 2026-07-20 review's demand that the requirement basis come first. It
+also records that the Issue's "10 minutes" appears only inside a projection of program tick counts —
+an assumption feeding an estimate, not a decision. G4's stage tolerances and AC-10's non-regression
+judgement are both unimplementable until these numbers exist.
+
+**Decision.** For each incident class three quantities are decided as **policy data**: a tolerance
+`T` (how long the condition may legitimately persist), a budget `L` (the ceiling on onset-to-alarm),
+and the reconcile period `P`, constrained by
+
+> **`T + P ≤ L`**
+
+because the pass can only notice a crossing at its next run. The classes and their values are
+`docs/time-base-policy.md` §3. The binding constraint is `min(L - T) = 2 min`, so:
+
+> **The reconcile period is 120 seconds.**
+
+The values live in `policy_detection_latency` / `policy_gate_stage_tolerance` /
+`policy_gate_stage_owner`, versioned by `policy_revision` and never updated in place, each revision
+carrying the `D-` entry that set it. Three clock rules hold throughout: tolerances are evaluated
+against our clock only (never the provider's `occurred_at_ms`); the evaluation clock is the caller's
+parameter, never the database's; and every window is half-open `[start, end)`.
+
+**Consequences.**
+- `Q-0003` is resolved by this entry, and `Q-0002` — which depends on it — becomes answerable.
+- The Issue's 10-minute figure is superseded as an input: at 120 s the reconcile pass contributes
+  roughly 5× the program ticks that figure assumed. That is accepted, because `D-0002` and
+  `ACCEPTANCE.md` §5 both say program-tick reduction is explicitly **not** the objective, and a
+  program pass takes no model turn (AC-1). Program ticks are traded for the latency AC-10 measures.
+- There is deliberately **no "human present / absent" modifier**, which `Q-0003` allows for: human
+  presence is not observable to the deterministic layer, and a tolerance varying on an unobservable
+  input cannot be evaluated deterministically. Human availability enters as a gate's explicit
+  `deadline_at_ms` instead — an input, not an inference.
+- A self-resolving condition is never detected and is **not** a miss; AC-10's miss counter counts
+  only conditions that persisted past their budget.
+- Suspension is expressed by a run status the predicates exclude, not by suppressing a tolerance:
+  exclusion by status is auditable, a suppressed tolerance is not.
+- Changing any number is a new `policy_revision`, so a past report can be recomputed under the
+  tolerances it was actually judged by.
+- These are **decisions, not measurements**, in the sense of this file's note on numbers. The only
+  measured input is the 2026-07-18…2026-07-25 baseline.
+
+**Status.** accepted
+
+**Source.** `docs/time-base-policy.md` §§1–4; Issues `#64`, `#65`, `#67`; `ACCEPTANCE.md` AC-10;
+design review 2026-08-21 (Blocker: "stage tolerance と AC-10 latency を決める Q-0003 が未解決").
+Resolves `Q-0003`. Not drawn from Issue #740.
+
+---
+
+## D-0032 — Owners for the retired loop's non-detection duties, and gate ownership as stage-derived policy data
+
+**Context.** `Q-0019` asks who owns each duty that retiring `/loop 3m` (`D-0002`) removed beyond
+detection: pull-fallback drain, curate-inflight management, CI relay, `pending_decisions` aging, and
+auto-stop. It requires only that each duty's new owner be made explicit; neither 2026-08-17 comment
+assigns them, and assuming they all fall to Dispatcher Core would be an invention. Separately, G4's
+`Gate` carries an `owner` field whose meaning — standing responsible party, or whoever currently
+holds the ball — was undefined, which made relay-gap reporting unable to name a responsible role
+deterministically.
+
+**Decision.** The duty owner table is `docs/time-base-policy.md` §6. In summary: pull-fallback drain
+and CI relay are Dispatcher Core's reconcile pass and have no separate path at all (`D-0030`);
+curate-inflight is the Curator's for the work and Core's for the aging; `pending_decisions` aging is
+Core's to detect and the Secretary's to act on; and **auto-stop has no automatic owner** — Core
+raises the incident, and the Secretary, a human, or a privileged handler executes.
+
+Gate ownership is **not a column**. `ball_holder` is a function of `(gate_type, stage)` and
+`standing_owner` is a function of `gate_type`; both live in `policy_gate_stage_owner`. A `relay_gap`
+incident names the ball holder; the standing owner answers for the class of decision overall.
+
+**Consequences.**
+- `Q-0019` is resolved by this entry, and the ownership half of G4's design is settled without a
+  field that means different things on different rows. Neither owner is stored on `gate`, so neither
+  can drift from the stage, and a report can say what ownership *was* by joining the effective
+  policy revision.
+- **v1's loop could stop a worker; Interlock's reconcile pass cannot.** That is a deliberate
+  behaviour change, not an omission: `D-0008` forbids Core pronouncing a verdict on an ambiguous
+  stall and `D-0004`/AC-6 forbid the AI executing. It is also why AC-10's false-termination counter
+  must be defined at the applied `action` (`D-0039`) — a pass with a quiet auto-stop would be
+  reintroducing the layer the fork exists to remove.
+- The escalation *policy* — what must be escalated — remains operating-layer prose, per `#65`.
+
+**Status.** accepted
+
+**Source.** `docs/time-base-policy.md` §6; `CHARTER.md` §4; Issues `#64`, `#65`; design review
+2026-08-21 (Minor: "Gate の `owner` が静的責任者か、現在ボールを持つ主体か不明"). Resolves `Q-0019`.
+Not drawn from Issue #740.
+
+---
+
+## D-0033 — CI observations carry a full identity and project monotonically; arrival order never decides a verdict
+
+**Context.** `#64` requires durable CI outcome ingestion. Without an identity, a re-poll, a CI rerun,
+a PR head update and a late arrival are indistinguishable, and the event spine's dedup key has
+nothing to be made of. Without an ordering rule, arrival-order last-write-wins lets a stale
+observation overwrite a newer one — reporting a red PR as green because the red observation was
+slower, which is `D-0006`'s verdict honesty violated in the most direct way available.
+
+**Decision.** A CI observation's identity is
+`(provider, repo_id, pr_number, head_sha, check_scope, scope_id, attempt)`, enforced by a unique
+index on `ci_observation` and rendered as the event's `dedup_key` so a re-poll is an idempotent
+no-op at the first statement of the append transaction. `head_sha` is a full 40-character lowercase
+SHA; an abbreviated SHA is not an identity.
+
+Observations are evidence and are never overwritten. The **current verdict** is a projection
+(`ci_current_verdict`, a view, not a column): only observations matching the PR's current
+`head_sha` are eligible, so **a head update invalidates prior verdicts rather than letting them be
+overwritten**; among eligible rows the order is `(attempt DESC, occurred_at_ms DESC, seq DESC)`; a
+`rollup` observation is eligible only where no fine-grained scope exists; **a late arrival that
+orders lower is stored and does not move the projection**; and disagreeing scopes resolve by
+severity `failed > timed_out > cancelled > indeterminate > passed`, with `no_run` meaning "no
+eligible evidence" rather than a pass.
+
+**Consequences.**
+- The verdict vocabulary is closed and keeps `indeterminate` and `no_run` separate from `failed`.
+  `indeterminate` is `OBSERVATION_UNAVAILABLE`'s CI shape (`D-0005`, `D-0006`) and is reserved for a
+  *continued* fetch failure, carrying v1's `tools/pr_watch.py` discipline forward.
+- `indeterminate` outranking `passed` in the severity order is deliberate: an unobservable check is
+  not a green one.
+- Storing rather than overwriting late arrivals means the table grows with evidence that never
+  affects a projection. That is the intended trade — `Q-0006` governs what is eventually done about
+  it.
+- Multi-provider support is not designed in: `provider` is `CHECK`ed to `'github'` alone, matching
+  `#64`'s statement that `gh` is the interface to GitHub and gate item 11's thin-seam target. A
+  second provider widens the `CHECK` in a migration step and brings its substitution test then.
+
+**Status.** accepted
+
+**Source.** `docs/production-schema.md` §6; Issue `#64`; `D-0006`; design review 2026-08-21 (Major:
+"poll の再取得、CI rerun、PR head 更新、遅延到着を区別する identity が未定義"). Not drawn from Issue #740.
+
+---
+
+## D-0034 — run↔PR linkage is many-to-many with exactly one live primary, and a repository is never resolved by working directory
+
+**Context.** On 2026-08-06 v1 recorded renga PR #302 with claude-org-ja PR #302's branch, commit and
+merge time, because the run→PR tools defaulted an omitted `--repo` to `gh repo view` — the cwd
+repository, always the home repo for the Secretary. The tool exited `ok`. Whether it corrupted
+silently or failed loudly depended only on whether the home repo happened to own that number.
+`#64` cites the incident; the linkage's cardinality and its repository identity were both undefined.
+
+**Decision.** Repository identity is `repository.repo_id`, **never a URL string**. `owner`/`name`
+are mutable and are the lookup key, matched case-insensitively while stored case-preserved;
+`provider_repo_id` — the provider's immutable id — is the identity where available, so a rename or
+transfer is absorbed on the existing row instead of forking the identity. A pull request is keyed
+`(repo_id, pr_number)`, which is sound because a provider does not reuse a PR number within a
+repository — so a *recreated* PR is a new number and therefore a new row.
+
+`run_pr_link` is many-to-many: a run may have several PRs across repositories, and a PR may be
+touched by several runs. **At most one link per run is `primary` at a time**, enforced by a partial
+unique index, and only the primary drives the run's completion transition.
+
+`run_pr_link.resolution` is `CHECK`ed to `('project_registry','explicit_operator','provider_event')`.
+**There is no value that means "we guessed from the working directory."** A run whose repository
+cannot be resolved by one of the three fails to link, and the failure is an incident, not a default.
+
+**Consequences.**
+- The three cardinality questions get three different answers, and the "which PR completes the run"
+  ambiguity is resolved by the primary rule without forbidding the cross-repo or shared-PR cases.
+- v1's `RepoResolutionError` — raise "so the caller can exit non-zero instead of writing a foreign
+  repo's PR onto the run" — becomes a `CHECK` constraint rather than a convention.
+- A run may be re-pointed by unlinking the primary with a recorded reason and linking another; both
+  links stay in the table, so the history of a re-point is auditable.
+- Storing `owner`/`name` case-preserved and folding only in the index is required by the use, not
+  cosmetic: the value is handed to `gh --repo` and recorded in payloads.
+
+**Status.** accepted
+
+**Source.** `docs/production-schema.md` §7; Issue `#64`; `docs/parity-audit.md` P4; design review
+2026-08-21 (Major: "cardinality と repository identity が不足"). Not drawn from Issue #740.
+
+---
+
+## D-0035 — Watcher liveness is a fenced, unconditional trace against an expected scope roster
+
+**Context.** `#64` requires a watcher heartbeat written unconditionally plus a reconcile pass over
+undrained events, because a dead `gh` watcher produces no row that proves it stopped — the silent
+no-op `tools/relay_scan.py` documents, where a broken cron accumulated undelivered events for twenty
+days and was found only when a human queried the ledger by hand. A single `last_heartbeat_at` cannot
+express four distinctions the failure needs: poll-succeeded-with-nothing versus poll-failed; a
+replaced watcher's late heartbeat; a scope with no watcher at all; and partial coverage.
+
+**Decision.** Two tables. `watcher_scope` is the **expected roster** — which scopes should be
+watched, at what interval — derived from work that exists (a scope is created when a run's primary
+PR is linked, retired when the PR terminates). `watcher_liveness` is written on **every attempt**,
+including the ones that observed nothing, carrying `last_result IN ('observed_change',
+'observed_no_change','error')`, separate `last_attempt`/`last_success`/`last_change`/`last_error`
+timestamps, and a `consecutive_errors` counter.
+
+The heartbeat write is **fenced inside the write** — the single-statement shape of
+`docs/lease-fencing.md`, validating the scope lease's holder and epoch as part of the `UPDATE`,
+because `ACCEPTANCE.md` §2 says expiry discovery alone is insufficient. A replaced watcher returning
+with its old epoch matches nothing; the refusal is recorded as an `action` row in `status='refused'`,
+never silently dropped.
+
+**Consequences.**
+- Three distinct incident classes fall out and are kept distinct because their remedies differ:
+  `watcher_silence` (a stopped process), `watcher_error_streak` (a broken credential — attempting but
+  only failing), and `watcher_scope_uncovered` (a roster entry with no liveness row at all).
+- The coverage query is the one a heartbeat table alone cannot express, and it is the direct answer
+  to the twenty-day failure: an unwatched scope is wrong the moment it exists, so its tolerance is
+  zero.
+- The roster is derived rather than hand-maintained, so it cannot fall out of date silently — which
+  would recreate the invisible-absence problem one level up.
+
+**Status.** accepted
+
+**Source.** `docs/production-schema.md` §8; Issue `#64`; `D-0001`, `D-0002`; design review 2026-08-21
+(Major: "`last_heartbeat_at` だけでは … 区別できない"). Not drawn from Issue #740.
+
+---
+
+## D-0036 — A `Gate` is an entity whose stage is a projection of an immutable transition history, with a closed terminal taxonomy
+
+**Context.** `docs/parity-audit.md` §1.2 records the operator direction that human gates are
+first-class `Gate` entities — owner, rationale, options, deadline, outcome — rather than journal
+events plus prose plus memory. `#65` gives the escalation form with stages received →
+presented-to-human → answered → forwarded-to-worker, and `#64` gives the merge-approval form; the
+audit notes they share the schema. The design review found two holes: a single `stage` plus
+`updated_at` cannot reconstruct when each stage was entered, by whom, or what was resent, corrected
+or answered verbatim; and `forwarded` was the only terminus, so a cancelled run, a withdrawn
+question, an expired deadline, an unanswerable question or a superseding question each leaves a
+permanently open row that either alarms forever or is quietly ignored.
+
+**Decision.** `gate_transition` is an **append-only, immutable history** — `UPDATE` and `DELETE` both
+raise — carrying `transition_kind IN ('open','advance','resend','correction','close')`, the actor
+kind and id, the writer epoch, the relay's `message_id` where one applies, a verbatim `body`, a
+`supersedes_seq` for corrections, and separate `occurred_at_ms` and `recorded_at_ms`. Only `advance`
+moves the stage. `gate.stage`/`stage_seq` are a **projection**, enforced by a trigger that lets them
+name only an existing `advance` transition of that gate, and they never walk backwards. There is no
+backwards edge in the transition table at all: a question needing re-asking is a **new gate** linked
+by `superseded_by`, because a rewind would destroy the aging basis the relay-gap detector reads.
+
+The terminal taxonomy is closed: `answered_and_forwarded`, `withdrawn`, `subject_gone`, `expired`,
+`unanswerable`, `superseded`. A gate is closed iff it has an outcome, and only open gates are aged.
+
+`deadline_at_ms` is the **business deadline and is not a relay tolerance**. Missing it produces
+`outcome='expired'`; a relay tolerance is a property of a stage and produces a `relay_gap` incident.
+
+**Consequences.**
+- Every item the review listed is reconstructible by query: stage entry times, actors, resends,
+  corrections, and the verbatim answer — a changed answer is a `correction`, so both texts survive.
+- `subject_gone` gets a mechanism, not only a name: the reconcile pass closes gates whose subject run
+  reached a terminal status. Without the sweep the outcome would exist in the enumeration and never
+  be used, which is the permanent-open-row problem with extra vocabulary.
+- `presented → answered` has **no relay tolerance** — a slow human is not a gap (`#65`) — and this
+  is expressed as a `NULL` tolerance row in policy data rather than as a special case in the
+  detector query, so a future gate type cannot be given a human tolerance by accident.
+- Relay-gap detection stays a deterministic query over incomplete transitions with the AI nowhere in
+  the path, which `#65` requires and `D-0008` requires more generally.
+- A human answering a question is an **actor, not a writer**: the transition is appended through
+  Dispatcher Core, because admissibility is a deterministic check and `D-0008` puts deterministic
+  evaluation in Core's row.
+
+**Status.** accepted
+
+**Source.** `docs/production-schema.md` §9; `docs/parity-audit.md` §1.2; Issues `#64`, `#65`; design
+review 2026-08-21 (Major: "単一 `stage` と `updated_at` だけでは … 復元できない"、"`forwarded-to-worker`
+以外の終端がない"). Not drawn from Issue #740.
+
+---
+
+## D-0037 — A gate's relay stages advance on the delivery ack, never on the send
+
+**Context.** `presented` and `forwarded` are claims about something that happened *outside* SQLite.
+Advancing the stage before sending loses the relay to a kill in between, and the gate then looks
+presented when nobody saw it; advancing after sending, as its own write, re-sends on recovery and
+the human sees the question twice. Reordering the two operations does not help, because the gap is
+between a durable write and an external effect — the case `ACCEPTANCE.md` §2 says SQLite alone
+cannot resolve, since a query cannot distinguish "the effect completed" from "it never started".
+
+**Decision.** A relay is enqueued through the outbox and **the stage follows the ack**:
+(1) one transaction inserts a `gate_relay` row and its `outbox` row with
+`dedup_key = 'gate/<gate_id>/<to_stage>'`; (2) the delivery worker delivers, the destination
+deduplicating on that key; (3) the ack is recorded once, by the existing set-once trigger;
+(4) a second transaction appends the `advance` transition referencing that `message_id` and updates
+the projection. `gate_relay`'s `(gate_id, to_stage)` primary key makes the enqueue itself idempotent,
+so a restarted Secretary re-enqueuing collides and takes the existing `message_id`; retries
+accumulate on one outbox row rather than producing a second message.
+
+The reconcile pass completes the crash window: an acked relay with no matching advance transition is
+advanced, idempotently, guarded by the same admissibility check as any other advance.
+
+**`presented` means the human window's durable acknowledgement that the gate entered the
+human-visible queue** — the Secretary's ack of the relay. It is not a read receipt, because a read
+receipt is unobservable here and a tolerance measured against an unobservable event cannot be
+evaluated deterministically; and it is not "the message was sent", because that is the crash window
+this entry closes. `D-0016` makes the Secretary the single human window, so its queue admission is
+the observable boundary that exists.
+
+**Consequences.**
+- Both `ACCEPTANCE.md` §2 mechanisms appear, each named for its step: the enqueue is
+  `transactional_with_record`, the delivery is `destination_idempotency_key`.
+- **`presented` proves the question reached the human's queue, not that a human saw it**, and this
+  is the reason the `presented → answered` leg is governed by the gate's `deadline_at_ms` rather than
+  by a relay tolerance (`D-0036`).
+- A relay enqueued and never acked is a *delivery* stall, detected by its own predicate over
+  `gate_relay` joined to `outbox`, not by ageing a stage that is legitimately unchanged. The two
+  states are distinguishable only because the advance is ack-gated.
+- `outbox.dedup_key` is deliberately **not** made unique: the spike's comment explains why that
+  column is non-unique on purpose, and gate relays get their own identity table instead of changing
+  a shared table's semantics.
+
+**Status.** accepted
+
+**Source.** `docs/production-schema.md` §9.5; `ACCEPTANCE.md` §2 (fault injection, mid-flight kill);
+Issue `#65`; design review 2026-08-21 (Major: "送信後・stage commit 前の kill により重複、commit 後・
+送信前なら欠落"). Not drawn from Issue #740.
+
+---
+
+## D-0038 — AC-9's cohort is terminal-in-period Interlock-owned runs, its unit is the AI invocation, and coverage is required output
+
+**Context.** AC-9 states its targets "per 100 worker runs" — a normalisation, not a cohort. The
+design review found the denominator, the prompt unit, the period-crossing rule and the
+missing-telemetry rule all undefined, and noted that treating a missing usage figure as zero
+overstates the reduction in exactly the criterion the reduction is judged by.
+
+**Decision.** The **cohort** is runs that reached a terminal status inside the report period and were
+Interlock-owned for their entire life. A started-run cohort is right-censored by construction and
+its bias always flatters the target; ownership is decided once at run start (`D-0013`) so the second
+clause is automatic and is asserted rather than assumed; and the v1 baseline normalises *completed*
+runs, so a started-run cohort would not be comparable to it. Runs outside the cohort go to an
+`excluded` bucket with a reason — including `started_before_period`, which is excluded from the rate
+rather than contributing a partial numerator to a full denominator.
+
+**One AI prompt is one Dispatcher AI invocation**: one row in `ai_invocation`. Transport retries of
+one invocation count once; **tool-call round trips inside one invocation do not add prompts.** The
+comparable v1 numerator is its 3,531 unique assistant/model responses, not its 4,960 tool calls — a
+harness counting tool calls would report a reduction that does not exist. Cache-read tokens are
+neither input nor output tokens (`ACCEPTANCE.md` §5) and never enter the arithmetic.
+
+**Coverage and the excluded-reason breakdown are required output. A reduction rate printed without
+them is not a valid report.** `ai_invocation.usage_status IN ('reported','partial','unavailable')`
+makes a missing usage record a named fact; the report prints coverage, an observed reduction over
+covered invocations only, and a **conservative** reduction imputing missing invocations at the p95
+of the covered distribution, so the acceptance figure is a lower bound.
+
+**Consequences.**
+- AC-1 is the same measurement from the other side: every invocation row must carry an
+  `incident_id`, and a row without one is reported as an AC-1 violation rather than folded into the
+  count.
+- **The harness emits no pass/fail verdict.** Whether a cohort is large enough to judge on is canary
+  exit criteria — `Q-0005`, open — and a threshold invented here would answer it by inertia.
+- The provider seam is one adapter filling three usage columns; everything else in the harness is
+  provider-neutral, which is `#67`'s split.
+- The p95 imputation is a choice, not a law, and is recorded in the report header so a reader can
+  recompute under a different one.
+
+**Status.** accepted
+
+**Source.** `docs/measurement-harness.md` §2; `ACCEPTANCE.md` AC-9, §5; Issue `#67`; design review
+2026-08-21 (Major: "denominator と telemetry completeness が未定義"). Not drawn from Issue #740.
+
+---
+
+## D-0039 — AC-10's ground truth is external: a labelled fixture suite and shadow reconciliation, with false termination counted at the applied action
+
+**Context.** Interlock's own tables cannot contain a miss. A missed condition produces no incident
+row, so an aggregate over `incident` counts what was detected and is structurally blind to what was
+not; the latencies that survive are the fast ones if the slow ones were dropped. Any harness reading
+only our rows measures its own recall as 100%. Separately, `D-0004` and AC-6 mean the Dispatcher AI
+cannot terminate anything, so counting recommendations would compare Interlock's recommendations
+against v1's executions — and counting Interlock's executions of a capability it does not have would
+report a structural zero as a triumph.
+
+**Decision.** Ground truth comes from **two sources outside the thing being measured**.
+
+**Source A, the labelled fixture suite** — AC-2's corpus extended with an `expected.json` per case
+carrying `incident_class` (or `none`), `onset_offset_ms`, `budget_ms`, `fact_state`,
+`must_not_recommend`, and `provenance`. A miss is a labelled condition with no matching incident
+within its budget; a false positive is a `none` case that produced one; latency is exact because the
+clock is synthetic. **Negative cases are mandatory** — `D-0006` requires observation-failure
+fixtures, and a positive-only corpus would let a detector that alarms on everything score a perfect
+miss rate.
+
+**Source B, shadow reconciliation** — episode-to-episode, not row-to-row, over declared correlation
+keys per subject class (`docs/measurement-harness.md` §3.3). **Unmatched buckets are first-class
+output** — `both`, `interlock_only`, `v1_only`, `unmatched_key`, `censored` — carrying forward v1's
+reporter policy of an explicit unmatched bucket and never a silent drop. A `v1_only` episode is a
+*candidate* miss, adjudicated against the labels or by a human, never silently converted into a miss
+count and never silently discarded.
+
+**A false termination is an `action` row with `kind='terminate_session'` and `status='applied'` whose
+subject was not in fact stuck**, decided by the fixture label, then the subject's own subsequent
+evidence, then human adjudication — and `undetermined` where none of the three settles it, which is
+`D-0006` applied to the measurement instead of the detection.
+
+**Every episode's observation window is right-censored**: an episode whose window is not fully inside
+the report period is `censored`, excluded from the miss and latency numerators, and counted.
+
+**Consequences.**
+- The fixture suite is the ground truth that exists **before** the canary, which matters because
+  AC-10 gates the canary and the shadow source only exists during it.
+- Without censoring, every report boundary manufactures misses out of episodes detected seconds after
+  the period ended, and the manufactured rate rises as the period shortens. The censored count is
+  printed because a large one means the period is too short for the budgets being judged.
+- Three supporting series are reported beside the false-termination count — `recommended_terminate`,
+  `recommended_but_not_applied`, `applied_terminate` — so the AI's precision and the human gate's
+  value stay visible rather than being hidden by a headline number.
+- The escalation correlation key is **positional within a run** and is the weakest join in the
+  reconciliation; its failures surface as unmatched episodes rather than wrong pairings, which is
+  the safe direction, and a canary producing many of them is telling us the key needs replacing.
+
+**Status.** accepted
+
+**Source.** `docs/measurement-harness.md` §3; `ACCEPTANCE.md` AC-2, AC-6, AC-10; `CHARTER.md` §4;
+Issue `#67`; design review 2026-08-21 (Blocker: "miss / false termination の独立した ground truth が
+ない"、Minor: "watcher candidate、AI recommendation、human approval、実行済み termination のどこを
+数えるか未定義"). Not drawn from Issue #740.
+
+---
+
+## D-0040 — A measurement report records its own provenance, and the harness is read-only by capability
+
+**Context.** `ACCEPTANCE.md` §3 condition 5 requires shadow observation to be read-only **enforced by
+capability, not by convention**, and AC-7 requires a divergence report to exist. The design review
+added that a report which does not record its period, versions, query definitions and input database
+identity cannot be reproduced later — and v1's own reporter records the concrete trap: the ordinary
+connect helper "would happily run forward migrations", so a report tool using it is a writer.
+
+**Decision.** The harness opens the database `mode=ro` with `PRAGMA query_only=ON`, holds no lease
+and no writer epoch, and never calls the migrator — which `D-0029` keeps as an explicit call
+separate from opening, so this is achievable rather than aspirational.
+
+Every report carries a provenance header in both renderings: half-open period bounds, tool version,
+database path with `application_id`/`user_version`, a database fingerprint, the
+`schema_migration` head, the **`policy_revision_id`** the latencies were judged under, the **set** of
+`detector_version` and `adapter_version` values observed, the query definitions as text with a hash
+over the set, the fixture suite reference with its positive/negative split, the imputation rule, and
+the coverage, censoring and unmatched-bucket counts.
+
+A period spanning more than one `detector_version` or `policy_revision_id` is **non-homogeneous** and
+the report says so at the top rather than averaging across the change.
+
+**Consequences.**
+- Reporting the *set* of detector versions rather than a single value is the report's obligation
+  under `Q-0009`, which stays open: exposing the set is not the same as deciding cross-version
+  compatibility, and collapsing it would hide the thing `Q-0009` exists to settle.
+- The database fingerprint is over row counts and `MAX(seq)`/`MAX(rowid)` per table read — enough to
+  prove two reports read the same state, cheap enough to run every time. A full content hash sits
+  behind a flag for the canary's final report, where the cost is paid once.
+- Query definitions travel as data, in the same spirit as the spike's `RECONSTRUCTION_QUERIES`, so a
+  reader can run them by hand against a recovered database.
+- The report emits no go/no-go verdict, for the same reason `D-0038` gives: `ACCEPTANCE.md` §3 says
+  AC-9's targets are not canary thresholds and does not convert one into the other, so neither does
+  the instrument.
+
+**Status.** accepted
+
+**Source.** `docs/measurement-harness.md` §§1, 5, 6; `ACCEPTANCE.md` AC-7, §3; Issue `#67`; design
+review 2026-08-21 (Minor: "report は read-only に加え、期間、schema/detector version、adapter version、
+query definition、入力 DB identity/hash を記録しないと後日再現できない"). Not drawn from Issue #740.
+
+---
+
 ## Open questions
 
 These are gaps where implementation needs an answer and Issue #740 provides no basis. They are
@@ -1209,7 +1781,7 @@ number) and marking the question resolved by that ID; `Q-` IDs are stable and ar
 
 ### Q-0001 — What is the concrete SQLite schema/DDL and migration policy for the SoT tables?
 
-**Status.** proposed
+**Status.** resolved by D-0029
 
 **Question.** D-0001 names the SoT tables (`run`, `task`, `session`, `lease`, `incident`,
 `assessment`, `action`, `outbox`) but not their columns, keys, indices, per-item single-writer
@@ -1244,7 +1816,7 @@ fixtures — a key too broad suppresses genuine incidents, too narrow re-notifie
 
 ### Q-0003 — What is the reconcile interval, and what tolerable detection latency justifies it?
 
-**Status.** proposed
+**Status.** resolved by D-0031 (with D-0032)
 
 **Question.** D-0002 keeps a low-frequency reconcile loop but does not give it a period, nor state
 the detection latency the organisation is willing to accept.
@@ -1531,7 +2103,7 @@ Issues that touch them. The package rename is tracked separately as Q-0008.
 
 ### Q-0019 — Who owns each of the retired loop's non-detection duties?
 
-**Status.** proposed
+**Status.** resolved by D-0032 (with D-0031)
 
 **Question.** Retiring `/loop 3m` (D-0002) removes more than detection. The 2026-07-20 review
 enumerates the loop's other duties: pull-fallback drain (the DELEGATE receive path when the sidecar

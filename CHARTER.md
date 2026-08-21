@@ -207,6 +207,9 @@ base release **`v0.1.42`**.
 | [`DECISIONS.md`](./DECISIONS.md) | The canonical, append-only design decisions with stable IDs (`D-00NN`), each with context, decision, consequences, status, and source. Also holds the canonical open-questions list (`Q-00NN`). Every other document cites it by ID. |
 | [`PORTING_LEDGER.md`](./PORTING_LEDGER.md) | The per-path carry / rewrite / discard record against the fork base commit, with a reason and a decision ID for each row. |
 | [`ACCEPTANCE.md`](./ACCEPTANCE.md) | The Agent View gate checklist and how each item is verified; fault-injection targets; the one-worker canary and run-boundary rollback conditions; and what happens if the gate fails. |
+| [`docs/production-schema.md`](./docs/production-schema.md) | The production control-plane DDL, its migration policy, and the per-item single-writer table (D-0029, resolving Q-0001), plus the event-spine, CI-ingestion, run↔PR-linkage, watcher-liveness and `Gate` schemas. |
+| [`docs/time-base-policy.md`](./docs/time-base-policy.md) | Detection latency budgets per incident class, the reconcile period derived from them, gate stage tolerances, and the owner of each duty the retired loop gave up (D-0031, D-0032, resolving Q-0003 and Q-0019). |
+| [`docs/measurement-harness.md`](./docs/measurement-harness.md) | What AC-9 and AC-10 are measured over, where their ground truth comes from, and what a report records about itself (D-0038, D-0039, D-0040). |
 
 ---
 
