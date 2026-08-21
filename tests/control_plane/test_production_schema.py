@@ -583,6 +583,110 @@ SELECT g.gate_id, g.gate_type, g.stage, g.stage_entered_at_ms,
 
 
 # --------------------------------------------------------------------------
+# section 5 -- the outbox status lattice (0003_outbox_cancelled_status.sql)
+# --------------------------------------------------------------------------
+
+
+def test_a_pending_or_delivered_message_may_be_cancelled_and_a_cancelled_one_is_terminal(cp):
+    # Section 5's widened vocabulary: 'cancelled' is what a message nobody
+    # wants sent any more moves to, and it is TERMINAL -- with no edge out, a
+    # retired message cannot be resurrected into the delivery path by any
+    # later writer.
+    add_outbox(cp, "msg-pending", dedup_key="dk-p")
+    add_outbox(cp, "msg-delivered", dedup_key="dk-d",
+               status="delivered", delivered_at_ms=T0 + 1)
+
+    cp.execute("UPDATE outbox SET status = 'cancelled' WHERE message_id = 'msg-pending'")
+    cp.execute("UPDATE outbox SET status = 'cancelled' WHERE message_id = 'msg-delivered'")
+
+    for target in ("pending", "delivered", "acked"):
+        with pytest.raises(sqlite3.IntegrityError, match="terminal"):
+            cp.execute(
+                "UPDATE outbox SET status = ? WHERE message_id = 'msg-pending'", (target,)
+            )
+
+
+def test_cancelling_a_delivered_message_does_not_erase_that_it_was_delivered(cp):
+    # The evidence argument the forward-only trigger was written for survives
+    # the lattice: cancellation is a status change, never an erasure.
+    add_outbox(cp, "msg-1", status="delivered", delivered_at_ms=T0 + 1, retry_count=3)
+
+    cp.execute("UPDATE outbox SET status = 'cancelled' WHERE message_id = 'msg-1'")
+    assert cp.execute(
+        "SELECT status, delivered_at_ms, retry_count FROM outbox WHERE message_id = 'msg-1'"
+    ).fetchone() == ("cancelled", T0 + 1, 3)
+
+    with pytest.raises(sqlite3.IntegrityError, match="delivered once"):
+        cp.execute(
+            "UPDATE outbox SET delivered_at_ms = NULL WHERE message_id = 'msg-1'"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="retry_count"):
+        cp.execute("UPDATE outbox SET retry_count = 0 WHERE message_id = 'msg-1'")
+
+
+def test_an_acked_message_is_never_cancelled(cp):
+    # The answer arrived; the row that carries it is what the section 9.5 stage
+    # advance is justified by, so there is no edge from 'acked' to anywhere --
+    # and a cancelled row cannot carry an ack in the first place.
+    add_outbox(cp, "msg-1", status="acked", delivered_at_ms=T0 + 1, acked_at_ms=T0 + 2)
+
+    with pytest.raises(sqlite3.IntegrityError, match="terminal"):
+        cp.execute("UPDATE outbox SET status = 'cancelled' WHERE message_id = 'msg-1'")
+    with pytest.raises(sqlite3.IntegrityError, match="acked_at_ms"):
+        add_outbox(cp, "msg-2", dedup_key="dk-2", status="cancelled",
+                   delivered_at_ms=T0 + 1, acked_at_ms=T0 + 2)
+
+
+def test_a_message_never_marked_delivered_cannot_jump_straight_to_acked(cp):
+    # An ack for a message that was never recorded as sent is either a lost
+    # 'delivered' write or an ack for something that was never sent; both are
+    # faults, and the lattice has no pending -> acked edge for either to hide
+    # behind.
+    add_outbox(cp, "msg-1")
+
+    with pytest.raises(sqlite3.IntegrityError, match="terminal"):
+        cp.execute(
+            "UPDATE outbox SET status = 'acked', delivered_at_ms = ?, acked_at_ms = ?"
+            " WHERE message_id = 'msg-1'",
+            (T0 + 1, T0 + 2),
+        )
+
+
+def test_the_undelivered_index_stops_matching_a_cancelled_row(cp):
+    # If the partial index kept matching cancelled rows, every pass that reads
+    # it -- events.orphaned_outbox, gates.stalled_relays -- would go on aging a
+    # retired message forever, which is the whole defect 0003 closes.
+    add_outbox(cp, "msg-1")
+    live = "SELECT message_id FROM outbox WHERE status IN ('pending', 'delivered')"
+
+    assert [row[0] for row in cp.execute(live)] == ["msg-1"]
+    cp.execute("UPDATE outbox SET status = 'cancelled' WHERE message_id = 'msg-1'")
+    assert [row[0] for row in cp.execute(live)] == []
+
+    index_sql = cp.execute(
+        "SELECT sql FROM sqlite_schema WHERE name = 'outbox_undelivered'"
+    ).fetchone()[0]
+    assert "status IN ('pending', 'delivered')" in index_sql
+
+    # And the predicate has to be spelled as the index spells it: SQLite may use
+    # a partial index only when the query's WHERE carries the index's own
+    # predicate as a term, so the complement returns the same rows and loses the
+    # index -- a full scan of every message ever enqueued, none of which are
+    # ever deleted.
+    def plan(where: str) -> str:
+        return " ".join(
+            str(row) for row in cp.execute(
+                "EXPLAIN QUERY PLAN SELECT message_id FROM outbox"
+                f" WHERE {where} AND enqueued_at_ms < 1"
+            ).fetchall()
+        )
+
+    assert "SEARCH" in plan("status IN ('pending', 'delivered')")
+    assert "outbox_undelivered" in plan("status IN ('pending', 'delivered')")
+    assert "SCAN" in plan("status <> 'acked'")
+
+
+# --------------------------------------------------------------------------
 # section 5 -- the event spine
 # --------------------------------------------------------------------------
 

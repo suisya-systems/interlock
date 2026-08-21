@@ -769,6 +769,109 @@ def test_migrating_a_foreign_database_does_not_relabel_it(ledger, tmp_path):
 # --------------------------------------------------------------------------
 
 
+def test_a_step_that_leaves_a_dangling_reference_is_refused_and_rolled_back(ledger, db_path):
+    """Foreign keys are checked per step, not per statement, and that is the trade.
+
+    The rebuild in ``0003_outbox_cancelled_status.sql`` needs
+    ``PRAGMA foreign_keys = OFF`` -- SQLite cannot alter a CHECK, and the
+    documented table rebuild drops a table three others reference -- and that
+    pragma does nothing inside a transaction, so it is issued around the whole
+    migration. What replaces the per-statement enforcement is a whole-database
+    ``PRAGMA foreign_key_check`` inside each step's own transaction, and this is
+    the test that it actually refuses: without it, turning the pragma off would
+    be a hole in every step rather than a licence for one.
+    """
+
+    write_step(ledger, "0003_child.sql",
+               "CREATE TABLE child (id INTEGER PRIMARY KEY,"
+               " parent INTEGER REFERENCES alpha(id));\n"
+               "INSERT INTO child (id, parent) VALUES (1, 404);\n")
+
+    with pytest.raises(MigrationStepsRefused, match="foreign key violation"):
+        create_production_control_plane(db_path, now_ms=T0, migrations_dir=ledger)
+
+    assert not db_path.exists()
+
+
+def test_the_migrating_connection_ends_with_foreign_keys_enforced(ledger, db_path):
+    # The pragma is turned off for the duration of the migration and must not
+    # leak into the handle the caller goes on to write through: a connection
+    # that silently does not enforce foreign keys is the failure the whole
+    # _configure block exists to prevent.
+    connection = create_production_control_plane(db_path, now_ms=T0, migrations_dir=ledger)
+    try:
+        assert connection.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    finally:
+        connection.close()
+
+    reopened = open_production_control_plane(db_path, migrations_dir=ledger)
+    try:
+        assert reopened.execute("PRAGMA foreign_keys").fetchone() == (1,)
+    finally:
+        reopened.close()
+
+
+def test_the_outbox_rebuild_carries_every_row_and_every_reference_forward(db_path):
+    """0003 is a table rebuild, and a rebuild that loses a row loses evidence.
+
+    Migrated in two halves deliberately: the database is created at 0002 from a
+    copy of the shipped steps, rows and a child reference are written into it,
+    and only then is the real ledger applied. A rebuild verified only against an
+    empty database proves nothing about the ``INSERT INTO ... SELECT`` at its
+    centre.
+    """
+
+    shipped = MIGRATIONS_DIR
+    at_0002 = db_path.parent / "at-0002"
+    for name in ("0001_initial.sql", "0002_policy_seed.sql"):
+        write_step(at_0002, name, (shipped / name).read_text(encoding="utf-8"))
+
+    connection = create_production_control_plane(db_path, now_ms=T0, migrations_dir=at_0002)
+    try:
+        connection.execute(
+            "INSERT INTO run (run_id, status, created_at_ms, updated_at_ms)"
+            " VALUES ('run-1', 'running', ?, ?)", (T0, T0))
+        connection.execute(
+            "INSERT INTO outbox (message_id, run_id, recipient, payload, dedup_key,"
+            "                    status, retry_count, enqueued_at_ms, delivered_at_ms)"
+            " VALUES ('msg-1', 'run-1', 'secretary', '{}', 'dk-1', 'delivered', 4, ?, ?)",
+            (T0, T0 + 1))
+        # A child of outbox, in the shape the three shipped referrers have --
+        # event_consumption, gate_transition and gate_relay all carry
+        # REFERENCES outbox(message_id). It is written by hand here rather than
+        # through one of them because each of those needs a gate or an event
+        # around it, and what is under test is the reference, not their rows.
+        assert {
+            table
+            for (table,) in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")
+            if any(row[2] == "outbox"
+                   for row in connection.execute(f"PRAGMA foreign_key_list({table})"))
+        } == {"event_consumption", "gate_transition", "gate_relay"}
+        connection.execute(
+            "CREATE TABLE child (message_id TEXT REFERENCES outbox(message_id))")
+        connection.execute("INSERT INTO child VALUES ('msg-1')")
+    finally:
+        connection.close()
+
+    migrated = migrate_control_plane(db_path, now_ms=T1)
+    try:
+        assert version_of(db_path) == (head_version(), head_version())
+        # Every column of the row survives the rebuild, including the delivery
+        # evidence and the attempt count.
+        assert migrated.execute(
+            "SELECT run_id, recipient, dedup_key, status, retry_count, delivered_at_ms"
+            "  FROM outbox WHERE message_id = 'msg-1'"
+        ).fetchone() == ("run-1", "secretary", "dk-1", "delivered", 4, T0 + 1)
+        # And the reference into it: the rebuild drops and recreates the parent
+        # table, so a child left dangling would be the silent half of the risk.
+        assert migrated.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert migrated.execute("SELECT message_id FROM child").fetchall() == [("msg-1",)]
+        assert migrated.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    finally:
+        migrated.close()
+
+
 def test_the_real_ledger_is_discoverable_and_contiguous():
     steps = discover_migration_steps()
     assert steps, "the production DDL ledger must ship with the package"

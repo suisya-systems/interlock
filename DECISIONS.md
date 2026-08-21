@@ -83,6 +83,7 @@ figures are **measured baseline**.
 | D-0039 | AC-10's ground truth is external: a labelled fixture suite and shadow reconciliation, with false termination counted at the applied action | accepted |
 | D-0040 | A measurement report records its own provenance, and the harness is read-only by capability | accepted |
 | D-0041 | The run status vocabulary is closed and forward-only, and a detection budget carries its own kind | accepted |
+| D-0042 | A message nobody wants is cancelled, not left pending, and cancellation is terminal rather than an erasure | accepted |
 | Q-0001 | SQLite schema/DDL and migration policy for the SoT tables | resolved by D-0029 |
 | Q-0002 | Incident dedup key composition and re-notification rate in absolute time | proposed |
 | Q-0003 | Reconcile interval and the tolerable detection latency that justifies it | resolved by D-0031 |
@@ -1907,6 +1908,88 @@ advance meeting the first thing that has to be typed against it.
 **Source.** `docs/production-schema.md` §§2, 4.2, 4.3, 10, 11; `docs/time-base-policy.md` §§3.2, 3.4;
 `docs/measurement-harness.md` §2.1; `D-0029`, `D-0031`, `D-0038`; the implementation of Issues `#64`,
 `#65` and `#67`. Not drawn from Issue #740.
+
+---
+
+## D-0042 -- A message nobody wants is cancelled, not left pending, and cancellation is terminal rather than an erasure
+
+**Context.** `D-0029`'s `outbox` was carried verbatim from the spike, status vocabulary included:
+`pending`, `delivered`, `acked`, walked by a forward-only trigger whose comment argues that a *total*
+order is what protects the delivery evidence. That vocabulary has no state meaning **"this message is
+no longer wanted"**, and the implementation of `#65` found the gap the way gaps get found here -- an
+external review reproduced it.
+
+Closing a gate (`withdrawn`, `expired`, `subject_gone`, `superseded`) left the relay it had enqueued
+sitting at `pending`. Two consequences, both real and both reproduced:
+
+1. A delivery worker reading `outbox` is still instructed to present a withdrawn question, or to
+   forward an answer to a gate that is closed.
+2. `stalled_relays()` (`docs/production-schema.md` section 9.6) names that relay for as long as the
+   database lives, with an age that grows without bound -- which is exactly the **alarms forever**
+   failure that section 9.4's `subject_gone` outcome exists to end, reproduced one table over.
+
+The second consequence is what makes this a decision rather than a bug fix. Section 9.4 introduced an
+outcome *specifically* so a gate whose subject vanished would stop alarming. Leaving the relay live
+reproduces the failure that outcome was written against, so the taxonomy's own argument implies that
+closure must be able to retire the relay -- and the schema, as it stood, made that inexpressible.
+
+**Decision.** Two parts, taken together because either alone leaves half the defect open.
+
+1. **`outbox.status` gains a fourth, terminal value `cancelled`,** in migration
+   `0003_outbox_cancelled_status.sql`. The forward-only trigger becomes a **lattice** rather than a
+   total order: `pending -> {delivered, cancelled}`, `delivered -> {acked, cancelled}`, and no edge out
+   of `acked` or `cancelled`. `close_gate` cancels every not-yet-acked relay of the gate **in the same
+   transaction as the closure and its spine event**.
+2. **A `delivered` relay may be cancelled; an `acked` one may not.** `delivered` means *sent*, not
+   *answered*. Section 9.5 makes the stage advance on the **ack**, so an unacked `delivered` relay is
+   precisely one waiting for something that will now never come. Refusing to cancel it would leave
+   consequence 2 open for every relay that happened to be delivered first, which is most of them.
+
+**Consequences.**
+- **The lattice still protects the evidence, which is what the total order was for.** Cancellation is a
+  terminal *status change*, never an erasure: `delivered_at_ms` and `retry_count` survive it untouched,
+  the set-once triggers still refuse to rewrite them, and the `(status = 'acked') = (acked_at_ms IS NOT
+  NULL)` `CHECK` is what makes "a cancelled row can never carry an ack" a schema fact rather than a
+  convention. What the total order actually guaranteed -- that evidence is never walked backwards or
+  rewritten -- is unchanged; what it also happened to forbid was saying that a message is moot.
+- **The send-time re-check is kept, not replaced.** A delivery worker still re-reads
+  `gate.closed_at_ms` before sending, because a worker that read the outbox row *before* the
+  cancellation committed holds a row that was true when it read it. The schema closes the durable half;
+  the re-check closes the in-flight half. Neither is redundant.
+- **Every predicate that meant "not yet done" had to move.** `status <> 'acked'` silently began matching
+  cancelled rows, so the `outbox_undelivered` partial index, `events.orphaned_outbox` and
+  `gates.stalled_relays` are now spelled `status IN ('pending', 'delivered')`. The spike-side readers in
+  `outbox.py` and `schema.py` are deliberately **not** changed: `spike_schema.sql` has no `cancelled`,
+  and a widened predicate there would be a lie about a schema that does not have the value (`D-0026`).
+- **One incidental tightening, stated rather than smuggled:** `pending -> acked` in a single hop is now
+  refused, where `0001`'s rank comparison admitted it. An ack on a row never recorded as sent is either
+  a lost `delivered` write or an ack for something that was never sent, and neither should be silent.
+- **The migration is a full table rebuild, and it changed the migrator.** SQLite has no `ALTER TABLE`
+  that touches a `CHECK`, so the vocabulary can only widen through the documented 12-step rebuild.
+  Step 1 of that procedure is `PRAGMA foreign_keys = OFF`, which is a **no-op inside a transaction** --
+  and `production-schema.md` section 3.2 puts every step inside one. `PRAGMA defer_foreign_keys` was
+  tried and measured not to work: `DROP TABLE` increments the deferred violation counter per orphaned
+  child row and restoring the parent by rename does not decrement it. So the pragma is issued by
+  `_apply_pending` around the whole run and each step now ends with a whole-database
+  `PRAGMA foreign_key_check` inside its own transaction. That is a *wider* check than the per-statement
+  enforcement it replaces, since it also catches violations a step's own DDL created.
+- **Rejected: a `cancelled_at_ms` column.** The instant is already durable twice -- `gate.closed_at_ms`
+  and the `gate_closed` / `gate_expired` spine event that commits with it -- and a third copy is a third
+  thing that can disagree.
+- **Rejected: having `stalled_relays()` exclude closed gates and stopping there.** It silences the alarm
+  on a defect that is still live: the delivery worker would go on presenting withdrawn questions, now
+  with nothing pointing at it. Removing the signal while leaving the fault is the failure mode this
+  system is built against.
+- **Rejected: relying on the delivery worker's check alone.** No delivery driver exists in this branch,
+  so adopting it as the whole answer would have left the defect fully open in code and present only as
+  a promise made to a component nobody has written yet.
+- `D-0029` and `D-0030` stand. This extends `outbox`'s vocabulary; it reverses nothing either decided.
+
+**Status.** accepted
+
+**Source.** `docs/production-schema.md` sections 5.6, 5.7, 9.4, 9.5, 9.6, 11; `D-0026`, `D-0029`,
+`D-0030`; the implementation of Issues `#64` and `#65` and an external review of its diff. Not drawn
+from Issue #740.
 
 ---
 

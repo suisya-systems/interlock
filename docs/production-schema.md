@@ -54,7 +54,7 @@ re-derived".
 | `run` | **re-derived** | The spike left `status` unconstrained text *because* the writer assignment was open. §4 closes it, so the production table carries a `CHECK` on a closed status set and a forward-only trigger. |
 | `session` | **carried verbatim** | The staged binding (`prepared` → `spawned` → `identity_confirmed`), the one-active-binding-per-run partial unique index, and the observation/`provider_state` equality pair are re-confirmed unchanged. They were derived from gate item 2 under injection (`docs/crash-window-orchestration.md`), not from convenience. |
 | `lease` | **carried verbatim** | Epoch monotonicity, holder-change raising the epoch, resource immutability, no-delete. `docs/lease-fencing.md` is the derivation and it is unaffected by anything here. |
-| `outbox` | **carried verbatim** | Including the deliberate non-uniqueness of `dedup_key`; §9.4 adds gate relay identity in a separate table rather than by tightening this one. |
+| `outbox` | **carried verbatim, then extended** | Carried including the deliberate non-uniqueness of `dedup_key`; §9.4 adds gate relay identity in a separate table rather than by tightening this one. Extended once since: `0003_outbox_cancelled_status.sql` adds the terminal `cancelled` status (§5.7), which the spike vocabulary has no counterpart for and which is therefore the one place this table is **not** what the spike says. |
 | `incident` | **carried verbatim** | `Q-0002` is still open; nothing here narrows it. |
 | `action` | **carried verbatim** | `exactly_once_mechanism` and the one-effect-per-key partial unique index are the `ACCEPTANCE.md` §2 clause and are unchanged. |
 | `task` | **new** | Named by `D-0001` but absent from the spike (the gate items did not exercise it). Out of scope for G3/G4; §12 records it as a known hole rather than inventing it here. |
@@ -528,7 +528,7 @@ watcher liveness. Its G3/G4 obligations, each a deterministic query with no AI i
 | Pass | Query | On a hit |
 |---|---|---|
 | Undrained events | consumption rows `pending`/`failed` whose head-of-line age exceeds the class tolerance | Raise a `consumer_backlog` incident against the consumer, and re-attempt `failed` rows |
-| Orphaned outbox | outbox rows not `acked` older than the delivery tolerance | Re-attempt; the retry count is already durable and monotonic |
+| Orphaned outbox | outbox rows still `pending` or `delivered` (§5.7 — **not** merely "not `acked`": a `cancelled` row is finished) older than the delivery tolerance | Re-attempt; the retry count is already durable and monotonic |
 | Watcher silence | §8.4 | Raise a `watcher_silence` incident against the scope |
 | Scope coverage | §8.4 | Raise a `watcher_scope_uncovered` incident |
 | Gate relay gaps | §9.5 | Raise a `relay_gap` incident against the gate |
@@ -537,6 +537,64 @@ watcher liveness. Its G3/G4 obligations, each a deterministic query with no AI i
 The last row is the crash-window recovery step and is the reason the reconcile pass is not only a
 detector. It is idempotent: the advance it completes is guarded by the same transition-admissibility
 check as any other advance, so running it twice is a no-op.
+
+### 5.7 `outbox.status`: the cancellation vocabulary
+
+The spike's `outbox.status` ran `pending → delivered → acked`, and
+`outbox_status_is_forward_only` refused any step that lowered the rank. That vocabulary has no
+state meaning **"this message is no longer wanted"**, and the omission showed up one section over:
+closing a gate (§9.4) left the relay it had enqueued sitting at `pending` forever. A delivery
+worker reading the outbox was still instructed to present a withdrawn question, and the
+stalled-relay query of §9.6 went on naming that relay with an age that grew without bound — the
+"alarms forever" failure `subject_gone` exists to end, reproduced in the delivery table.
+
+So the vocabulary is `pending`, `delivered`, `acked`, **`cancelled`**, added by
+`0003_outbox_cancelled_status.sql`. SQLite cannot alter a `CHECK`, so the step is the documented
+12-step table rebuild; the step file carries the reasoning, including why `PRAGMA foreign_keys` had
+to move out to the migrator (it is a no-op inside a transaction, and every step runs inside one)
+and what replaces it (a whole-database `PRAGMA foreign_key_check` inside each step's transaction).
+
+**The status graph is now a lattice, not a total order.**
+
+| From | To |
+|---|---|
+| `pending` | `delivered`, `cancelled` |
+| `delivered` | `acked`, `cancelled` |
+| `acked` | — terminal |
+| `cancelled` | — terminal |
+
+The forward-only trigger is therefore written edge by edge rather than as a comparison of ranks,
+because `acked` and `cancelled` are both terminal and neither is reachable from the other. The
+argument the total order was protecting survives the change intact: **a cancellation is a terminal
+status change and never an erasure.** `delivered_at_ms` and `retry_count` survive it untouched —
+`outbox_delivery_is_set_once` and `outbox_retry_count_is_monotonic` still hold, and a `cancelled`
+row can carry no ack at all, because `acked_at_ms` is set if and only if the status is `acked`. A
+retired relay therefore still says, truthfully and forever, that it was sent and how many attempts
+it took; what it stops saying is that somebody is still waiting for it.
+
+Two consequences are load-bearing rather than incidental:
+
+- **A `delivered` relay may be cancelled, not only a `pending` one.** `delivered` means *sent*, not
+  *answered*. A question put in front of a human and not yet acked can become moot — the gate is
+  withdrawn while they are reading it — and §9.5's whole point is that the stage advances on the
+  **ack**, so an unacked `delivered` relay is precisely a relay still waiting for something that
+  will now never come. Refusing to cancel it would leave the alarms-forever half of the defect open
+  for every relay that happened to be delivered first, which is most of them. What cancellation does
+  not do is erase that it *was* delivered. An **acked** relay is never cancelled: the answer
+  arrived, and §9.5 justifies the stage advance by that ack.
+- **The `outbox_undelivered` partial index and every reader of it name the two live statuses.**
+  The index predicate is `status IN ('pending', 'delivered')` and both readers — the orphaned-outbox
+  pass (§5.6) and the stalled-relay query (§9.6) — carry that exact text, because SQLite may use a
+  partial index only when the query's `WHERE` contains the index's own predicate as a term. Writing
+  it as the complement (`status NOT IN ('acked', 'cancelled')`) would return the same rows and lose
+  the index.
+
+The delivery-side counterpart is still owed and is named here rather than assumed: **a delivery
+worker must re-check `gate.closed_at_ms` at send time**, even with cancellation in the schema. The
+cancellation is a fact in the database and the send is an act outside it, so a worker that read the
+outbox row before the closure committed is holding a row that is already stale and no constraint can
+reach into its memory. The status is the belt and the send-time re-check is the braces. No component
+in this branch performs it, because the delivery driver does not exist yet.
 
 ---
 
@@ -1316,6 +1374,13 @@ leaves a permanently open row that either alarms forever or is silently ignored.
 has reached a terminal status. Without that sweep the outcome exists in the enumeration and never
 gets used, which is the same permanent-open-row problem with extra vocabulary.
 
+Closing a gate also **retires the relay it enqueued**, in the same transaction as the closure: every
+`gate_relay` of that gate whose `outbox` row is not yet `acked` moves to `cancelled` (§5.7). That is
+the same argument as `subject_gone` itself, applied one table over — an outcome that closes the gate
+but leaves a live message behind has moved the permanently-alarming row from `gate` to `outbox`
+rather than removed it, and the message would still be sent. An `acked` relay is left exactly as it
+was; a gate that closed *because* it was answered must not have its answered relay rewritten.
+
 ### 9.5 A relay stage advances on the **ack**, never on the send
 
 This is the crash-window rule, and it is the one place where getting the ordering wrong produces
@@ -1407,14 +1472,15 @@ effective **now**, a report binds the revision effective over its period
 second revision and asserts the detector still emits one row per gate.
 
 `p.tolerance_ms IS NULL` is how `presented` opts out — the "slow human is not a gap" case is data,
-not a special case in the query. A separate query covers the relay that was enqueued and never
-acked, which is a delivery stall rather than a stage stall:
+not a special case in the query. A separate query covers the relay that was enqueued and is
+still waiting to be sent or acked, which is a delivery stall rather than a stage stall:
 
 ```sql
 SELECT r.gate_id, r.to_stage, o.retry_count, :now_ms - r.enqueued_at_ms AS age_ms
   FROM gate_relay r
   JOIN outbox o ON o.message_id = r.message_id
- WHERE o.status <> 'acked'
+ WHERE o.status IN ('pending', 'delivered')   -- not "<> 'acked'": a cancelled relay is
+                                              -- retired, and §5.7 is where it goes
    AND :now_ms - r.enqueued_at_ms > :delivery_tolerance_ms;
 ```
 
@@ -1551,10 +1617,11 @@ the Issue that picks it up. So the blocks in this document and in
 every parameterised query in them was prepared, and the load-bearing constraints were exercised
 directly. The table below is that log, kept rather than retired.
 
-The DDL now ships as `src/claude_org_runtime/control_plane/migrations/0001_initial.sql` and is
-applied by the migrator, so this table is no longer the only place the claims live: every row of it
-is reproduced as a named test in `tests/control_plane/test_production_schema.py`, which reads the
-migration the runtime reads. A claim recorded here that the migration stops satisfying is now a test
+The DDL now ships as `src/claude_org_runtime/control_plane/migrations/0001_initial.sql`, extended by
+the numbered steps after it, and is applied by the migrator, so this table is no longer the only place the claims live: every row of it
+is reproduced as a named test in `tests/control_plane/test_production_schema.py` — or, for the rows
+about migration mechanics rather than about the shape, in `tests/control_plane/test_migrator.py` —
+each reading the migrations the runtime reads. A claim recorded here that the migration stops satisfying is now a test
 failure rather than a stale sentence — which is the point of not deleting the log. Where a row was
 added *after* the implementation found the design underspecified, it is marked `D-0041` and was
 verified the same way, against a database built by the migrator itself.
@@ -1598,6 +1665,14 @@ verified the same way, against a database built by the migrator itself.
 | `running` and `suspended` interconvert in **both** directions, because a suspend is a pause rather than a step (`D-0041`, §4.3) | `running → suspended` and `suspended → running` each affect 1 row |
 | `policy_detection_latency.budget_kind` is `CHECK`ed to its two values (`D-0041`, §10) | `CHECK constraint failed: budget_kind IN ('absolute_ms', 'lease_ttl_multiple')` |
 | The `T + P ≤ L` `CHECK` now applies only when `threshold_kind` **and** `budget_kind` are both `absolute_ms` (`D-0041`, §10) | `T=200s + P=120s > L=300s` aborts when both are absolute; the same `T` and `P` against `budget_kind='lease_ttl_multiple'`, `budget_ms=2` lands, for the `policy_budget_violation` pass to assert per subject |
+| A `pending` and a `delivered` message may both be cancelled, and `cancelled` is terminal (step `0003`, §5.7) | Both `UPDATE`s land; `cancelled → pending`, `cancelled → delivered` and `cancelled → acked` each abort with `outbox status walks pending -> delivered -> acked, or is cancelled from pending or delivered; acked and cancelled are terminal` |
+| An `acked` message is never cancelled (step `0003`, §5.7) | `acked → cancelled` aborts with the same trigger; and inserting a `cancelled` row carrying an `acked_at_ms` aborts with `CHECK constraint failed: (status = 'acked') = (acked_at_ms IS NOT NULL)` |
+| Cancelling a `delivered` message erases nothing (step `0003`, §5.7) | The row keeps `delivered_at_ms` and `retry_count`; clearing `delivered_at_ms` afterwards aborts with `a delivered message is delivered once`, and lowering `retry_count` with `outbox retry_count must not decrease` |
+| A message never recorded as `delivered` cannot jump straight to `acked` (step `0003`, §5.7) | Aborts with the forward-only trigger — a tightening over `0001`, whose rank comparison admitted the jump |
+| The status vocabulary is closed at four values (step `0003`, §5.7) | `CHECK constraint failed: status IN ('pending', 'delivered', 'acked', 'cancelled')` |
+| The `outbox_undelivered` predicate is what makes the orphan pass indexable, and its complement is not (step `0003`, §5.6/§5.7) | `EXPLAIN QUERY PLAN` over `status IN ('pending', 'delivered') AND enqueued_at_ms < ?` reads `SEARCH outbox USING INDEX outbox_undelivered (enqueued_at_ms<?)`; the same query written `status <> 'acked'` reads `SCAN outbox` |
+| The `outbox` rebuild carries every row and every reference forward (step `0003`, §3.2) | A database written at `0002` with a `delivered` row at `retry_count=4` and a child row referencing it migrates to head with all columns intact, `PRAGMA foreign_key_check` empty and `PRAGMA integrity_check` `ok` |
+| Turning `PRAGMA foreign_keys` off for the migration is not a hole, because each step is `foreign_key_check`ed inside its own transaction (step `0003`, §3.2) | A step inserting a row with a dangling reference is refused with `migration step … leaves 1 foreign key violation(s)` and the database is left at the previous version |
 
 Two things this does **not** establish, and they are the reasons it is not a substitute for the
 implementation Issue's tests. It does not exercise the `T + P ≤ L` timing behaviour, which needs the

@@ -1248,8 +1248,9 @@ BACKLOG_INCIDENT_CLASS = "consumer_backlog"
 #: The incident class the orphaned-outbox pass ages against. It is the one
 #: **delivery** tolerance the time base decides (``T`` = 2 min, ``L`` = 5 min):
 #: section 3.2 derives it from the gate relay because that is where the stall
-#: was first observed, but the condition it measures -- "enqueued and not
-#: acked" -- is a property of the ``outbox`` row and of nothing above it, and
+#: was first observed, but the condition it measures -- "enqueued and still
+#: waiting to be sent or acked" -- is a property of the ``outbox`` row and of
+#: nothing above it, and
 #: ``gate_relay`` reaches it only by joining the same column this pass reads.
 #: Aging every unfinished message against a second, invented number would put a
 #: tolerance in code, which is exactly what ``D-0031`` moves into policy data.
@@ -1271,7 +1272,7 @@ ORPHANED_OUTBOX_SQL = """
                :revision_id,
                :incident_class
           FROM outbox
-         WHERE status <> 'acked'
+         WHERE status IN ('pending', 'delivered')
            AND enqueued_at_ms < :now_ms - :tolerance_ms
          ORDER BY enqueued_at_ms, message_id
         """
@@ -1405,7 +1406,7 @@ def backlogged_consumers(
 def orphaned_outbox(
     connection: sqlite3.Connection, *, revision_id: int, now_ms: int
 ) -> tuple[Mapping[str, Any], ...]:
-    """Enqueued messages that are not ``acked`` and are past the delivery tolerance.
+    """Enqueued messages still awaiting an ack and past the delivery tolerance.
 
     Section 5.6's orphaned-outbox pass. It belongs beside the append that
     *created* these rows: section 5.4 makes the enqueue part of the append
@@ -1423,17 +1424,22 @@ def orphaned_outbox(
     ``outbox_retry_count_is_monotonic`` in ``0001_initial.sql`` would not catch
     that -- an increment is exactly what it permits.
 
-    ``status <> 'acked'`` and not ``status = 'pending'``: ``delivered`` without
-    an ack is the crash-window case this pass exists for -- the send landed and
-    the ack did not, or never came back -- and it is the case that goes silent
-    if the predicate only names ``pending``.
+    ``status IN ('pending', 'delivered')`` and not ``status = 'pending'``:
+    ``delivered`` without an ack is the crash-window case this pass exists for
+    -- the send landed and the ack did not, or never came back -- and it is the
+    case that goes silent if the predicate only names ``pending``. The other
+    two statuses are both terminal and neither is a stall: ``acked`` arrived,
+    and ``cancelled`` (``0003_outbox_cancelled_status.sql``) is a message
+    nobody wants sent any more, so a pass that kept matching it would age a
+    retired relay forever -- the failure that step exists to end.
 
     **The partial index is usable and the shape of the predicate is what makes
-    it so.** ``0001_initial.sql`` carries
-    ``CREATE INDEX outbox_undelivered ON outbox(enqueued_at_ms) WHERE status <>
-    'acked'``. SQLite may use a partial index only when the query's ``WHERE``
-    contains the index's own predicate as a term, so ``status <> 'acked'`` is
-    written out verbatim rather than folded into the age arithmetic. And the
+    it so.** ``0003_outbox_cancelled_status.sql`` carries
+    ``CREATE INDEX outbox_undelivered ON outbox(enqueued_at_ms) WHERE status IN
+    ('pending', 'delivered')``. SQLite may use a partial index only when the
+    query's ``WHERE`` contains the index's own predicate as a term, so that
+    ``IN`` list is written out verbatim rather than folded into the age
+    arithmetic or restated as its complement. And the
     range term is ``enqueued_at_ms < :now_ms - :tolerance_ms`` -- the bare
     indexed **column** on one side -- because the algebraically identical
     ``:now_ms - enqueued_at_ms > :tolerance_ms`` is an expression *over* the

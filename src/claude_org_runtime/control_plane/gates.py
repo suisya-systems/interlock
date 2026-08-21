@@ -645,30 +645,36 @@ def close_gate(
     that and makes a re-run of the sweep an idempotent no-op on the spine as
     well as in the table.
 
-    **Closure does not neutralise an undelivered relay, and cannot today.** The
-    close writes the ``gate`` row and the spine event; a ``gate_relay`` whose
-    ``outbox`` row is still ``pending`` or ``delivered`` is left exactly as it
-    was. ``outbox.status`` runs ``pending -> delivered -> acked`` and
-    ``outbox_status_is_forward_only`` (``0001_initial.sql``) admits only steps
-    along that ladder, so the schema has no status meaning "this message is no
-    longer wanted" for a close to retire the row into -- adding one is a DDL
-    change to the settled section 5 vocabulary and a decision this function may
-    not make on its own. Two things follow for a caller, and both are real:
+    **Closure retires the relay nobody is waiting for any more, in this same
+    transaction.** Every ``gate_relay`` of this gate whose ``outbox`` row is
+    still ``pending`` or ``delivered`` is moved to ``cancelled``
+    (``0003_outbox_cancelled_status.sql``) by the same ``side_effect`` that
+    writes the closure, so the gate is never closed in one commit and its relay
+    retired in another -- a crash between the two would leave exactly the state
+    this is here to prevent. An **acked** relay is deliberately untouched: the
+    answer arrived, the stage advance in section 9.5 is justified by that ack,
+    and a gate that closed *because* it was answered must not have its answered
+    relay rewritten. Cancellation is terminal but it is not an erasure --
+    ``delivered_at_ms`` and ``retry_count`` survive it untouched, which is what
+    keeps the delivery evidence readable afterwards.
 
-    * a delivery worker reading the outbox is still instructed to send the
-      question, or forward the answer, for a gate that is already ``withdrawn``,
-      ``expired`` or ``subject_gone``. Any such worker must therefore re-check
-      ``gate.closed_at_ms`` at send time; the outbox row alone is not authority
-      that the message is still wanted. No component in this branch does that
-      check, because the delivery driver does not exist here yet.
-    * :func:`stalled_relays` keeps reporting that relay for as long as the row
-      exists -- section 9.6 writes its query with no ``closed_at_ms`` predicate
-      -- so a closed gate can alarm forever through its relay, which is the
-      failure the section 9.4 ``subject_gone`` outcome exists to end, displaced
-      one table over.
+    A ``delivered`` relay is cancellable and not only a ``pending`` one, and
+    that is the point rather than an edge case: ``delivered`` means *sent*, not
+    *answered*. A question put in front of a human and not yet acked can become
+    moot -- the gate is withdrawn while they are reading it -- and section 9.5
+    makes the stage advance on the ACK, so an unacked ``delivered`` relay is
+    precisely a relay still waiting for something that will now never come.
+    Refusing to cancel it would leave the reporting half of the defect open for
+    every relay that happened to be delivered first, which is most of them.
 
-    ``test_closing_a_gate_does_not_retire_its_undelivered_relay`` pins both
-    halves so the hole is visible in the suite and not only in this paragraph.
+    **A delivery worker must still re-check ``gate.closed_at_ms`` at send
+    time**, and that contract is kept rather than replaced by the cancellation.
+    The cancellation is a fact in the database and the send is an act outside
+    it: a worker that read the outbox row before this transaction committed is
+    holding a ``pending`` row that is already stale, and nothing in the schema
+    can reach into that worker's memory. The status is the belt; the send-time
+    re-check is the braces. No component in this branch does that check,
+    because the delivery driver does not exist here yet.
 
     :raises GateClosedRefused: if the gate is closed with a *different* outcome.
     :raises InadmissibleTransitionRefused: if *outcome* is not reachable from
@@ -739,7 +745,12 @@ def sweep_subject_gone(
     outcome exists so that a gate whose worker is gone stops being an open row
     that alarms forever, and without this sweep it would be an enumeration
     member nothing ever writes -- the permanent-open-row problem with extra
-    vocabulary. Terminal is the G1 set :data:`TERMINAL_RUN_STATUSES`, which
+    vocabulary. Each closure also retires that gate's not-yet-acked relay (see
+    :func:`close_gate`), for the same reason and in the same commit: a gate
+    closed here with a live message still queued has moved the permanently
+    alarming row from ``gate`` to ``outbox`` rather than removed it, and the
+    message would still be sent to somebody who is gone.
+    Terminal is the G1 set :data:`TERMINAL_RUN_STATUSES`, which
     ``run_status_is_forward_only`` makes an absorbing state, so a gate closed
     here can never be wrong later.
 
@@ -894,14 +905,15 @@ def stalled_relays(
     progressed normally, and the fault would surface later as a human who never
     answered a question they never received.
 
-    **Known hole, stated rather than silently carried.** Section 9.6 writes this
-    query with no ``closed_at_ms`` predicate and it is transcribed as written,
-    so a relay enqueued and never acked on a gate that has since been closed is
-    reported here forever: closing the gate cannot retire the outbox row (see
-    :func:`close_gate`), and nothing else ever will. Excluding closed gates here
-    would silence the report but not stop a delivery worker sending the message,
-    so it is half a fix and a design decision either way, not a transcription
-    fix. ``test_closing_a_gate_does_not_retire_its_undelivered_relay`` pins it.
+    **There is still no ``closed_at_ms`` predicate here, and there should not
+    be.** Section 9.6 writes the query without one and it is transcribed as
+    written; what used to make that a hole -- a relay on a closed gate reported
+    forever, because closing could not retire the outbox row -- is closed on the
+    ``outbox`` side instead: :func:`close_gate` cancels every not-yet-acked
+    relay of the gate it closes, and ``cancelled`` is outside the predicate
+    below. Excluding closed *gates* here would have been half a fix, silencing
+    the report while a delivery worker went on sending the message; retiring the
+    message stops both. The status is the state and this query reads the state.
     """
 
     rows = connection.execute(
@@ -910,7 +922,7 @@ def stalled_relays(
                :now_ms - r.enqueued_at_ms AS age_ms
           FROM gate_relay r
           JOIN outbox o ON o.message_id = r.message_id
-         WHERE o.status <> 'acked'
+         WHERE o.status IN ('pending', 'delivered')
            AND :now_ms - r.enqueued_at_ms > :tolerance_ms
          ORDER BY r.gate_id, r.to_stage
         """,
@@ -1111,6 +1123,22 @@ def _close_in_transaction(
          WHERE gate_id = ?
         """,
         (outcome, recorded_at_ms, superseded_by, gate_id),
+    )
+    # And retire the relays nobody is waiting for any more, in this same
+    # transaction as the closure (see close_gate for the argument). The
+    # predicate names the two live statuses rather than excluding 'acked',
+    # because the row must also not be moved out of 'cancelled' -- a second
+    # close sweep over the same gate would otherwise hit
+    # outbox_status_is_forward_only, which has no edge out of a terminal
+    # status, and turn an idempotent re-run into an IntegrityError.
+    connection.execute(
+        """
+        UPDATE outbox
+           SET status = 'cancelled'
+         WHERE status IN ('pending', 'delivered')
+           AND message_id IN (SELECT message_id FROM gate_relay WHERE gate_id = ?)
+        """,
+        (gate_id,),
     )
 
 

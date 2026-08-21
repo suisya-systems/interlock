@@ -752,16 +752,45 @@ def _apply_pending(
     *,
     now_ms: int,
 ) -> None:
-    """Apply every step past the database's current version, in order."""
+    """Apply every step past the database's current version, in order.
+
+    **Foreign keys are enforced by whole-database check, not per statement,
+    for the duration of the migration.** SQLite cannot alter a ``CHECK``
+    constraint, so widening one (``0003_outbox_cancelled_status.sql`` widens
+    ``outbox.status``) means the documented 12-step table rebuild, whose first
+    step is ``PRAGMA foreign_keys = OFF``. That pragma is a **no-op inside a
+    transaction**, and every step here runs inside one so that the step and its
+    ledger row commit together -- so the only place it can be issued is here,
+    around the whole run. ``PRAGMA defer_foreign_keys`` is not a substitute and
+    was measured not to be: dropping the parent table increments the deferred
+    violation counter once per orphaned child row, and re-creating the parent
+    by ``ALTER TABLE ... RENAME`` does not decrement it, so the ``COMMIT``
+    fails on rows that are in fact present.
+
+    Enforcement is not simply dropped for the duration. Each step ends with a
+    ``PRAGMA foreign_key_check`` over the **entire database**, inside the
+    step's own transaction (:func:`_apply_step`), which is a wider check than
+    the per-statement enforcement it replaces: it also catches violations a
+    step's DDL created rather than only the ones its DML did. The pragma is
+    restored before this returns, so the connection the caller ends up holding
+    is the fully-enforcing one every other part of this module assumes.
+    """
 
     connection.execute(f"PRAGMA busy_timeout = {MIGRATION_BUSY_TIMEOUT_MS}")
     current = connection.execute(
         "SELECT COALESCE(MAX(version), 0) FROM schema_migration"
     ).fetchone()[0]
-    for step in steps:
-        if step.version <= current:
-            continue
-        _apply_step(connection, step, now_ms=now_ms)
+    pending = [step for step in steps if step.version > current]
+    if not pending:
+        return
+    # Outside any transaction, which is the only place this pragma does
+    # anything at all.
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        for step in pending:
+            _apply_step(connection, step, now_ms=now_ms)
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
 
 
 def _apply_step(
@@ -825,6 +854,20 @@ def _apply_step(
             )
         for statement in _statements(step):
             connection.execute(statement)
+        # The enforcement _apply_pending turned off, re-applied over the whole
+        # database and inside this step's transaction, so a step that leaves a
+        # dangling reference is refused and rolled back rather than committed
+        # and discovered later by a reader. Reported as a refusal naming the
+        # first offending rows: the raw pragma output is a rowid list, which
+        # says nothing about which step broke what.
+        violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise MigrationStepsRefused(
+                f"migration step {step.path.name} leaves "
+                f"{len(violations)} foreign key violation(s) "
+                f"(first: {violations[0]}); nothing was applied and the "
+                f"database is still at version {step.version - 1}"
+            )
         connection.execute(
             "INSERT INTO schema_migration (version, name, checksum, applied_at_ms) "
             "VALUES (?, ?, ?, ?)",

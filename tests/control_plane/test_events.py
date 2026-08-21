@@ -1212,8 +1212,8 @@ def test_the_pass_mutates_nothing_at_all(cp):
 
 
 def test_the_orphan_query_uses_the_partial_index_written_to_serve_it(cp):
-    # 0001_initial.sql: CREATE INDEX outbox_undelivered ON outbox(enqueued_at_ms)
-    # WHERE status <> 'acked'. Both the indexable predicate form and the
+    # 0003_outbox_cancelled_status.sql: CREATE INDEX outbox_undelivered ON
+    # outbox(enqueued_at_ms) WHERE status IN ('pending', 'delivered'). Both the indexable predicate form and the
     # arithmetic one return the same rows, so only the PLAN distinguishes them
     # -- and outbox rows are never deleted, so a scan grows without bound.
     #
@@ -1237,7 +1237,7 @@ def test_the_orphan_query_uses_the_partial_index_written_to_serve_it(cp):
     degraded = explain(cp, DEGRADED_ORPHANED_OUTBOX_SQL, params)
     # SQLite still names outbox_undelivered here -- it reads the partial index
     # as a narrower covering table -- but the verb is SCAN, not SEARCH: every
-    # unacked row ever enqueued is visited and the age is evaluated per row.
+    # unfinished row ever enqueued is visited and the age is evaluated per row.
     # So the assertion is on the verb, never on the index name.
     assert "SEARCH" not in degraded
     assert "SCAN" in degraded

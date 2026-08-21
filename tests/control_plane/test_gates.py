@@ -922,23 +922,20 @@ def test_only_a_named_stage_is_relayed(cp) -> None:
             )
 
 
-def test_closing_a_gate_does_not_retire_its_undelivered_relay(cp) -> None:
-    """A close is a fact about the gate only; the relay it enqueued stays live.
+def test_closing_a_gate_retires_its_undelivered_relay(cp) -> None:
+    """A close retires the message nobody is waiting for -- in the same commit.
 
-    Pinned rather than fixed, because fixing it needs a decision the design does
-    not make. ``outbox.status`` is ``pending``/``delivered``/``acked`` and
-    ``outbox_status_is_forward_only`` admits only forward steps along exactly
-    that ladder (``0001_initial.sql``), so there is no status meaning "nobody
-    wants this message any more" for a close to move the row to; and section 9.6
-    writes the stalled-relay query with no ``closed_at_ms`` predicate, the same
-    way section 9.6 writes :func:`relay_gaps` as the inner join whose coverage
-    hole ``test_an_unpoliced_gate_type_is_silently_never_aged`` pins.
+    The inverse of the defect this replaced. Closure moves every not-yet-acked
+    relay of the gate to ``cancelled`` (``0003_outbox_cancelled_status.sql``),
+    so a delivery worker reading the outbox is no longer told to present a
+    withdrawn question, and :func:`stalled_relays` stops naming the relay
+    instead of aging it without bound -- the "alarms forever" failure the
+    section 9.4 ``subject_gone`` outcome exists to end, which had reappeared one
+    table over.
 
-    So the two consequences are asserted here in full: a delivery worker reading
-    the outbox is still told to send a question for a gate that is closed, and
-    :func:`stalled_relays` keeps naming that relay for as long as the database
-    lives -- which is precisely the "alarms forever" failure the section 9.4
-    ``subject_gone`` outcome was introduced to end, reappearing one table over.
+    Cancellation is terminal but not an erasure, so the delivery evidence is
+    asserted to survive it: the row still says it was delivered, and still says
+    how many attempts it took.
     """
 
     gate_id = a_gate(cp)
@@ -947,34 +944,92 @@ def test_closing_a_gate_does_not_retire_its_undelivered_relay(cp) -> None:
         payload='{"question": "force-push?"}', message_id="msg-undelivered",
         enqueued_at_ms=T0,
     )
+    # Sent, and not answered: 'delivered' means sent, not acked, so this is the
+    # case a cancellation must still cover -- the question was put in front of
+    # a human and became moot while they were reading it.
+    deliver(cp, "msg-undelivered", T0 + 1_000)
+    cp.execute(
+        "UPDATE outbox SET retry_count = 2 WHERE message_id = 'msg-undelivered'"
+    )
+
+    assert stalled_relays(cp, now_ms=T0 + 10 * MINUTE, tolerance_ms=2 * MINUTE)
+
     close_gate(
         cp, gate_id=gate_id, outcome="withdrawn", actor_kind="worker",
         actor_id="worker-7", occurred_at_ms=T0 + MINUTE, recorded_at_ms=T0 + MINUTE,
     )
 
-    # Half one: the message is still queued for sending, after the question it
-    # asks has been withdrawn.
     assert outbox_rows(cp, f"gate/{gate_id}/presented") == [
-        ("msg-undelivered", "pending", 0)
+        ("msg-undelivered", "cancelled", 2)
     ]
 
-    # Half two: and it is reported as stalled indefinitely, growing older with
-    # every pass, with no state left in which it can stop being reported.
+    # However far the clock is wound on, the retired relay is not named again.
     for now in (T0 + 10 * MINUTE, T0 + 600 * MINUTE, T0 + 60_000 * MINUTE):
-        stalled = stalled_relays(cp, now_ms=now, tolerance_ms=2 * MINUTE)
-        assert [(row["gate_id"], row["to_stage"]) for row in stalled] == [
-            (gate_id, "presented")
-        ]
+        assert stalled_relays(cp, now_ms=now, tolerance_ms=2 * MINUTE) == ()
 
-    # The vocabulary really has no exit: the trigger refuses even the closest
-    # thing to a retirement, and no fourth status exists to move to.
-    admitted = {
-        row[0] for row in cp.execute(
-            "SELECT DISTINCT status FROM outbox"
-        ).fetchall()
-    }
-    assert admitted <= {"pending", "delivered", "acked"}
-    with pytest.raises(sqlite3.IntegrityError):
-        cp.execute(
-            "UPDATE outbox SET status = 'cancelled' WHERE message_id = 'msg-undelivered'"
-        )
+    # Terminal, not erased: what the row recorded about the delivery is intact.
+    delivered_at_ms, retry_count = cp.execute(
+        "SELECT delivered_at_ms, retry_count FROM outbox WHERE message_id = ?",
+        ("msg-undelivered",),
+    ).fetchone()
+    assert (delivered_at_ms, retry_count) == (T0 + 1_000, 2)
+
+
+def test_closing_a_gate_leaves_an_acked_relay_alone(cp) -> None:
+    """A gate that closed because it was answered keeps its answered relay.
+
+    The ack is what section 9.5 justifies the stage advance by, so rewriting the
+    row that carries it would delete the evidence for a decision that really was
+    taken. ``cancelled`` is for a message nobody is waiting for; an acked one
+    was already waited for and arrived.
+    """
+
+    gate_id = a_gate(cp)
+    enqueue_relay(
+        cp, gate_id=gate_id, to_stage="presented", recipient="secretary",
+        payload="{}", message_id="msg-answered", enqueued_at_ms=T0,
+    )
+    deliver(cp, "msg-answered", T0 + 1_000)
+    ack(cp, "msg-answered", T0 + 2_000)
+    advance_on_ack(
+        cp, gate_id=gate_id, to_stage="presented", actor_kind="secretary",
+        actor_id="secretary-1", occurred_at_ms=T0 + 2_000, recorded_at_ms=T0 + 2_000,
+    )
+
+    close_gate(
+        cp, gate_id=gate_id, outcome="withdrawn", actor_kind="worker",
+        actor_id="worker-7", occurred_at_ms=T0 + MINUTE, recorded_at_ms=T0 + MINUTE,
+    )
+
+    assert outbox_rows(cp, f"gate/{gate_id}/presented") == [
+        ("msg-answered", "acked", 0)
+    ]
+    assert cp.execute(
+        "SELECT acked_at_ms FROM outbox WHERE message_id = 'msg-answered'"
+    ).fetchone() == (T0 + 2_000,)
+
+
+def test_a_second_close_sweep_over_a_closed_gate_stays_a_no_op(cp) -> None:
+    """Re-running the sweep must not trip the trigger on the cancelled row.
+
+    ``cancelled`` is terminal, so a second attempt to cancel the same row would
+    be a step out of a terminal status and an ``IntegrityError``. close_gate's
+    own idempotence (returning ``False`` for a re-close with the same outcome)
+    is what keeps that unreachable, and this pins it -- a reconcile sweep runs
+    again every period, over gates it closed last time.
+    """
+
+    gate_id = a_gate(cp)
+    enqueue_relay(
+        cp, gate_id=gate_id, to_stage="presented", recipient="secretary",
+        payload="{}", message_id="msg-twice", enqueued_at_ms=T0,
+    )
+    kwargs = dict(
+        gate_id=gate_id, outcome="withdrawn", actor_kind="worker",
+        actor_id="worker-7", occurred_at_ms=T0 + MINUTE, recorded_at_ms=T0 + MINUTE,
+    )
+    assert close_gate(cp, **kwargs) is True
+    assert close_gate(cp, **kwargs) is False
+    assert outbox_rows(cp, f"gate/{gate_id}/presented") == [
+        ("msg-twice", "cancelled", 0)
+    ]
