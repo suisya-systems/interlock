@@ -441,9 +441,13 @@ def test_a_claimant_that_stalls_in_the_readback_never_returns_success(
         a.start()
 
     assert stalled["b"].session_id == caught.value.session_id
-    # A stopped its own child and left a durable refusal; B's confirmed
-    # binding is untouched and remains the run's single active one.
-    assert caught.value.session_id in provider.stop_calls
+    # A left a durable refusal and stood down from the stop: B has confirmed
+    # the binding, so a session-level stop from A could have killed the very
+    # worker B adopted. A's possibly-rogue process is surfaced as an
+    # unresolved hazard, not silently trusted and not blindly killed.
+    assert caught.value.stop_attempted is False
+    assert caught.value.session_id not in provider.stop_calls
+    assert "UNRESOLVED hazard" in str(caught.value)
     assert any("post_spawn_gate" in row["kind"] for row in refusals(cp))
     assert [tuple(row) for row in active_rows(cp)] == [
         (stalled["b"].session_id, "identity_confirmed", "observed")

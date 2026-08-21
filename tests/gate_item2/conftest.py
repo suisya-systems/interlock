@@ -230,6 +230,7 @@ def make_orchestrator(cp, clock, provider, uuids, tmp_path):
             session_uuid_factory=uuids,
             ttl_ms=TTL_MS,
             readback_attempts=3,
+            wait=None,  # the scripted provider answers synchronously
         )
         options.update(overrides)
         return SessionOrchestrator(cp, provider, **options)

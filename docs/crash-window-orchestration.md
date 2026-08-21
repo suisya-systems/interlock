@@ -75,11 +75,16 @@ post-spawn validation, both fenced. Two shapes follow:
   the read-back commit itself (the walk's final step is *always* a fenced
   write; a phase that needs no confirm still ends in a fenced gate, so a
   claimant whose binding was moved by the takeover is refused rather than
-  returned as success) — detects the stale token, the just-created child is
-  ordered stopped at once, and `LoserTerminated` carries both the measured
-  detection→stop latency and the provider's own stop verdict
-  (`stop_confirmed`): an unconfirmed stop is reported as unconfirmed, never
-  as a termination that happened.
+  returned as success) — detects the stale token, and the loser then acts
+  **coordinated with the holder, never blind**: while no takeover writer has
+  confirmed the run's binding, the loser stops its just-created child at once;
+  once one has, a session-level stop could kill the *winner's* adopted worker
+  (a stop cannot name a process generation), so the loser stands down and
+  surfaces its possibly-rogue process as an unresolved hazard.
+  `LoserTerminated` carries all of it without overstatement: whether a stop
+  was attempted (`stop_attempted`), the provider's own verdict on it
+  (`stop_confirmed` — an unconfirmed stop is reported as unconfirmed, never
+  as a termination that happened), and the measured detection→stop latency.
 
 ## 4. The recovery protocol (resolve first, resume only, adopt when alive)
 

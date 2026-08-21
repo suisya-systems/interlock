@@ -72,6 +72,7 @@ Spike status: throwaway by default (D-0026); the durable half is the tests.
 from __future__ import annotations
 
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional
 
@@ -136,6 +137,10 @@ SEAMS = (
 )
 
 
+#: Sentinel distinguishing "not given" (paced default) from an explicit None.
+_DEFAULT_WAIT = object()
+
+
 class OrchestrationRefused(RuntimeError):
     """Base for this module's own refusals.
 
@@ -188,6 +193,7 @@ class LoserTerminated(OrchestrationRefused):
         terminated_at_ms: int,
         stop_answer: object,
         stop_confirmed: bool,
+        stop_attempted: bool = True,
     ) -> None:
         super().__init__(message)
         self.session_id = session_id
@@ -196,6 +202,12 @@ class LoserTerminated(OrchestrationRefused):
         self.terminated_at_ms = terminated_at_ms
         self.stop_answer = stop_answer
         self.stop_confirmed = stop_confirmed
+        #: False when the loser deliberately did not fire: the run's binding
+        #: was already confirmed by the takeover writer, so a session-level
+        #: stop could have killed the *winner's* adopted worker. The loser's
+        #: possibly-rogue process is then an unresolved hazard this exception
+        #: surfaces, never a termination that is claimed.
+        self.stop_attempted = stop_attempted
 
     @property
     def termination_latency_ms(self) -> int:
@@ -265,7 +277,7 @@ class SessionOrchestrator:
             default_identity_confirmation
         ),
         readback_attempts: int = 50,
-        wait: Optional[Callable[[], None]] = None,
+        wait: object = _DEFAULT_WAIT,
         attempt_id_factory: Optional[Callable[[], str]] = None,
         seam: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -285,7 +297,17 @@ class SessionOrchestrator:
         self._resource = resource if resource is not None else f"session-run:{run_id}"
         self._identity_confirmed = identity_confirmed
         self._readback_attempts = readback_attempts
-        self._wait = wait
+        if wait is _DEFAULT_WAIT:
+            # A real provider answers start() the instant Popen returns, long
+            # before the child has emitted its identity; back-to-back polls
+            # would exhaust every attempt against a healthy child. The default
+            # is therefore paced -- the pace is IO pacing against a live
+            # subprocess, never a timestamp and never a measured admission
+            # figure (U34). Pass wait=None for a deterministic in-memory
+            # provider, or your own callable for a different policy.
+            self._wait: Optional[Callable[[], None]] = lambda: time.sleep(0.05)
+        else:
+            self._wait = wait  # type: ignore[assignment]
         self._attempt_id_factory = attempt_id_factory
         self._seam = seam
         self._gate_sequence = 0
@@ -343,6 +365,38 @@ class SessionOrchestrator:
         self, refusal: StaleWriterRefused, session_id: str
     ) -> "LoserTerminated":
         detected = self._now_ms()
+        # A session-level stop cannot name a process generation, so firing it
+        # blind could kill the *winner's* worker: a takeover writer that has
+        # already completed its walk (the run's binding is confirmed) may have
+        # adopted the very child this loser spawned. The loser therefore stops
+        # only while no takeover writer has confirmed the binding; once one
+        # has, the loser stands down and surfaces its possibly-rogue process
+        # as an unresolved hazard instead -- coordinated with the holder,
+        # never a blind kill and never a silent trust.
+        binding = session_binding.binding_for_session(self._connection, session_id)
+        winner_confirmed = (
+            binding is not None
+            and binding.released_at_ms is None
+            and binding.binding_phase == PHASE_IDENTITY_CONFIRMED
+        )
+        if winner_confirmed:
+            terminated = self._now_ms()
+            return LoserTerminated(
+                f"claimant {self._holder!r} lost the lease on "
+                f"{self._resource!r} inside the spawn-admission critical "
+                f"section; the takeover writer has already confirmed the "
+                f"binding for session {session_id!r}, so no session-level stop "
+                "was fired (it could kill the winner's adopted worker). Any "
+                "process this claimant created is an UNRESOLVED hazard the "
+                "holder must reconcile",
+                session_id=session_id,
+                refusal=refusal,
+                detected_at_ms=detected,
+                terminated_at_ms=terminated,
+                stop_answer=None,
+                stop_confirmed=False,
+                stop_attempted=False,
+            )
         stop_answer = self._provider.stop(session_id)
         terminated = self._now_ms()
         # The provider's own verdict, never assumed: an Ok is the post-stop
@@ -441,7 +495,14 @@ class SessionOrchestrator:
         for attempt in range(self._readback_attempts):
             answer = self._provider.read_state(session_id)
             last_answer = answer
-            if isinstance(answer, Ok) and self._identity_confirmed(answer.value):
+            if (
+                isinstance(answer, Ok)
+                # The read-back must positively name the committed identity
+                # (D-0027): a readout about some other id -- however healthy
+                # -- confirms nothing about this binding.
+                and answer.value.session_id == session_id
+                and self._identity_confirmed(answer.value)
+            ):
                 return answer.value
             if attempt + 1 < self._readback_attempts and self._wait is not None:
                 self._wait()

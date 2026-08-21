@@ -177,10 +177,14 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   - **The admission→exec window is open by construction.** A process creation cannot be made
     transactional with a SQLite commit, so a claimant that loses its lease *between* its fenced
     admission commit and its `exec` can bring a process into existence. What is guaranteed — and
-    tested — is that the very next fenced write detects the stale token and the child is ordered
-    stopped at once; the refusal carries the measured detection→stop latency **and the provider's
-    own stop verdict** (`LoserTerminated.stop_confirmed`) — a stop the provider could not confirm
-    is surfaced as unconfirmed, never dressed up as a termination that happened. Two scope
+    tested — is that the very next fenced write detects the stale token, and that the loser then
+    acts coordinated with the holder rather than blind: while no takeover writer has confirmed the
+    binding, the loser's child is ordered stopped at once; once one has, a session-level stop
+    could kill the winner's adopted worker, so the loser stands down and its possibly-rogue
+    process is surfaced as an unresolved hazard on the refusal (`stop_attempted=False`) for the
+    holder to reconcile. The refusal carries the measured detection→stop latency **and the
+    provider's own stop verdict** (`LoserTerminated.stop_confirmed`) — a stop the provider could
+    not confirm is surfaced as unconfirmed, never dressed up as a termination that happened. Two scope
     caveats, stated: the stopped-claimant shapes are exercised deterministically — the pause is
     simulated by advancing the injected clock and raising the epoch at the exact seam a stopped
     process would resume from, on both sides of the admission write and during the read-back
