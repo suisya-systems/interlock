@@ -1,0 +1,5 @@
+{"offset_ms": 0, "kind": "run_started", "run_id": "run-quiet-01", "session_id": "sess-quiet-01"}
+{"offset_ms": 5000, "kind": "session_output", "session_id": "sess-quiet-01", "note": "starts a long single-shot compile"}
+{"offset_ms": 605000, "kind": "observation_probe", "session_id": "sess-quiet-01", "result": "ok", "output_since_last_ms": 0}
+{"offset_ms": 905000, "kind": "observation_probe", "session_id": "sess-quiet-01", "result": "ok", "output_since_last_ms": 0}
+{"offset_ms": 950000, "kind": "session_output", "session_id": "sess-quiet-01", "note": "compile finishes and the worker resumes"}

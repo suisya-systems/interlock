@@ -363,7 +363,65 @@ def resolve_tolerance_ms(
             f"{incident_class!r} has threshold_kind={kind!r}, which is a multiple "
             "of the subject's own interval or TTL; a subject is required"
         )
-    return value * _subject_unit_ms(connection, threshold_kind=kind, subject=subject)
+    return value * subject_unit_ms(connection, threshold_kind=kind, subject=subject)
+
+
+def subject_unit_ms(
+    connection: sqlite3.Connection, *, threshold_kind: str, subject: str
+) -> int:
+    """The duration one unit of a relative multiple stands for, for this subject.
+
+    A *subject unit* is the number a relative policy value is multiplied by, and
+    which number that is follows from the kind:
+
+    * ``lease_ttl_multiple`` -- **that lease's own TTL**, i.e.
+      ``expires_at_ms - acquired_at_ms`` for the ``lease`` row named by
+      *subject* (its ``resource``). ``lease_orphan``'s ``T`` and ``L`` are both
+      multiples of it (``time-base-policy.md`` section 3.2).
+    * ``scope_interval_multiple`` -- **that scope's** ``expected_interval_ms``,
+      for the ``watcher_scope`` row named by *subject* (its ``scope_id``).
+
+    **This is public, and it is one function, because both sides of the budget
+    inequality need it.** :func:`resolve_tolerance_ms` scales ``T`` here, and
+    :func:`~claude_org_runtime.measurement.windows.resolve_budget_ms`
+    scales ``L`` here. ``D-0041``
+    narrowed the DDL's ``T + P <= L`` ``CHECK`` to the rows where both sides are
+    absolute, on the explicit promise that relative rows are asserted per subject
+    at reconcile time (:func:`budget_violations`) -- so the two sides are compared
+    to each other, and comparing them is only meaningful while they were scaled by
+    the *same* number.
+
+    A second copy of these two queries on the ``L`` side would agree with this one
+    exactly until the day a unit changed -- a lease re-acquired with a different
+    TTL, a scope re-registered with a different interval, a column renamed in a
+    migration -- and from that day ``T`` and ``L`` would be scaled by different
+    numbers for the same subject. Nothing raises when that happens: the pass still
+    runs and still reports, but ``T + P <= L`` is then an inequality between two
+    different units. Which way it lies is whichever way the drift went -- a budget
+    silently too generous hides a detector that is late, a budget silently too
+    tight alarms on scopes that are fine -- so there is one function, and callers
+    outside this module call this name.
+    """
+
+    if threshold_kind == "scope_interval_multiple":
+        row = connection.execute(
+            "SELECT expected_interval_ms FROM watcher_scope WHERE scope_id = ?",
+            (subject,),
+        ).fetchone()
+        if row is None:
+            raise PolicyUsageError(f"no watcher_scope with scope_id={subject!r}")
+        return int(row[0])
+
+    if threshold_kind == "lease_ttl_multiple":
+        row = connection.execute(
+            "SELECT expires_at_ms - acquired_at_ms FROM lease WHERE resource = ?",
+            (subject,),
+        ).fetchone()
+        if row is None:
+            raise PolicyUsageError(f"no lease with resource={subject!r}")
+        return int(row[0])
+
+    raise PolicyRefusal(f"{threshold_kind!r} names no subject unit")
 
 
 def budget_violations(
@@ -450,32 +508,6 @@ def _detection_latency_mapping(row: Sequence[Any]) -> Mapping[str, Any]:
             "budget_kind": budget_kind,
         }
     )
-
-
-def _subject_unit_ms(
-    connection: sqlite3.Connection, *, threshold_kind: str, subject: str
-) -> int:
-    """The duration one unit of a relative multiple stands for, for this subject."""
-
-    if threshold_kind == "scope_interval_multiple":
-        row = connection.execute(
-            "SELECT expected_interval_ms FROM watcher_scope WHERE scope_id = ?",
-            (subject,),
-        ).fetchone()
-        if row is None:
-            raise PolicyUsageError(f"no watcher_scope with scope_id={subject!r}")
-        return int(row[0])
-
-    if threshold_kind == "lease_ttl_multiple":
-        row = connection.execute(
-            "SELECT expires_at_ms - acquired_at_ms FROM lease WHERE resource = ?",
-            (subject,),
-        ).fetchone()
-        if row is None:
-            raise PolicyUsageError(f"no lease with resource={subject!r}")
-        return int(row[0])
-
-    raise PolicyRefusal(f"{threshold_kind!r} names no subject unit")
 
 
 def _violations_for_class(

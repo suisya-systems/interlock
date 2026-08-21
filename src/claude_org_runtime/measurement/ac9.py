@@ -82,6 +82,22 @@ does not convert one into the other". A harness that printed a verdict would
 convert them, answering an open question by inertia. The targets print as
 targets, the cohort size prints beside every rate, and the reader judges.
 
+**``ai_invocation`` is read here and written nowhere here.** It is new state,
+named in ``D-0029``'s entity list extension, and its writer is the component
+that invokes the Dispatcher AI -- a single writer *by construction*, because the
+AI is on-demand and incident-triggered (``D-0003``), so there is no second
+process that could be appending rows concurrently. That property is what lets
+this module read the table as a settled ledger instead of a racing one, and the
+property survives only while nothing else writes it. This module therefore
+issues ``SELECT`` and nothing else against it: no backfill of a missing
+``output_tokens``, no repair of a row whose ``usage_status`` looks wrong, no
+marking of a row as counted. Every such convenience would make the harness a
+second writer to the table whose single-writer guarantee its own numbers rest
+on, and would do it inside the report that is supposed to be evidence
+(``measurement-harness.md`` section 7, ``D-0040``). A row that cannot be read
+honestly is itemised -- :data:`Ac9Report.unbounded_missing`,
+:data:`Ac9Report.unconfirmed_response_count` -- never corrected.
+
 **Read-only, no clock.** The connection is the one
 :func:`~claude_org_runtime.measurement.reader.open_for_measurement` returns --
 read-only by capability, not by this module's good behaviour -- and every
@@ -109,6 +125,7 @@ __all__ = [
     "Ac9MeasurementRefused",
     "Ac9Report",
     "BaselineRefused",
+    "COHORT_INVOCATIONS_QUERY",
     "Figure",
     "KIND_ASSUMPTION",
     "KIND_FACT",
@@ -116,6 +133,8 @@ __all__ = [
     "MeasuredBaseline",
     "OUTPUT_TOKEN_REDUCTION_TARGET",
     "PROMPT_REDUCTION_TARGET",
+    "QUERY_DEFINITIONS",
+    "UNATTRIBUTED_INVOCATIONS_QUERY",
     "UnknownUsageStatusInLedgerRefused",
     "V1_MEASURED_BASELINE",
     "measure_ac9",
@@ -136,6 +155,50 @@ OUTPUT_TOKEN_REDUCTION_TARGET = 0.90
 KIND_FACT = "fact"
 KIND_LOWER_BOUND = "lower bound on the reduction"
 KIND_ASSUMPTION = "assumption, NOT a bound"
+
+
+#: The statements this module executes, as the text that is **executed**.
+#:
+#: ``measurement-harness.md`` section 6 requires ``query_definitions`` to carry
+#: "every query the report ran, as text ... so a reader can run them by hand",
+#: and a statement written inline at its call site cannot honour that: the only
+#: way to name it in the header would be a second copy, which agrees with the
+#: executed text on the day it is pasted and goes on being printed after the
+#: executed text changes. The header would then certify a query that never ran,
+#: and nothing in the artefact would show it. So the statement is lifted here,
+#: executed from here, and carried in :data:`QUERY_DEFINITIONS` -- the same move
+#: ``control_plane/events.py`` makes for ``ORPHANED_OUTBOX_SQL`` and for the same
+#: reason: a statement that exists only inline can be changed without any test
+#: noticing.
+#:
+#: ``{placeholders}`` expands to one ``?`` per run id in the chunk. SQLite has no
+#: parameter form for an ``IN`` list, so the placeholders are generated and the
+#: run ids are still bound -- no run id ever reaches the statement as text. The
+#: catalogue carries the template, which is the part a reader needs in order to
+#: re-run it; the expansion is mechanical.
+COHORT_INVOCATIONS_QUERY = """
+SELECT invocation_id, incident_id, usage_status, output_tokens, input_tokens,
+       cache_read_tokens, max_output_tokens, model_response_count,
+       attempt_count, finished_at_ms
+  FROM ai_invocation
+ WHERE run_id IN ({placeholders})
+"""
+
+#: Half-open ``[start, end)`` on ``started_at_ms`` (``time-base-policy.md``
+#: section 2, rule 4).
+UNATTRIBUTED_INVOCATIONS_QUERY = """
+SELECT COUNT(*) FROM ai_invocation
+ WHERE run_id IS NULL
+   AND started_at_ms >= :period_start_ms
+   AND started_at_ms < :period_end_ms
+"""
+
+QUERY_DEFINITIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "cohort_invocations": COHORT_INVOCATIONS_QUERY,
+        "unattributed_invocations": UNATTRIBUTED_INVOCATIONS_QUERY,
+    }
+)
 
 
 class Ac9MeasurementRefused(ControlPlaneRefusal):
@@ -820,24 +883,21 @@ def _read_cohort_invocations(
 
     if not run_ids:
         return ()
-    columns = (
-        "invocation_id, incident_id, usage_status, output_tokens, input_tokens, "
-        "cache_read_tokens, max_output_tokens, model_response_count, "
-        "attempt_count, finished_at_ms"
-    )
-    names = [name.strip() for name in columns.split(",")]
     rows: list[Mapping[str, object]] = []
     for start in range(0, len(run_ids), 500):
         chunk = run_ids[start : start + 500]
         placeholders = ", ".join("?" for _ in chunk)
-        rows.extend(
-            MappingProxyType(dict(zip(names, row)))
-            for row in connection.execute(
-                f"SELECT {columns} FROM ai_invocation "
-                f"WHERE run_id IN ({placeholders})",
-                tuple(chunk),
-            )
+        cursor = connection.execute(
+            COHORT_INVOCATIONS_QUERY.format(placeholders=placeholders),
+            tuple(chunk),
         )
+        # The row mapping's keys are read off the cursor rather than off a
+        # second list of column names kept beside the statement: the two would
+        # agree until a column was added to one of them, and the half that
+        # drifted would be the half naming the values every figure is computed
+        # from.
+        names = [column[0] for column in cursor.description]
+        rows.extend(MappingProxyType(dict(zip(names, row))) for row in cursor)
     return tuple(sorted(rows, key=lambda row: row["invocation_id"]))
 
 
@@ -853,12 +913,7 @@ def _count_unattributed(
     """
 
     return connection.execute(
-        """
-        SELECT COUNT(*) FROM ai_invocation
-         WHERE run_id IS NULL
-           AND started_at_ms >= :period_start_ms
-           AND started_at_ms < :period_end_ms
-        """,
+        UNATTRIBUTED_INVOCATIONS_QUERY,
         {"period_start_ms": period_start_ms, "period_end_ms": period_end_ms},
     ).fetchone()[0]
 

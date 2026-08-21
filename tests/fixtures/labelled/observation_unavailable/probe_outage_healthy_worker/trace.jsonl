@@ -1,0 +1,6 @@
+{"offset_ms": 0, "kind": "run_started", "run_id": "run-outage-01", "session_id": "sess-outage-01"}
+{"offset_ms": 10000, "kind": "observation_probe", "session_id": "sess-outage-01", "result": "ok"}
+{"offset_ms": 70000, "kind": "observation_probe", "session_id": "sess-outage-01", "result": "error", "error": "pane_not_found"}
+{"offset_ms": 130000, "kind": "observation_probe", "session_id": "sess-outage-01", "result": "error", "error": "pane_not_found"}
+{"offset_ms": 190000, "kind": "observation_probe", "session_id": "sess-outage-01", "result": "error", "error": "pane_not_found"}
+{"offset_ms": 250000, "kind": "worker_side_evidence", "session_id": "sess-outage-01", "note": "the worker committed while the probe was down; it was healthy throughout"}

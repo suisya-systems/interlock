@@ -39,6 +39,7 @@ from claude_org_runtime.measurement import reader
 from claude_org_runtime.measurement.reader import (
     ReadOnlyCapabilityRefused,
     open_for_measurement,
+    prove_read_only,
 )
 
 T0 = 1_700_000_000_000  # an arbitrary fixed epoch-milliseconds instant
@@ -268,6 +269,102 @@ def test_only_a_read_only_error_counts_as_proof_of_mode_ro(production_db: Path, 
 
     assert reader._the_error_says_the_database_is_read_only(read_only_error.value)
     assert not reader._the_error_says_the_database_is_read_only(busy_error.value)
+
+
+# --------------------------------------------------------------------------
+# the public entry point: the same probe, off a connection the caller holds
+# --------------------------------------------------------------------------
+
+
+def test_open_for_measurement_proves_the_capability_through_the_public_probe(
+    production_db: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # What makes the tests below meaningful: the public name is not a second
+    # entry point that happens to agree, it is the one open_for_measurement
+    # itself goes through. A spy rather than a source read, because a copy of
+    # the probe added later would still pass a source read of this module.
+    calls: list[tuple[object, object]] = []
+    real = reader.prove_read_only
+
+    def spy(connection, target):
+        calls.append((connection, target))
+        return real(connection, target)
+
+    monkeypatch.setattr(reader, "prove_read_only", spy)
+    connection = open_for_measurement(production_db)
+    try:
+        assert [(handle, target) for handle, target in calls] == [
+            (connection, production_db)
+        ]
+    finally:
+        connection.close()
+
+
+def test_the_public_probe_certifies_a_connection_the_caller_opened_read_only(
+    production_db: Path,
+):
+    # The case the public name exists for (ACCEPTANCE.md section 3 condition 5):
+    # the evidence is taken off the live connection the report is measured
+    # through, not off a second connection opened to prove a point about it.
+    before = digest(production_db)
+    uri = production_db.resolve().as_uri() + "?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, isolation_level=None)
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        assert prove_read_only(connection, production_db) is None
+        # The probe lowers the connection guard for one statement; a caller
+        # handing over an armed connection must get it back armed, or the
+        # harness disarmed itself while checking that it was armed.
+        assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+    finally:
+        connection.close()
+    assert digest(production_db) == before
+    assert sidecars(production_db) == []
+
+
+def test_the_public_probe_refuses_a_writable_connection(production_db: Path):
+    # Same verdict open_for_measurement reaches when its URI has stopped
+    # carrying mode=ro -- reached here on a handle the caller opened, since a
+    # report measured through a writable connection could have changed the
+    # thing it was reporting.
+    before = digest(production_db)
+    connection = sqlite3.connect(production_db, isolation_level=None)
+    try:
+        with pytest.raises(ReadOnlyCapabilityRefused, match="was not opened mode=ro"):
+            prove_read_only(connection, production_db)
+        assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+    finally:
+        connection.close()
+    # The probe writes the user_version the file already holds and rolls back,
+    # so even the connection that turned out to be writable changed nothing.
+    assert digest(production_db) == before
+    assert sidecars(production_db) == []
+
+
+def test_the_public_probe_refuses_a_busy_database_as_inconclusive(production_db: Path):
+    # The defect that made this probe public rather than copied: a writable
+    # connection blocked by another writer's RESERVED lock raises the same
+    # exception type as a read-only file, and the earlier probe read that as
+    # proof. "Could not be proved" and "was writable" are two different facts;
+    # conflating them sends an operator to fix a URI that is not broken, and it
+    # is how a live control plane certified a writable handle as read-only.
+    writer = sqlite3.connect(production_db, isolation_level=None)
+    # timeout=0: with the default busy handler the blocked connection would sit
+    # for five seconds before returning the very answer this test is about.
+    blocked = sqlite3.connect(production_db, isolation_level=None, timeout=0)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ReadOnlyCapabilityRefused) as refusal:
+            prove_read_only(blocked, production_db)
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+        blocked.close()
+
+    message = str(refusal.value)
+    assert "inconclusive" in message
+    assert "database is locked" in message
+    assert "was not opened mode=ro" not in message
 
 
 def test_query_only_that_does_not_take_effect_is_refused(production_db: Path):

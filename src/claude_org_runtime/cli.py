@@ -7,6 +7,7 @@ Subcommands:
 - ``sandbox doctor ...`` -> :mod:`claude_org_runtime.settings.sandbox_doctor`
 - ``migrate ...`` -> :mod:`claude_org_runtime.migrate.v1_to_v2`
 - ``attention scan|watch ...`` -> :mod:`claude_org_runtime.attention.cli`
+- ``measure report ...`` -> :mod:`claude_org_runtime.measurement.cli`
 
 The subcommands re-use the same parser builders the per-module CLIs
 expose, so flags stay in lock-step.
@@ -21,6 +22,7 @@ from typing import Optional
 from . import __version__
 from .attention import cli as attention_cli
 from .dispatcher import runner as dispatcher_runner
+from .measurement import cli as measurement_cli
 from .migrate import v1_to_v2 as migrate_v1_to_v2
 from .settings import generator as settings_generator
 from .settings import sandbox_doctor
@@ -117,6 +119,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     attention_sub = attention_p.add_subparsers(dest="cmd", required=True)
     attention_cli.add_subparsers(attention_sub)
+
+    # measure (the read-only measurement harness, docs/measurement-harness.md)
+    measure_p = sub.add_parser(
+        "measure",
+        help=(
+            "Measurement harness over a production control plane: AC-9 figures "
+            "with the section 6 provenance header. Read-only by capability."
+        ),
+    )
+    measure_sub = measure_p.add_subparsers(dest="cmd", required=True)
+    measurement_cli.add_subparsers(measure_sub)
 
     # migrate
     migrate_p = sub.add_parser(

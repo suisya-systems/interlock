@@ -24,7 +24,9 @@ issued and did not take, reads exactly like a harness that is behaving. So
 ``query_only`` is read back, and the file's own access mode is proved
 behaviourally -- by offering the file a write it must refuse, with
 ``query_only`` momentarily off so that the connection-level guard cannot answer
-in the file's place (see :func:`_prove_the_file_itself_refuses_writes`). Two independent mechanisms mean
+in the file's place (see :func:`prove_read_only`, public so that a caller
+holding a live connection evidences the capability off *that* connection rather
+than off a second copy of this probe). Two independent mechanisms mean
 neither one's failure is load-bearing, which is only true if each is *checked*.
 
 **Identity, version and checksum verification is the migrator's, not a second
@@ -86,6 +88,7 @@ __all__ = [
     "MissingStateRefused",
     "ReadOnlyCapabilityRefused",
     "open_for_measurement",
+    "prove_read_only",
 ]
 
 
@@ -178,7 +181,7 @@ def open_for_measurement(
         # too, and a corrupt file must be refused as corrupt rather than escape
         # as a raw sqlite3 error from the harness's first line.
         try:
-            _prove_read_only(target, connection)
+            _arm_and_verify_both_mechanisms(target, connection)
             applied = verify_production_database(
                 target, connection, steps, require_ledger=True
             )
@@ -212,8 +215,14 @@ def open_for_measurement(
 # --------------------------------------------------------------------------
 
 
-def _prove_read_only(target: Path, connection: sqlite3.Connection) -> None:
+def _arm_and_verify_both_mechanisms(
+    target: Path, connection: sqlite3.Connection
+) -> None:
     """Put both mechanisms in force and read both back, or refuse.
+
+    Private because it *arms* the connection it is given, which is only ever
+    correct on a connection this module just opened; a caller holding someone
+    else's live connection wants :func:`prove_read_only`, which only asks.
 
     The order matters: ``query_only`` is established and confirmed *first*, so
     that the file-mode probe below -- which has to lower ``query_only`` to ask
@@ -224,7 +233,7 @@ def _prove_read_only(target: Path, connection: sqlite3.Connection) -> None:
 
     connection.execute("PRAGMA query_only = ON")
     _require_query_only(target, connection, when="immediately after setting it")
-    _prove_the_file_itself_refuses_writes(target, connection)
+    prove_read_only(connection, target)
     # Re-read after the probe: the probe is the one thing in this module that
     # turns the guard off, so it is also the one thing that could leave it off.
     _require_query_only(target, connection, when="after the file-mode probe")
@@ -252,10 +261,23 @@ def _require_query_only(
         )
 
 
-def _prove_the_file_itself_refuses_writes(
-    target: Path, connection: sqlite3.Connection
-) -> None:
-    """Prove ``mode=ro`` is in force, by asking the file to accept a write.
+def prove_read_only(connection: sqlite3.Connection, target: str | Path) -> None:
+    """Evidence, off *connection* itself, that the file behind it refuses writes.
+
+    Public and taking the connection first because this is the only correct
+    answer to "was **this** handle opened ``mode=ro``?", and more than one
+    caller needs it. :func:`open_for_measurement` proves the capability for the
+    connection it opens; ``ACCEPTANCE.md`` section 3 condition 5 asks for the
+    evidence to come off the **live** connection the figures are measured
+    through, which for a report already holding a connection is a different
+    object. A second copy of the probe would agree with this one until one of
+    the three subtleties below was fixed in one place only -- and the copy that
+    drifts is the one certifying a writable handle as read-only. So there is one
+    implementation and this is it.
+
+    Returning normally is the evidence: the file refused a write **as
+    read-only**. Every other outcome raises
+    :class:`ReadOnlyCapabilityRefused`.
 
     There is no pragma that reports the access mode a database was opened with,
     and Python's ``sqlite3`` does not expose ``sqlite3_db_readonly()``, so the
@@ -298,6 +320,22 @@ def _prove_the_file_itself_refuses_writes(
     mechanism. An inconclusive probe is not a proof, so anything but a
     read-only error is a refusal now -- see
     :func:`_the_error_says_the_database_is_read_only`.
+
+    **An inconclusive probe is a refusal, not a pass**, and that distinction is
+    the whole defect this probe was rewritten to fix. "The capability could not
+    be proved" and "the capability was absent" are two different facts: the
+    refusal for contention says *inconclusive* and never says the database was
+    writable, because an operator sent after the wrong one goes and fixes a URI
+    that was never broken. Neither fact is a reason to go on measuring.
+
+    The connection is left with ``query_only = ON`` however this returns -- the
+    probe lowers the guard for exactly one statement and restores it in a
+    ``finally``, so a caller that hands over an armed connection gets it back
+    armed.
+
+    :raises ReadOnlyCapabilityRefused: if the write was accepted (the file is
+        not ``mode=ro``), or if it was refused by something other than SQLite's
+        read-only error, which proves nothing either way.
     """
 
     user_version = connection.execute("PRAGMA user_version").fetchone()[0]

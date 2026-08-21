@@ -88,11 +88,14 @@ from claude_org_runtime.measurement.reader import ControlPlaneRefusal
 
 __all__ = [
     "COHORT_REASONS",
+    "COHORT_RUNS_QUERY",
     "EXCLUDED_REASONS",
     "IN_FLIGHT_AT_PERIOD_END",
     "KNOWN_RUN_STATUSES",
+    "OWNERSHIP_COLLISION_QUERY",
     "OwnershipAssertionRefused",
     "PeriodNotClosedRefused",
+    "QUERY_DEFINITIONS",
     "RunCohort",
     "STARTED_BEFORE_PERIOD",
     "TERMINAL_RUN_STATUSES",
@@ -142,6 +145,43 @@ COHORT_REASONS: tuple[str, ...] = (
     IN_FLIGHT_AT_PERIOD_END,
     STARTED_BEFORE_PERIOD,
     TERMINAL_STATUS_UNKNOWN,
+)
+
+
+#: The statements this module executes, as the text that is **executed**.
+#:
+#: ``measurement-harness.md`` section 6 requires ``query_definitions`` to carry
+#: "every query the report ran, as text ... so a reader can run them by hand".
+#: A statement written inline at its call site cannot honour that -- the header
+#: could only name a pasted copy, which is right on the day it is pasted and
+#: goes on being printed after the executed text changes, certifying a query
+#: that never ran. Lifted here and executed from here, the way
+#: ``control_plane/events.py`` holds ``ORPHANED_OUTBOX_SQL``: a statement that
+#: exists only inline can be changed without any test noticing.
+#:
+#: ``created_at_ms < :period_end_ms`` is the only bound SQL carries; the rest of
+#: the walk goes through :func:`terminal_instant_ms` so the terminal-instant
+#: derivation exists in exactly one place. ``ORDER BY run_id`` makes the report
+#: byte-reproducible (``D-0040``).
+COHORT_RUNS_QUERY = """
+SELECT run_id, status, created_at_ms, updated_at_ms
+  FROM run
+ WHERE created_at_ms < :period_end_ms
+ ORDER BY run_id
+"""
+
+#: ``{placeholders}`` expands to one ``?`` per shadow run id in the chunk.
+#: SQLite has no parameter form for an ``IN`` list, so the placeholders are
+#: generated and the ids are still bound -- no run id reaches the statement as
+#: text. The catalogue carries the template, which is what a reader re-runs;
+#: the expansion is mechanical.
+OWNERSHIP_COLLISION_QUERY = "SELECT run_id FROM run WHERE run_id IN ({placeholders})"
+
+QUERY_DEFINITIONS: Mapping[str, str] = MappingProxyType(
+    {
+        "cohort_runs": COHORT_RUNS_QUERY,
+        "cohort_ownership_collision": OWNERSHIP_COLLISION_QUERY,
+    }
 )
 
 
@@ -358,18 +398,11 @@ def select_cohort(
     buckets[V1_OWNED].extend(shadow)
     cohort: list[str] = []
 
-    # created_at_ms < period_end_ms is the only bound SQL can carry without
-    # re-deriving the terminal instant in SQL as well; the rest of the walk goes
-    # through terminal_instant_ms so that the derivation exists once (see that
-    # function). ORDER BY run_id makes the report byte-reproducible (D-0040).
+    # The statement is COHORT_RUNS_QUERY rather than a literal here so that the
+    # provenance header names the text that ran (section 6); see that constant
+    # for why the window bound is the only one SQL carries.
     rows = connection.execute(
-        """
-        SELECT run_id, status, created_at_ms, updated_at_ms
-          FROM run
-         WHERE created_at_ms < :period_end_ms
-         ORDER BY run_id
-        """,
-        {"period_end_ms": period_end_ms},
+        COHORT_RUNS_QUERY, {"period_end_ms": period_end_ms}
     ).fetchall()
 
     for run_id, status, created_at_ms, updated_at_ms in rows:
@@ -428,7 +461,7 @@ def _assert_no_run_is_claimed_by_both(
         collisions.extend(
             row[0]
             for row in connection.execute(
-                f"SELECT run_id FROM run WHERE run_id IN ({placeholders})", chunk
+                OWNERSHIP_COLLISION_QUERY.format(placeholders=placeholders), chunk
             )
         )
     if collisions:

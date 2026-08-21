@@ -1,0 +1,9 @@
+{
+  "incident_class": "none",
+  "onset_offset_ms": null,
+  "tolerance_ms": null,
+  "budget_ms": null,
+  "fact_state": "NO_ACTIVITY_EVIDENCE",
+  "must_not_recommend": ["terminate_session", "restart_session"],
+  "provenance": "constructed_edge: fifteen minutes of silence from a worker that was computing the whole time. D-0005 and D-0006: NO_ACTIVITY_EVIDENCE is a fact and NOT an anomaly, so a row saying so is conforming and a stall alarm is the false positive this case exists to catch."
+}

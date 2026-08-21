@@ -1,0 +1,5 @@
+{"offset_ms": 0, "kind": "run_started", "run_id": "run-relay-01", "session_id": "sess-relay-01"}
+{"offset_ms": 30000, "kind": "gate_received", "run_id": "run-relay-01", "gate_id": "gate-relay-01", "gate_type": "worker_escalation", "stage": "received"}
+{"offset_ms": 210000, "kind": "reconcile_pass", "gate_id": "gate-relay-01", "stage": "received", "presented": false}
+{"offset_ms": 330000, "kind": "reconcile_pass", "gate_id": "gate-relay-01", "stage": "received", "presented": false}
+{"offset_ms": 450000, "kind": "reconcile_pass", "gate_id": "gate-relay-01", "stage": "received", "presented": false}

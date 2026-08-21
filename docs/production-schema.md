@@ -1528,11 +1528,21 @@ Reporting it as its own incident class keeps the budget an assertion rather than
 
 ## 11. What has been checked about this DDL
 
-The DDL above is a design, and no implementation accompanies it — but a design whose SQL does not
-parse, or whose constraints do not constrain, is not usable by the Issue that picks it up. So the
-blocks in this document and in [`measurement-harness.md`](./measurement-harness.md) were applied to
-an in-memory SQLite database on top of the spike schema, every parameterised query in them was
-prepared, and the load-bearing constraints were exercised directly:
+This section is the record of what was checked against SQLite **before** the implementation existed,
+and the shipped migration is held to it. When the DDL above was written it was a design ahead of any
+code — and a design whose SQL does not parse, or whose constraints do not constrain, is not usable by
+the Issue that picks it up. So the blocks in this document and in
+[`measurement-harness.md`](./measurement-harness.md) were applied to an in-memory SQLite database,
+every parameterised query in them was prepared, and the load-bearing constraints were exercised
+directly. The table below is that log, kept rather than retired.
+
+The DDL now ships as `src/claude_org_runtime/control_plane/migrations/0001_initial.sql` and is
+applied by the migrator, so this table is no longer the only place the claims live: every row of it
+is reproduced as a named test in `tests/control_plane/test_production_schema.py`, which reads the
+migration the runtime reads. A claim recorded here that the migration stops satisfying is now a test
+failure rather than a stale sentence — which is the point of not deleting the log. Where a row was
+added *after* the implementation found the design underspecified, it is marked `D-0041` and was
+verified the same way, against a database built by the migrator itself.
 
 | Claim | Observed |
 |---|---|
@@ -1567,6 +1577,12 @@ prepared, and the load-bearing constraints were exercised directly:
 | A `delivery` subscription without a recipient — and a `compute` subscription with one — are both refused at registration (§5.3) | Both abort; the two well-formed rows land |
 | The budget `CHECK` includes the reconcile period, and applies only where `threshold_kind` **and** `budget_kind` are both absolute (§10) | `T=180s + P=120s = L=300s` accepted; `T = L` and `T + P > L` both abort; a row relative on either side is admitted for the `policy_budget_violation` pass to assert per subject |
 | The silence query reads its multiple from the effective policy revision and scales it by the scope's own interval (§8.4) | Quiet for 2 intervals returns nothing; quiet for 3.3 intervals returns the scope |
+| `run.status` refuses a value outside the closed set (`D-0041`, §4.3) | `CHECK constraint failed: status IN ('created', 'running', 'suspended', 'completed', 'failed', 'cancelled')` |
+| A run does not leave a terminal status — including `completed → failed`, whose ranks are equal so no ordering comparison catches it (`D-0041`, §4.3) | Both `completed → failed` and `completed → running` abort with `run.status walks created -> running/suspended -> terminal; a terminal run is never reopened` |
+| A started run does not rewind to `created`, because a run whose start moves has no measurable lifetime (`D-0041`, §4.3) | `running → created` aborts with the same trigger |
+| `running` and `suspended` interconvert in **both** directions, because a suspend is a pause rather than a step (`D-0041`, §4.3) | `running → suspended` and `suspended → running` each affect 1 row |
+| `policy_detection_latency.budget_kind` is `CHECK`ed to its two values (`D-0041`, §10) | `CHECK constraint failed: budget_kind IN ('absolute_ms', 'lease_ttl_multiple')` |
+| The `T + P ≤ L` `CHECK` now applies only when `threshold_kind` **and** `budget_kind` are both `absolute_ms` (`D-0041`, §10) | `T=200s + P=120s > L=300s` aborts when both are absolute; the same `T` and `P` against `budget_kind='lease_ttl_multiple'`, `budget_ms=2` lands, for the `policy_budget_violation` pass to assert per subject |
 
 Two things this does **not** establish, and they are the reasons it is not a substitute for the
 implementation Issue's tests. It does not exercise the `T + P ≤ L` timing behaviour, which needs the
@@ -1593,12 +1609,19 @@ implementation carries.
   of `approve`/`restart`/`close`/`reassign` from the AI's tools is the enforcement, and the writer
   table records the intent.
 - **The gate policy seed is deliberately partial, and the gaps are data rather than special cases.**
-  `policy_gate_stage_tolerance` carries no `forwarded` row: the stage is terminal, the gate is closed,
-  and there is nothing left to be late for — so §9.6's detector simply never names it, exactly as its
-  `p.tolerance_ms IS NULL` opt-out never names `presented`. `policy_gate_stage_owner` *does* carry a
-  `forwarded` row, because its `ball_holder` is `NOT NULL` and the honest value is the Secretary, the
-  actor that performed the forward; a report attributing the closing leg then attributes it to the
-  component that did it rather than to `NULL`. Neither table is seeded for `gate_type` `'plan_approval'`
+  **Neither** policy table carries a `forwarded` row. `forwarded` is terminal — the gate is closed,
+  there is nothing left to be late for, and nobody is left holding the ball — which is exactly what
+  [`time-base-policy.md`](./time-base-policy.md)'s stage table records by giving the stage a dash in
+  every column. So `policy_gate_stage_tolerance` has no tolerance to state, and §9.6's detector simply
+  never names the stage, exactly as its `p.tolerance_ms IS NULL` opt-out never names `presented`.
+  `policy_gate_stage_owner` is silent for the same reason and not for a weaker one: the relay-gap
+  detector reaches both tables through the same tolerance join, so a stage with no tolerance row is
+  never asked who holds its ball, and an owner row for `forwarded` would be a row nothing reads. Its
+  `ball_holder` being `NOT NULL` is not an argument for inventing one — a value invented to satisfy a
+  `NOT NULL` is a value a report would then cite, which is worse than the absence it was papering
+  over. `0002_policy_seed.sql` seeds no such row and says so at length: deciding, in a migration file,
+  that the Secretary still holds a ball it has already put down is deciding policy where `D-0031` says
+  policy is versioned data. Neither table is seeded for `gate_type` `'plan_approval'`
   or `'risk_approval'`: [`time-base-policy.md`](./time-base-policy.md) decides no numbers for them, and
   inserting one anyway would be a policy decision taken in a migration file, which is the thing
   `D-0031` puts values in versioned data to avoid. A relay-gap detector that never names a gate type is
