@@ -18,8 +18,10 @@ from pathlib import Path
 
 HARNESS_ROOT = Path(__file__).resolve().parent
 
-#: The single module allowed to reach the implementation of the day.
-ADAPTER_MODULES = frozenset({"spike_driver.py"})
+#: The modules allowed to reach the implementation of the day: one adapter per
+#: component generation -- the S6/S7 spike driver, and #18's session driver
+#: over the real orchestrator and the C2 provider.
+ADAPTER_MODULES = frozenset({"spike_driver.py", "session_driver.py"})
 
 FORBIDDEN_ROOT = "claude_org_runtime"
 

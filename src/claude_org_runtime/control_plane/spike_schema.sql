@@ -90,11 +90,30 @@ CREATE TABLE run (
 -- vocabulary here would put an Agent-View-shaped (or claude -p-shaped)
 -- assumption into a provider-neutral store. Conversion to a D-0005 fact state
 -- belongs to the detector layer, versioned and fixture-tested.
+--
+-- binding_phase makes the PRE-SPAWN binding honest (D-0024, item 2). The
+-- binding is committed before the process exists, so at commit time there is
+-- no provider observation to record -- and recording one anyway would be the
+-- lie item 2 injects into. The phases are the injection points' own seams:
+--
+--   'prepared'           -- the identity is chosen and durably committed; no
+--                           spawn has been attempted as far as this row knows.
+--   'spawned'            -- the provider was asked to start the process; what
+--                           identity the provider actually assigned is NOT yet
+--                           known (exit 0 is not evidence -- D-0027).
+--   'identity_confirmed' -- the provider's own read-back named the committed
+--                           identity, and that read-back is itself committed.
+--
+-- Only 'identity_confirmed' may claim an observation; 'prepared' and 'spawned'
+-- rows are honestly 'unobserved' with a reason. This is a spike expression of
+-- the crash-window seams, not an answer to Q-0001: the real schema's DDL and
+-- writer table stay open, per the header of this file.
 -- --------------------------------------------------------------------------
 CREATE TABLE session (
     session_id          TEXT    PRIMARY KEY,
     run_id              TEXT    NOT NULL REFERENCES run(run_id),
     provider            TEXT    NOT NULL,
+    binding_phase       TEXT    NOT NULL,
     observation         TEXT    NOT NULL,
     provider_state      TEXT,
     observation_reason  TEXT,
@@ -105,6 +124,10 @@ CREATE TABLE session (
     CHECK (typeof(bound_at_ms) = 'integer'),
     CHECK (released_at_ms IS NULL OR typeof(released_at_ms) = 'integer'),
     CHECK (length(session_id) > 0),
+    CHECK (binding_phase IN ('prepared', 'spawned', 'identity_confirmed')),
+    -- A pre-read-back row may not claim an observation, and a confirmed row
+    -- must carry one: the equality binds the two vocabularies both ways.
+    CHECK ((binding_phase = 'identity_confirmed') = (observation = 'observed')),
     CHECK (observation IN ('observed', 'unobserved')),
     -- an observed readout carries a state word; an unobserved one carries a
     -- reason instead. Neither may be constructed empty (R4) -- and an empty
@@ -126,6 +149,22 @@ CREATE UNIQUE INDEX session_one_active_binding_per_run
 
 -- Recovery reads the binding from the run side (item 2's re-identification).
 CREATE INDEX session_by_run ON session(run_id);
+
+-- The phase only ever moves forward: prepared -> spawned -> identity_confirmed.
+-- A row that walked backwards would un-record a spawn or a read-back that
+-- already happened, which is exactly the evidence the crash-window kill matrix
+-- is read out of.
+CREATE TRIGGER session_binding_phase_is_forward_only
+BEFORE UPDATE OF binding_phase ON session
+WHEN NOT (
+       (OLD.binding_phase = NEW.binding_phase)
+    OR (OLD.binding_phase = 'prepared' AND NEW.binding_phase = 'spawned')
+    OR (OLD.binding_phase = 'spawned'  AND NEW.binding_phase = 'identity_confirmed')
+)
+BEGIN
+    SELECT RAISE(ABORT,
+        'session.binding_phase moves prepared -> spawned -> identity_confirmed, one step at a time');
+END;
 
 -- --------------------------------------------------------------------------
 -- lease -- exclusion, and the fencing token that makes it real.
