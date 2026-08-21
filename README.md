@@ -44,6 +44,7 @@ Slices landed so far:
 | Slice | What it is |
 |---|---|
 | S1 | The provisional `SessionProvider` interface — `session/provider.py` (D-0021) |
+| S2 | The C2 provider over Interlock-supervised `claude -p` subprocesses — `session/claude_cli_provider.py` |
 | S3 | The stub provider over local child processes — `session/stub_provider.py` |
 | S5 | The spike SQLite schema, marked as a spike schema — `control_plane/spike_schema.sql` |
 | S6 | The lease, with the fencing token validated atomically inside each protected write — `control_plane/lease.py`, [`docs/lease-fencing.md`](docs/lease-fencing.md) |

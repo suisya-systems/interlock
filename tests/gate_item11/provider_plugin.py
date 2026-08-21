@@ -107,6 +107,14 @@ def bind(entry: "registry.ProviderEntry", root: Path) -> BoundProvider:
         f"{entry.id}.start",
     )
     observed = _wait_for_report(provider, readout, entry)
+    disqualification = entry.disqualified(observed)
+    if disqualification is not None:
+        # Fail closed (D-0010): a backend whose bound session already proves
+        # it could not sustain one would make every comparison below true of
+        # a measurement that measured nothing.
+        raise RuntimeError(
+            f"gate item 11: {entry.id} failed qualification -- {disqualification}"
+        )
     # Qualify the provider against the control plane *before* the suite runs.
     # Without this the binding would only prove that a child can be started
     # alongside the suite, and a provider the control plane could not use would

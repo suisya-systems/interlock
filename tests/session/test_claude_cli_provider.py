@@ -1,0 +1,1170 @@
+"""S2 -- the C2 provider, exercised hermetically against a fake CLI.
+
+Every test here runs against a small Python stand-in for the ``claude``
+executable, for two reasons that matter more than realism:
+
+* the real CLI spends a billed model turn per spawn and does not exist on the
+  CI matrix at all, so a suite that needed it would be a suite that never
+  runs where regressions are caught (the real CLI is exercised by
+  ``tests/gate_item11``, whose S2 rows bind live sessions on machines that
+  carry it);
+* the failure shapes issue ``#17`` is actually about -- a wrong identity read
+  back, a refusal that exists only on stderr, a child that answers garbage,
+  ``is_error`` alongside exit 0 -- are exactly the shapes a live healthy CLI
+  will not produce on demand.
+
+The fake renders the *public surface the probes recorded* (``--version``,
+``--help`` flag text, stream-json events with ``session_id`` in ``init`` and
+``terminal_reason``/``is_error``/``subtype`` in ``result``; i01 §3.2-§3.4)
+and nothing else. Where a fact is provider-shaped and measured rather than
+contractual -- the U27 admission-window width, say -- nothing here asserts
+it, per the design-review directive to keep #6's probe findings from
+hardening into test assumptions.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import time
+import uuid
+from pathlib import Path
+
+import pytest
+
+from claude_org_runtime.session import claude_cli_provider as s2
+from claude_org_runtime.session.claude_cli_provider import (
+    ClaudeCliSessionProvider,
+    claude_session_uuid,
+)
+from claude_org_runtime.session.provider import (
+    REQUIRED_CAPABILITIES,
+    Failure,
+    FailureKind,
+    Observation,
+    Ok,
+    SpawnRefused,
+    StartRequest,
+    WorkspaceDecision,
+    WorkspaceVerdict,
+)
+
+IS_POSIX = os.name == "posix"
+HAS_PROC = Path("/proc").is_dir()
+
+FAKE_VERSION = "9.9.9-fake (Claude Code)"
+
+#: The fake CLI. One file, driven by environment variables so the *provider
+#: under test* is byte-identical across scenarios -- only the backend's
+#: behaviour changes, which is the situation the provider exists to survive.
+_FAKE_CLI = f"""
+import json, os, sys, time
+
+args = sys.argv[1:]
+
+if "--version" in args:
+    print({FAKE_VERSION!r})
+    sys.exit(0)
+
+if "--help" in args:
+    omitted = set(os.environ.get("FAKE_HELP_OMIT", "").split())
+    lines = [
+        "  -p, --print                Print response and exit",
+        "  --session-id <uuid>        Use a specific session ID",
+        "  -r, --resume [value]       Resume a conversation by session ID",
+        "  --output-format <format>   Output format (json | stream-json)",
+        "  --verbose                  Override verbose mode",
+        "  --model <model>            Model for the current session",
+    ]
+    print("Usage: claude [options] [command] [prompt]")
+    for line in lines:
+        if not any(flag in line for flag in omitted):
+            print(line)
+    sys.exit(0)
+
+log = os.environ.get("FAKE_SPAWN_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({{"argv": args, "cwd": os.getcwd()}}) + "\\n")
+
+def value_of(flag):
+    return args[args.index(flag) + 1] if flag in args else None
+
+claimed = value_of("--session-id") or value_of("--resume")
+mode = os.environ.get("FAKE_MODE", "ok")
+sleep_for = float(os.environ.get("FAKE_SLEEP", "60"))
+
+if mode == "refuse-in-use":
+    print("Error: Session ID " + str(claimed) + " is already in use.", file=sys.stderr)
+    sys.exit(1)
+
+if mode == "silent":
+    time.sleep(sleep_for)
+    sys.exit(0)
+
+reported = os.environ.get("FAKE_REPORT_ID", claimed)
+omit_identity = os.environ.get("FAKE_OMIT_IDENTITY") == "1"
+
+def emit(payload):
+    if omit_identity:
+        payload.pop("session_id", None)
+    sys.stdout.write(json.dumps(payload) + "\\n")
+    sys.stdout.flush()
+
+if mode == "shielded-grandchild":
+    import subprocess
+    grandchild = subprocess.Popen(
+        [sys.executable, "-c",
+         "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)"])
+    with open(os.environ["FAKE_GRANDCHILD_PID_FILE"], "w", encoding="utf-8") as handle:
+        handle.write(str(grandchild.pid))
+
+emit({{"type": "system", "subtype": "init", "session_id": reported,
+      "unknown_field": {{"nested": ["tolerated"]}}}})
+
+if mode == "shielded-grandchild":
+    if os.environ.get("FAKE_LEADER_EXITS") != "1":
+        time.sleep(sleep_for)
+    sys.exit(0)
+
+if mode == "garbage-then-hang":
+    sys.stdout.write("this complete line is not JSON\\n")
+    sys.stdout.flush()
+    time.sleep(sleep_for)
+    sys.exit(0)
+
+emit({{"type": "unheard_of_event", "session_id": reported, "payload": 123}})
+
+if os.environ.get("FAKE_GARBAGE_BEFORE_RESULT") == "1":
+    sys.stdout.write("mid-stream line that is not JSON\\n")
+    sys.stdout.flush()
+
+if mode == "events-then-hang":
+    time.sleep(sleep_for)
+    sys.exit(0)
+
+if os.environ.get("FAKE_RESULT_BARE") == "1":
+    emit({{"type": "result", "session_id": reported}})
+else:
+    emit({{"type": "result",
+          "subtype": os.environ.get("FAKE_SUBTYPE", "success"),
+          "is_error": os.environ.get("FAKE_IS_ERROR") == "1",
+          "terminal_reason": os.environ.get("FAKE_TERMINAL_REASON", "completed"),
+          "session_id": reported,
+          "another_unknown_field": True}})
+sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+"""
+
+
+@pytest.fixture
+def fake_cli(tmp_path: Path) -> tuple[str, ...]:
+    script = tmp_path / "fake_claude.py"
+    script.write_text(_FAKE_CLI, encoding="utf-8")
+    return (sys.executable, str(script))
+
+
+@pytest.fixture
+def spawn_log(tmp_path: Path, monkeypatch) -> Path:
+    log = tmp_path / "spawns.jsonl"
+    monkeypatch.setenv("FAKE_SPAWN_LOG", str(log))
+    return log
+
+
+@pytest.fixture
+def provider(fake_cli, tmp_path: Path) -> ClaudeCliSessionProvider:
+    instance = ClaudeCliSessionProvider(
+        tmp_path / "state", claude_command=fake_cli, stop_timeout=2.0
+    )
+    yield instance
+    listed = instance.list_sessions()
+    if isinstance(listed, Ok):
+        for readout in listed.value:
+            instance.stop(readout.session_id)
+
+
+def _request(tmp_path: Path, session_id: str = "sess-1", **settings) -> StartRequest:
+    return StartRequest(
+        session_id=session_id,
+        workspace=str(tmp_path / "workspaces" / session_id),
+        role="worker",
+        settings=settings,
+    )
+
+
+def _spawned(spawn_log: Path) -> list[dict]:
+    if not spawn_log.exists():
+        return []
+    return [json.loads(line) for line in spawn_log.read_text(encoding="utf-8").splitlines()]
+
+
+def _wait_for_spawns(spawn_log: Path, count: int, timeout: float = 10.0) -> list[dict]:
+    """The fake writes its log after it starts executing, which is after
+    ``Popen`` returns -- so arrival is waited for, never assumed."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        spawned = _spawned(spawn_log)
+        if len(spawned) >= count:
+            return spawned
+        assert time.monotonic() < deadline, f"saw {len(spawned)} spawns, wanted {count}"
+        time.sleep(0.02)
+
+
+def _recorded_generation(tmp_path: Path, session_id: str) -> int:
+    record = json.loads(
+        (tmp_path / "state" / session_id / "record.json").read_text(encoding="utf-8")
+    )
+    return record["generation"]
+
+
+def _wait_for_state(provider, session_id: str, state: str, timeout: float = 10.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        result = provider.read_state(session_id)
+        if isinstance(result, Ok) and result.value.provider_state == state:
+            return result.value
+        assert time.monotonic() < deadline, f"never reached {state!r}: {result!r}"
+        time.sleep(0.02)
+
+
+def _wait_for_exit(provider, session_id: str, timeout: float = 10.0) -> None:
+    session = provider._sessions[session_id]
+    assert session.process is not None
+    session.process.wait(timeout=timeout)
+
+
+# --------------------------------------------------------------------------
+# The identity: derived before the spawn, as a pure function
+# --------------------------------------------------------------------------
+
+
+def test_a_uuid_session_id_is_honoured_verbatim():
+    chosen = "4C3A9A0E-D6E5-4D90-AEE0-0ED948DD8631"
+    assert claude_session_uuid(chosen) == chosen.lower()
+
+
+def test_a_non_uuid_session_id_derives_the_same_uuid_every_time():
+    """Committable ahead of the process: no spawn is consulted to know it."""
+
+    first = claude_session_uuid("item11-bound-session")
+    assert first == claude_session_uuid("item11-bound-session")
+    assert uuid.UUID(first).version == 5
+    assert claude_session_uuid("another-session") != first
+
+
+# --------------------------------------------------------------------------
+# The capability probe (D-0010)
+# --------------------------------------------------------------------------
+
+
+def test_the_probe_reports_the_clis_own_version_and_every_capability(provider):
+    result = provider.probe_capabilities()
+    assert isinstance(result, Ok)
+    report = result.value
+    assert report.provider_version == FAKE_VERSION
+    assert report.supported >= REQUIRED_CAPABILITIES
+    # The raw version answer is in the report, which is where D-0010's record
+    # of "the capability probe's raw output" travels.
+    assert FAKE_VERSION in report.detail
+
+
+def test_a_missing_flag_is_a_missing_capability_and_refuses_the_spawn(
+    fake_cli, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_HELP_OMIT", "--resume")
+    provider = ClaudeCliSessionProvider(tmp_path / "state", claude_command=fake_cli)
+    result = provider.probe_capabilities()
+    assert isinstance(result, Ok)
+    assert "session.resume" in result.value.missing
+    with pytest.raises(SpawnRefused) as refusal:
+        provider.start(_request(tmp_path))
+    assert "session.resume" in str(refusal.value)
+
+
+def test_an_absent_cli_is_a_failure_that_refuses_the_spawn(tmp_path):
+    provider = ClaudeCliSessionProvider(
+        tmp_path / "state", claude_command=str(tmp_path / "no-such-claude")
+    )
+    result = provider.probe_capabilities()
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.BACKEND_UNREACHABLE
+    with pytest.raises(SpawnRefused):
+        provider.start(_request(tmp_path))
+
+
+# --------------------------------------------------------------------------
+# start: the readout before the child has spoken (R4's reachable case)
+# --------------------------------------------------------------------------
+
+
+def test_a_fresh_start_is_could_not_observe_with_a_reason(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    result = provider.start(_request(tmp_path))
+    assert isinstance(result, Ok)
+    readout = result.value
+    assert readout.observation is Observation.COULD_NOT_OBSERVE
+    assert readout.could_not_observe_reason
+    assert readout.provider_state is None
+
+
+def test_the_identity_is_durably_recorded_before_it_is_ever_read_back(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider.start(_request(tmp_path))
+    record = json.loads(
+        (tmp_path / "state" / "sess-1" / "record.json").read_text(encoding="utf-8")
+    )
+    assert record["claude_session_uuid"] == claude_session_uuid("sess-1")
+    assert record["pid"] is not None
+
+
+def test_a_session_id_that_escapes_the_state_root_is_refused(provider, tmp_path):
+    result = provider.start(
+        StartRequest(session_id="../evil", workspace=str(tmp_path), role="worker")
+    )
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+
+
+def test_a_session_id_is_never_reused(provider, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    assert isinstance(provider.start(_request(tmp_path)), Ok)
+    again = provider.start(_request(tmp_path))
+    assert isinstance(again, Failure)
+    assert again.kind is FailureKind.REFUSED_BY_PROVIDER
+
+
+def test_unknown_settings_keys_belong_to_someone_else_and_are_ignored(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    result = provider.start(_request(tmp_path, announce_after=3600, some_other_key="x"))
+    assert isinstance(result, Ok)
+
+
+def test_cli_args_from_settings_reach_the_spawn_verbatim(
+    provider, tmp_path, spawn_log, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider.start(
+        _request(tmp_path, cli_args=["--settings", "/some/role.json", "--permission-mode", "plan"])
+    )
+    (spawned,) = _wait_for_spawns(spawn_log, 1)
+    argv = spawned["argv"]
+    assert argv[argv.index("--settings") + 1] == "/some/role.json"
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert argv[argv.index("--session-id") + 1] == claude_session_uuid("sess-1")
+    assert spawned["cwd"] == str((tmp_path / "workspaces" / "sess-1").resolve())
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"cli_args": "--model haiku"},
+        {"cli_args": ["--set\x00tings"]},
+        {"prompt": ""},
+        {"prompt": 42},
+        {"resume_prompt": "   "},
+        {"prompt": "-p looks like a flag"},
+    ],
+    ids=[
+        "bare-string-args",
+        "nul-in-args",
+        "empty-prompt",
+        "non-string-prompt",
+        "blank-resume",
+        "flag-shaped-prompt",
+    ],
+)
+def test_unusable_settings_are_refused_with_a_reason_before_any_spawn(
+    provider, tmp_path, spawn_log, settings
+):
+    result = provider.start(_request(tmp_path, **settings))
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+    assert result.detail.strip()
+    assert _spawned(spawn_log) == []
+
+
+def test_a_vetoed_workspace_creation_refuses_the_start(provider, tmp_path):
+    class _Vetoer:
+        def on_workspace_transition(self, transition):
+            return WorkspaceDecision(WorkspaceVerdict.VETO, "unsaved artifacts present")
+
+    provider.register_workspace_observer(_Vetoer())
+    result = provider.start(_request(tmp_path))
+    assert isinstance(result, Failure)
+    assert "vetoed" in result.detail
+
+
+# --------------------------------------------------------------------------
+# read_state: the child's own words, and exit codes never as evidence
+# --------------------------------------------------------------------------
+
+
+def test_the_readout_carries_the_childs_own_terminal_word(provider, tmp_path):
+    provider.start(_request(tmp_path))
+    readout = _wait_for_state(provider, "sess-1", "completed")
+    assert readout.observation is Observation.OBSERVED
+    assert readout.provider_detail["is_error"] is False
+
+
+def test_exit_zero_is_not_taken_as_evidence_of_success(
+    provider, tmp_path, monkeypatch
+):
+    """i01 §3.4: a SIGINT'd run exits 0 with ``is_error: true``. The readout
+    must carry the child's own word for that, not an invented success."""
+
+    monkeypatch.setenv("FAKE_IS_ERROR", "1")
+    monkeypatch.setenv("FAKE_TERMINAL_REASON", "aborted_streaming")
+    monkeypatch.setenv("FAKE_EXIT", "0")
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    readout = _wait_for_state(provider, "sess-1", "aborted_streaming")
+    assert readout.provider_detail["is_error"] is True
+    assert readout.provider_detail["returncode"] == 0
+
+
+def test_unknown_event_types_are_carried_uninterpreted(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "events-then-hang")
+    provider.start(_request(tmp_path))
+    readout = _wait_for_state(provider, "sess-1", "unheard_of_event")
+    assert readout.observation is Observation.OBSERVED
+
+
+def test_a_complete_line_that_is_not_json_fails_loudly(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "garbage-then-hang")
+    provider.start(_request(tmp_path))
+    deadline = time.monotonic() + 10.0
+    while True:
+        result = provider.read_state("sess-1")
+        if isinstance(result, Failure):
+            break
+        assert time.monotonic() < deadline, f"never failed loudly: {result!r}"
+        time.sleep(0.02)
+    assert result.kind is FailureKind.UNINTERPRETABLE_RESPONSE
+    assert "not JSON" in result.detail
+
+
+def test_a_result_that_names_no_outcome_fails_loudly(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_RESULT_BARE", "1")
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    result = provider.read_state("sess-1")
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.UNINTERPRETABLE_RESPONSE
+
+
+def test_the_stderr_only_refusal_is_captured_and_surfaced(
+    provider, tmp_path, monkeypatch
+):
+    """i01 §3.3: the ``already in use`` refusal exists only on stderr, with an
+    empty stdout. The readout is the exit disposition with that stderr
+    attached -- carried verbatim, never interpreted as a lock (U27/U38)."""
+
+    monkeypatch.setenv("FAKE_MODE", "refuse-in-use")
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    readout = _wait_for_state(provider, "sess-1", "exited-1")
+    assert "already in use" in readout.provider_detail["stderr_tail"]
+
+
+def test_an_unknown_session_is_a_typed_failure(provider):
+    for verb in (provider.read_state, provider.stop, provider.resume):
+        result = verb("never-started")
+        assert isinstance(result, Failure)
+        assert result.kind is FailureKind.UNKNOWN_SESSION
+
+
+def test_zero_sessions_is_a_fact_not_a_failure(provider):
+    assert provider.list_sessions() == Ok(())
+
+
+# --------------------------------------------------------------------------
+# Identity read-back: a mismatch is an incident, not a warning
+# --------------------------------------------------------------------------
+
+
+def test_a_wrong_identity_read_back_is_an_incident(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_REPORT_ID", str(uuid.uuid4()))
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    result = provider.read_state("sess-1")
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.UNINTERPRETABLE_RESPONSE
+    assert "identity incident" in result.detail
+    assert result.provider_detail["expected"] == claude_session_uuid("sess-1")
+
+
+def test_an_identity_incident_survives_a_supervisor_restart(
+    fake_cli, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_REPORT_ID", str(uuid.uuid4()))
+    first = ClaudeCliSessionProvider(tmp_path / "state", claude_command=fake_cli)
+    first.start(_request(tmp_path))
+    first._sessions["sess-1"].process.wait(timeout=10)
+    assert isinstance(first.read_state("sess-1"), Failure)
+
+    # A new supervisor life over the same state root: the incident is in the
+    # durable record, so the session still answers as impounded rather than
+    # reading as healthy.
+    second = ClaudeCliSessionProvider(tmp_path / "state", claude_command=fake_cli)
+    result = second.read_state("sess-1")
+    assert isinstance(result, Failure)
+    assert "identity incident" in result.detail
+    resumed = second.resume("sess-1")
+    assert isinstance(resumed, Failure)
+    assert "identity incident" in resumed.detail
+
+
+# --------------------------------------------------------------------------
+# stop: the process group, and the readout taken after the exit
+# --------------------------------------------------------------------------
+
+
+def test_stop_terminates_a_running_child_and_reports_what_is_left(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider.start(_request(tmp_path))
+    result = provider.stop("sess-1")
+    assert isinstance(result, Ok)
+    readout = result.value
+    assert readout.observation is Observation.OBSERVED
+    assert readout.provider_state.startswith("exited-")
+    # The record and captured output stay on disk: the disposition of what
+    # the child left behind is that it is kept, not swept.
+    assert (tmp_path / "state" / "sess-1" / "record.json").exists()
+
+
+def test_stop_of_an_already_exited_child_is_a_readout_not_an_error(
+    provider, tmp_path
+):
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    result = provider.stop("sess-1")
+    assert isinstance(result, Ok)
+    assert result.value.provider_state == "completed"
+
+
+# --------------------------------------------------------------------------
+# resume: adopt-or-spawn, in the order that cannot mint a second writer
+# --------------------------------------------------------------------------
+
+
+def test_resume_of_a_live_child_adopts_it_and_spawns_nothing(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider.start(_request(tmp_path))
+    result = provider.resume("sess-1")
+    assert isinstance(result, Ok)
+    # A resume that spawned would have bumped the durable generation before
+    # the spawn -- the record, not a race against the child's own log, is the
+    # evidence nothing was spawned.
+    assert _recorded_generation(tmp_path, "sess-1") == 0
+
+
+def test_resume_of_an_exited_session_spawns_dash_dash_resume(
+    provider, tmp_path, spawn_log
+):
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    result = provider.resume("sess-1")
+    assert isinstance(result, Ok)
+    spawned = _wait_for_spawns(spawn_log, 2)
+    argv = spawned[1]["argv"]
+    assert argv[argv.index("--resume") + 1] == claude_session_uuid("sess-1")
+    # Never a fresh claim: U28 shows the dead session still holds it.
+    assert "--session-id" not in argv
+    _wait_for_state(provider, "sess-1", "completed")
+
+
+def test_resume_persists_its_generation_so_the_next_life_reads_the_right_output(
+    provider, tmp_path
+):
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    provider.resume("sess-1")
+    record = json.loads(
+        (tmp_path / "state" / "sess-1" / "record.json").read_text(encoding="utf-8")
+    )
+    assert record["generation"] == 1
+    assert (tmp_path / "state" / "sess-1" / "events-001.jsonl").exists()
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="orphan liveness is resolved via POSIX signals")
+def test_an_orphans_record_is_detected_by_the_next_supervisor_life(
+    fake_cli, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    first = ClaudeCliSessionProvider(tmp_path / "state", claude_command=fake_cli)
+    first.start(_request(tmp_path, session_id="orphaned"))
+    try:
+        second = ClaudeCliSessionProvider(tmp_path / "state", claude_command=fake_cli)
+        listed = second.list_sessions()
+        assert isinstance(listed, Ok)
+        assert [r.session_id for r in listed.value] == ["orphaned"]
+    finally:
+        first.stop("orphaned")
+
+
+@pytest.mark.skipif(
+    not HAS_PROC, reason="adoption requires confirming the pid's command line via /proc"
+)
+def test_a_live_orphan_is_adopted_not_resumed_around(fake_cli, tmp_path, monkeypatch):
+    """The reclaim order issue #17 fixes: the surviving process is resolved
+    first, because a ``--resume`` issued while it runs is the second live
+    writer the provider will not refuse (U32)."""
+
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    first = ClaudeCliSessionProvider(tmp_path / "state", claude_command=fake_cli)
+    first.start(_request(tmp_path, session_id="orphaned"))
+    try:
+        second = ClaudeCliSessionProvider(
+            tmp_path / "state", claude_command=fake_cli, stop_timeout=2.0
+        )
+        result = second.resume("orphaned")
+        assert isinstance(result, Ok)
+        assert _recorded_generation(tmp_path, "orphaned") == 0, (
+            "resume spawned next to a live orphan"
+        )
+        # And the adopting life can stop what it adopted.
+        stopped = second.stop("orphaned")
+        assert isinstance(stopped, Ok)
+    finally:
+        first.stop("orphaned")
+
+
+@pytest.mark.skipif(
+    not HAS_PROC, reason="the pid-reuse guard reads the pid's command line via /proc"
+)
+def test_a_recycled_pid_is_never_trusted_signalled_or_adopted(
+    fake_cli, tmp_path, monkeypatch
+):
+    """A record whose pid now names a stranger (here: this very test process)
+    must be read as "the child is gone" -- the stranger is left untouched and
+    the session is re-entered via ``--resume`` (i02 §3.3)."""
+
+    log = tmp_path / "spawns.jsonl"
+    monkeypatch.setenv("FAKE_SPAWN_LOG", str(log))
+    provider = ClaudeCliSessionProvider(tmp_path / "state", claude_command=fake_cli)
+    session_dir = tmp_path / "state" / "stale"
+    session_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspaces" / "stale"
+    workspace.mkdir(parents=True)
+    record = {
+        "session_id": "stale",
+        "claude_session_uuid": claude_session_uuid("stale"),
+        "workspace": str(workspace),
+        "role": "worker",
+        "resume_prompt": "continue",
+        "cli_args": [],
+        "generation": 0,
+        "argv": ["claude", "-p", "x"],
+        "pid": os.getpid(),
+        "pgid": os.getpid(),
+        "incident": None,
+    }
+    (session_dir / "record.json").write_text(json.dumps(record), encoding="utf-8")
+
+    result = provider.resume("stale")
+    assert isinstance(result, Ok), f"resume refused a reclaimable session: {result!r}"
+    (spawned,) = _wait_for_spawns(log, 1)
+    assert spawned["argv"][spawned["argv"].index("--resume") + 1] == claude_session_uuid("stale")
+    _wait_for_state(provider, "stale", "completed")
+
+
+# --------------------------------------------------------------------------
+# Degraded observation: broken records, unreadable output, unknowable liveness
+# --------------------------------------------------------------------------
+
+
+def _plant_record(tmp_path: Path, session_id: str, **overrides) -> Path:
+    session_dir = tmp_path / "state" / session_id
+    session_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspaces" / session_id
+    workspace.mkdir(parents=True)
+    record = {
+        "session_id": session_id,
+        "claude_session_uuid": claude_session_uuid(session_id),
+        "workspace": str(workspace),
+        "role": "worker",
+        "resume_prompt": "continue",
+        "cli_args": [],
+        "generation": 0,
+        "argv": ["claude", "-p", "x"],
+        "pid": None,
+        "pgid": None,
+        "incident": None,
+    }
+    record.update(overrides)
+    (session_dir / "record.json").write_text(json.dumps(record), encoding="utf-8")
+    return session_dir
+
+
+def test_a_corrupt_record_does_not_vanish_and_does_not_read_as_unknown(
+    provider, tmp_path
+):
+    """R4 at the roster: a session whose durable record cannot be read is
+    still a session -- explicitly unobservable with the reason, never absent
+    and never 'this provider holds no record of one'."""
+
+    session_dir = tmp_path / "state" / "broken"
+    session_dir.mkdir(parents=True)
+    (session_dir / "record.json").write_text('{"truncated', encoding="utf-8")
+
+    listed = provider.list_sessions()
+    assert isinstance(listed, Ok)
+    (readout,) = listed.value
+    assert readout.session_id == "broken"
+    assert readout.observation is Observation.COULD_NOT_OBSERVE
+    assert "could not be read" in readout.could_not_observe_reason
+
+    read = provider.read_state("broken")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+
+    # Acting on an unreadable identity is refused, not guessed at.
+    for verb in (provider.stop, provider.resume):
+        result = verb("broken")
+        assert isinstance(result, Failure)
+        assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+
+    # And the id is still never reused.
+    again = provider.start(
+        StartRequest(session_id="broken", workspace=str(tmp_path / "w"), role="worker")
+    )
+    assert isinstance(again, Failure)
+
+
+def test_an_unreadable_output_file_is_could_not_observe_not_a_failure(
+    provider, tmp_path
+):
+    """S1's read_state contract: a session that exists but cannot be read
+    yields Ok(COULD_NOT_OBSERVE) with the reason -- Failure is reserved for
+    an answer in an uninterpretable shape."""
+
+    session_dir = _plant_record(tmp_path, "unreadable")
+    # A directory where the events file should be: read_bytes() raises
+    # OSError on every platform.
+    (session_dir / "events-000.jsonl").mkdir()
+
+    result = provider.read_state("unreadable")
+    assert isinstance(result, Ok)
+    readout = result.value
+    assert readout.observation is Observation.COULD_NOT_OBSERVE
+    assert "could not be read" in readout.could_not_observe_reason
+
+
+def test_unknowable_liveness_fails_closed_for_acting_and_open_eyed_for_reading(
+    provider, tmp_path, monkeypatch
+):
+    """Where the platform cannot answer whether the recorded child is alive,
+    reading reports the session as unobservable -- and resume/stop refuse,
+    because acting on 'probably dead' is how the U32 second writer is minted."""
+
+    _plant_record(tmp_path, "elsewhere", pid=12345, pgid=12345)
+    assert isinstance(provider.read_state("elsewhere"), Ok)  # materialise first
+    monkeypatch.setattr(s2.os, "name", "nt")
+
+    read = provider.read_state("elsewhere")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+    assert "liveness" in read.value.could_not_observe_reason
+
+    resumed = provider.resume("elsewhere")
+    assert isinstance(resumed, Failure)
+    assert resumed.kind is FailureKind.BACKEND_UNREACHABLE
+
+    stopped = provider.stop("elsewhere")
+    assert isinstance(stopped, Failure)
+    assert stopped.kind is FailureKind.BACKEND_UNREACHABLE
+
+
+def test_two_session_ids_cannot_share_one_provider_identity(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider.start(_request(tmp_path, session_id="s-one"))
+    twin = claude_session_uuid("s-one")
+    result = provider.start(_request(tmp_path, session_id=twin))
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+    assert "s-one" in result.detail
+
+
+def test_a_garbage_line_before_a_valid_result_is_surfaced_not_swallowed(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_GARBAGE_BEFORE_RESULT", "1")
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    readout = _wait_for_state(provider, "sess-1", "completed")
+    assert "not JSON" in readout.provider_detail["uninterpretable_line"]
+
+
+@pytest.mark.parametrize(
+    "cli_args",
+    [
+        ["--session-id", "5" * 8],
+        ["--resume=abc"],
+        ["-p", "another prompt"],
+        ["--continue"],
+        ["-r00000000-0000-0000-0000-000000000000"],
+    ],
+    ids=["session-id", "resume-eq", "print", "continue", "resume-attached"],
+)
+def test_provider_owned_flags_in_role_arguments_are_refused(
+    provider, tmp_path, spawn_log, cli_args
+):
+    """A role configuration must not be able to override the committed
+    identity or the structured-output invocation from ``cli_args``."""
+
+    result = provider.start(_request(tmp_path, cli_args=cli_args))
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+    assert _spawned(spawn_log) == []
+
+
+def test_a_finished_child_that_never_named_its_identity_is_not_accepted(
+    provider, tmp_path, monkeypatch
+):
+    """The read-back is positive: a result from output that never carried a
+    session identity cannot be reconciled, so it is answered loudly rather
+    than accepted on trust."""
+
+    monkeypatch.setenv("FAKE_OMIT_IDENTITY", "1")
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    result = provider.read_state("sess-1")
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.UNINTERPRETABLE_RESPONSE
+    assert "read back" in result.detail
+
+
+def test_a_live_child_that_has_not_named_its_identity_yet_is_tolerated(
+    provider, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("FAKE_OMIT_IDENTITY", "1")
+    monkeypatch.setenv("FAKE_MODE", "events-then-hang")
+    provider.start(_request(tmp_path))
+    deadline = time.monotonic() + 10.0
+    while True:
+        result = provider.read_state("sess-1")
+        assert isinstance(result, Ok)
+        readout = result.value
+        if "identity" in (readout.could_not_observe_reason or ""):
+            break
+        assert time.monotonic() < deadline, f"never saw the withheld state: {readout!r}"
+        time.sleep(0.02)
+    assert readout.observation is Observation.COULD_NOT_OBSERVE
+
+
+def test_a_relative_workspace_is_recorded_absolute(provider, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    monkeypatch.chdir(tmp_path)
+    result = provider.start(
+        StartRequest(session_id="rel", workspace="rel-ws", role="worker")
+    )
+    assert isinstance(result, Ok)
+    record = json.loads(
+        (tmp_path / "state" / "rel" / "record.json").read_text(encoding="utf-8")
+    )
+    assert Path(record["workspace"]).is_absolute()
+    assert record["workspace"] == str((tmp_path / "rel-ws").resolve())
+
+
+def test_a_type_invalid_record_is_a_broken_record_not_a_crash(provider, tmp_path):
+    _plant_record(tmp_path, "typebad", cli_args=None)
+    read = provider.read_state("typebad")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+    listed = provider.list_sessions()
+    assert isinstance(listed, Ok)
+    assert [r.session_id for r in listed.value] == ["typebad"]
+
+
+@pytest.mark.skipif(
+    not HAS_PROC,
+    reason=(
+        "the post-exit sweep signals only a group whose live member provably "
+        "carries the session marker, and the proof is read from /proc; where "
+        "/proc does not exist (macOS) the sweep deliberately does nothing "
+        "rather than signal an unverifiable group, so a TERM-ignoring "
+        "survivor of an exited leader is a documented platform limitation, "
+        "not a behaviour to assert"
+    ),
+)
+def test_stop_reaps_a_group_member_that_outlived_the_leader(
+    provider, tmp_path, monkeypatch
+):
+    """H1's exact shape: an MCP-like grandchild ignores the SIGTERM, the
+    leader honours it, and ``wait()`` returning must not end the stop --
+    the group is confirmed empty, killing what remains."""
+
+    monkeypatch.setenv("FAKE_MODE", "shielded-grandchild")
+    pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setenv("FAKE_GRANDCHILD_PID_FILE", str(pid_file))
+    provider.start(_request(tmp_path))
+    deadline = time.monotonic() + 10.0
+    while not pid_file.exists():
+        assert time.monotonic() < deadline, "the grandchild never announced itself"
+        time.sleep(0.02)
+    grandchild = int(pid_file.read_text(encoding="utf-8"))
+
+    result = provider.stop("sess-1")
+    assert isinstance(result, Ok)
+    deadline = time.monotonic() + 10.0
+    while s2._pid_running(grandchild):
+        assert time.monotonic() < deadline, (
+            f"the shielded grandchild (pid {grandchild}) survived the stop"
+        )
+        time.sleep(0.02)
+
+
+@pytest.mark.skipif(not HAS_PROC, reason="the after-exit sweep proves ownership via /proc")
+def test_stop_reaps_the_group_even_when_the_leader_already_exited(
+    provider, tmp_path, monkeypatch
+):
+    """The leader being gone does not end the stop: the group member is
+    still swept -- and only because its environment provably carries this
+    session's marker, so a recycled pgid is never signalled."""
+
+    monkeypatch.setenv("FAKE_MODE", "shielded-grandchild")
+    monkeypatch.setenv("FAKE_LEADER_EXITS", "1")
+    pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setenv("FAKE_GRANDCHILD_PID_FILE", str(pid_file))
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    grandchild = int(pid_file.read_text(encoding="utf-8"))
+    assert s2._pid_running(grandchild), "the scenario needs a surviving group member"
+
+    result = provider.stop("sess-1")
+    assert isinstance(result, Ok)
+    deadline = time.monotonic() + 10.0
+    while s2._pid_running(grandchild):
+        assert time.monotonic() < deadline, (
+            f"the grandchild (pid {grandchild}) survived a stop after the leader's exit"
+        )
+        time.sleep(0.02)
+
+
+def test_provider_owned_flags_in_base_cli_args_are_a_construction_error(
+    fake_cli, tmp_path
+):
+    with pytest.raises(ValueError):
+        ClaudeCliSessionProvider(
+            tmp_path / "state", claude_command=fake_cli, base_cli_args=("--session-id", "x")
+        )
+    with pytest.raises(ValueError):
+        ClaudeCliSessionProvider(
+            tmp_path / "state",
+            claude_command=fake_cli,
+            base_cli_args=("-r00000000-0000-0000-0000-000000000000",),
+        )
+    # The seam still exists for what it is for.
+    ClaudeCliSessionProvider(
+        tmp_path / "state", claude_command=fake_cli, base_cli_args=("--model", "haiku")
+    )
+
+
+def test_resume_reconciles_the_finished_generation_before_spawning(
+    provider, tmp_path, spawn_log, monkeypatch
+):
+    """A child that reported the wrong identity and then exited must not be
+    resumed straight past the incident: the finished generation is read --
+    and the incident persisted -- before any new generation may bury it."""
+
+    monkeypatch.setenv("FAKE_REPORT_ID", str(uuid.uuid4()))
+    provider.start(_request(tmp_path))
+    _wait_for_exit(provider, "sess-1")
+    # Deliberately no read_state in between: resume itself must reconcile.
+    result = provider.resume("sess-1")
+    assert isinstance(result, Failure)
+    assert "identity incident" in result.detail
+    assert len(_spawned(spawn_log)) == 1, "resume spawned past an unreconciled incident"
+    record = json.loads(
+        (tmp_path / "state" / "sess-1" / "record.json").read_text(encoding="utf-8")
+    )
+    assert record["incident"] is not None
+
+
+def test_a_child_whose_pid_cannot_be_recorded_is_not_left_running(
+    fake_cli, tmp_path, monkeypatch
+):
+    """A running child whose pid never reached the durable record would be
+    unadoptable by the next supervisor life -- and read as 'gone', resumed
+    around. The spawn fails closed: terminated, cleaned up, reported."""
+
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider = ClaudeCliSessionProvider(
+        tmp_path / "state", claude_command=fake_cli, stop_timeout=2.0
+    )
+    original = ClaudeCliSessionProvider._write_record
+
+    def failing_second_write(self, record):
+        if record.pid is not None:
+            raise OSError(28, "No space left on device")
+        return original(self, record)
+
+    monkeypatch.setattr(ClaudeCliSessionProvider, "_write_record", failing_second_write)
+    result = provider.start(_request(tmp_path))
+    assert isinstance(result, Failure)
+    assert "terminated" in result.detail
+    assert provider.list_sessions() == Ok(())
+    assert not (tmp_path / "state" / "sess-1").exists()
+
+
+@pytest.mark.skipif(not IS_POSIX, reason="the emergency-kill path signals a POSIX group")
+def test_a_child_that_outlives_the_emergency_kill_is_not_abandoned(
+    fake_cli, tmp_path, monkeypatch
+):
+    """If the pid cannot be recorded AND the child survives the SIGKILL, the
+    spawn must not claim a clean termination: the child keeps its in-memory
+    supervision, the state stays reserved, and the caller hears TIMED_OUT."""
+
+    monkeypatch.setenv("FAKE_MODE", "silent")
+    provider = ClaudeCliSessionProvider(
+        tmp_path / "state", claude_command=fake_cli, stop_timeout=0.3
+    )
+    original_write = ClaudeCliSessionProvider._write_record
+
+    def failing_second_write(self, record):
+        if record.pid is not None:
+            raise OSError(28, "No space left on device")
+        return original_write(self, record)
+
+    monkeypatch.setattr(ClaudeCliSessionProvider, "_write_record", failing_second_write)
+    # The "SIGKILL" is made a no-op, so the child genuinely survives it.
+    monkeypatch.setattr(s2, "_signal_group", lambda pgid, signum: None)
+
+    result = provider.start(_request(tmp_path))
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.TIMED_OUT
+    assert "in-memory supervision" in result.detail
+    # Still supervised and still reserved, not abandoned.
+    assert isinstance(provider.read_state("sess-1"), Ok)
+    assert (tmp_path / "state" / "sess-1").exists()
+
+    monkeypatch.undo()
+    stopped = provider.stop("sess-1")
+    assert isinstance(stopped, Ok)
+
+
+def test_a_broken_records_identity_stays_reserved(provider, tmp_path):
+    session_dir = tmp_path / "state" / "brok"
+    session_dir.mkdir(parents=True)
+    (session_dir / "record.json").write_text('{"truncated', encoding="utf-8")
+    result = provider.start(
+        _request(tmp_path, session_id=claude_session_uuid("brok"))
+    )
+    assert isinstance(result, Failure)
+    assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+    assert "brok" in result.detail
+
+
+@pytest.mark.skipif(not HAS_PROC, reason="the stranger check reads cmdline via /proc")
+def test_stop_of_a_record_whose_pid_is_now_a_stranger_touches_nothing(
+    provider, tmp_path
+):
+    """A recorded pid recycled to a stranger (here: this very test process)
+    reads as 'the child is gone': the stop signals nothing, sweeps nothing
+    unverified, and reports the session as itself."""
+
+    _plant_record(tmp_path, "stale", pid=os.getpid(), pgid=os.getpid())
+    result = provider.stop("stale")
+    assert isinstance(result, Ok)
+    assert result.value.observation is Observation.COULD_NOT_OBSERVE
+
+
+def test_a_misplaced_record_is_broken_not_another_sessions_readout(
+    provider, tmp_path
+):
+    """A record copied into the wrong directory must not let read_state
+    answer with another session's state, or stop/resume act on another
+    session's pid: the directory's derivable identity is the invariant."""
+
+    _plant_record(tmp_path, "session-a")
+    source = (tmp_path / "state" / "session-a" / "record.json").read_text(encoding="utf-8")
+    misplaced = tmp_path / "state" / "session-b"
+    misplaced.mkdir(parents=True)
+    (misplaced / "record.json").write_text(source, encoding="utf-8")
+
+    read = provider.read_state("session-b")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+    assert "misplaced" in read.value.could_not_observe_reason
+    for verb in (provider.stop, provider.resume):
+        result = verb("session-b")
+        assert isinstance(result, Failure)
+        assert result.kind is FailureKind.REFUSED_BY_PROVIDER
+
+
+def test_a_record_replaced_by_a_directory_stays_on_the_roster(provider, tmp_path):
+    session_dir = tmp_path / "state" / "dirrec"
+    (session_dir / "record.json").mkdir(parents=True)
+    listed = provider.list_sessions()
+    assert isinstance(listed, Ok)
+    (readout,) = listed.value
+    assert readout.session_id == "dirrec"
+    assert readout.observation is Observation.COULD_NOT_OBSERVE
+    read = provider.read_state("dirrec")
+    assert isinstance(read, Ok)
+    assert read.value.observation is Observation.COULD_NOT_OBSERVE
+
+
+def test_the_probes_raw_answers_are_durably_recorded(provider, tmp_path):
+    result = provider.probe_capabilities()
+    assert isinstance(result, Ok)
+    evidence = (tmp_path / "state" / "probe-evidence.txt").read_text(encoding="utf-8")
+    assert FAKE_VERSION in evidence
+    assert "--help" in evidence
+    assert "--session-id" in evidence
+
+
+# --------------------------------------------------------------------------
+# The stated assumptions: mechanically present, next to the code they bind
+# --------------------------------------------------------------------------
+
+S2_SOURCE = Path(s2.__file__).read_text(encoding="utf-8")
+
+
+def test_the_refusal_is_stated_not_to_be_a_lock_next_to_the_spawn_path():
+    """Issue #17: 'State this assumption in the code, next to the spawn
+    path.' Checked mechanically so deleting the sentence fails the build."""
+
+    assert "never relied on as a lock" in S2_SOURCE
+    assert "U27" in S2_SOURCE
+    start_doc = ClaudeCliSessionProvider._start_session.__doc__ or ""
+    assert "never relied on as a lock" in start_doc
+
+
+def test_resume_says_it_is_unguarded_and_names_the_lease_as_the_gate():
+    resume_doc = ClaudeCliSessionProvider.resume.__doc__ or ""
+    assert "U32" in resume_doc
+    assert "lease" in resume_doc
+
+
+def test_the_provider_imports_nothing_from_the_control_plane():
+    """D-0009's contract separation, asserted on the module rather than
+    trusted to review: the provider that cannot name the lease cannot borrow
+    it, and cannot be borrowed by it."""
+
+    assert "control_plane" not in S2_SOURCE
+
+
+def test_the_cli_version_written_against_is_recorded():
+    assert "2.1.234" in s2.CLI_VERSION_WRITTEN_AGAINST or "2.1.237" in s2.CLI_VERSION_WRITTEN_AGAINST

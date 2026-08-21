@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S2 -- the C2 `SessionProvider` over Interlock-supervised `claude -p`
+  subprocesses** (Issue #17, D-0025, D-0027, throwaway under D-0026).
+  `src/claude_org_runtime/session/claude_cli_provider.py` implements every S1
+  verb: spawn with a caller-committed identity (`--session-id`, derived as a
+  pure function of the S1 session id so it is committable ahead of the
+  process), structured readout from `--output-format stream-json` parsed
+  tolerantly with loud typed failures, stop by signalling the child's own
+  process group, and resume via `--resume` in the reclaim order that cannot
+  mint a second live writer (adopt the surviving child, else confirm the exit,
+  only then resume). Exit codes are never taken as evidence; the identity the
+  child reports is reconciled with the one committed before the spawn, and a
+  mismatch is a persisted incident. The CLI's `already in use` refusal is
+  never relied on as a lock (U27/U38) and `--resume` is treated as unguarded
+  (U32): exclusion stays with the control plane's lease, which this module
+  deliberately cannot import (D-0009) -- lease-before-resume orchestration and
+  the crash-window proof are issue #18's. `tests/session/test_claude_cli_provider.py`
+  exercises the failure shapes hermetically against a fake CLI, and
+  `tests/gate_item11/registry.py` gains the S2 row the item-11 tripwire
+  demanded, so the control-plane suite now runs unchanged against S2 wherever
+  the claude CLI exists (and skips that row, bwrap-style, where it does not).
+
 - **Item 8 rehearsal -- the stub Secretary intake and its explicit queue
   boundary** (`ACCEPTANCE.md` §1 item 8, D-0022, Issue #21). **A rehearsal,
   not a discharge**: the discharge point is the real Secretary under genuine
