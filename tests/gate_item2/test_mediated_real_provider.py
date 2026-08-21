@@ -22,6 +22,7 @@ Major-1 separation (the review's three kill shapes) is explicit here:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -36,6 +37,29 @@ from .conftest import RUN_ID, TTL_MS, Clock, active_rows
 from tests.session.test_claude_cli_provider import _FAKE_CLI
 
 UUID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+# ---------------------------------------------------------------------------
+# Platform sweep, stated once. The provider *fails closed* wherever a pid's
+# liveness or identity cannot be proven (#17): recovery around an orphan
+# record refuses to adopt, signal or resume rather than guess. That refusal
+# is design, not breakage -- so the shapes below are provable only where
+# their proof surface exists, and are skipped (with the dependency named)
+# everywhere else. The CI matrix's Linux jobs run every one of them.
+#
+# - Orphan liveness at all (kill-0 probe): POSIX only. On Windows an orphan
+#   record's liveness is unknowable and every recovery around it is refused.
+# - A *live* orphan's identity (pid-recycling guard): needs the pid's command
+#   line, i.e. /proc. macOS is POSIX without /proc: dead orphans resolve
+#   (kill-0), live ones refuse.
+#
+# Everything else in this file (fresh-start walks, identity mismatch, the
+# race with the refusal absent) drives only this instance's own children and
+# is platform-free. tests/test_orchestrator_walk.py is in-memory throughout;
+# test_session_driver_harness.py and the fault-injection session cases are
+# Linux-lane by declaration (real SIGKILL, /proc observer).
+# ---------------------------------------------------------------------------
+_POSIX = os.name == "posix"
+HAS_PROC = Path("/proc").is_dir()
 
 
 @pytest.fixture
@@ -162,7 +186,7 @@ def test_a_reported_identity_that_disagrees_is_never_confirmed(
 
 
 @pytest.mark.skipif(
-    not Path("/proc").is_dir(),
+    not HAS_PROC,
     reason=(
         "adoption requires confirming the surviving pid's command line via "
         "/proc; where /proc does not exist (macOS, Windows) the provider "
@@ -202,6 +226,15 @@ def test_supervisor_only_kill_the_surviving_child_is_adopted_not_respawned(
     assert len(active_rows(cp)) == 1
 
 
+@pytest.mark.skipif(
+    not _POSIX,
+    reason=(
+        "resuming an orphan record requires determining the recorded pid's "
+        "liveness (the kill-0 probe); on Windows that is unknowable and the "
+        "provider fails closed, refusing to adopt, signal or resume around "
+        "it -- by design (#17), so the resume shape is provable only on POSIX"
+    ),
+)
 def test_supervisor_and_child_kill_recovery_resumes_the_bound_identity(
     cp, clock, spawn_log, state_root, make_provider, make_real_orchestrator, monkeypatch
 ):
