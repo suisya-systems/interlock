@@ -185,6 +185,30 @@ def test_a_message_settled_mid_poll_is_skipped_not_an_error(tmp_path):
         env.close()
 
 
+def test_a_poll_outliving_its_lease_stops_at_the_expiry(bus_env):
+    """A long poll is fenced at each write, not at the instant it started.
+
+    With a live clock, the attempt that lands past the lease expiry is
+    refused loudly instead of the batch draining to completion on the stale
+    start-of-poll timestamp -- the single-writer guarantee holds through the
+    poll, not just at its first row.
+    """
+
+    send(bus_env, message_id="task-1")
+    send(bus_env, message_id="task-2")
+    # First attempt inside the lease, second one long past its expiry.
+    instants = iter([T0 + 1_000, T0 + 1_000_000])
+
+    with pytest.raises(StaleWriterRefused):
+        bus_env.bus.poll(
+            RECIPIENT, now_ms=T0 + 1_000, epoch=EPOCH, clock=lambda: next(instants)
+        )
+    statuses = dict(
+        bus_env.connection.execute("SELECT message_id, status FROM outbox")
+    )
+    assert statuses == {"task-1": "delivered", "task-2": "pending"}
+
+
 def test_two_tasks_settle_independently(bus_env):
     send(bus_env, message_id="task-1")
     send(bus_env, message_id="task-2")

@@ -147,6 +147,10 @@ class Endpoint:
             self._config.recipient,
             now_ms=_now_ms(),
             epoch=self._config.epoch,
+            # Re-read for every attempt: a poll that spans the lease expiry
+            # must be fenced at the write it is actually making, not at the
+            # instant it started.
+            clock=_now_ms,
         )
         self._polls_answered += 1
         if (
@@ -195,7 +199,14 @@ class Endpoint:
 
         if method == "initialize":
             want = params.get("protocolVersion", _DEFAULT_PROTO)
-            proto = want if want in _SUPPORTED_PROTO else _DEFAULT_PROTO
+            # A non-string (unhashable values included) negotiates to the
+            # default exactly like an unknown version string -- it must not
+            # raise out of handle() and take the transport down.
+            proto = (
+                want
+                if isinstance(want, str) and want in _SUPPORTED_PROTO
+                else _DEFAULT_PROTO
+            )
             return {
                 "jsonrpc": "2.0", "id": mid,
                 "result": {

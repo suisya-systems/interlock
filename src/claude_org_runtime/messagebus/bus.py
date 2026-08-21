@@ -163,6 +163,7 @@ class MessageBus:
         *,
         now_ms: int,
         epoch: int,
+        clock: Callable[[], int] | None = None,
     ) -> Sequence[DeliveredEnvelope]:
         """One pull: attempt every due message for *recipient*, oldest first.
 
@@ -172,6 +173,16 @@ class MessageBus:
         presented. A response the worker never receives therefore loses
         nothing: the rows stay due (delivered-but-unacked) and the next poll
         presents them again. What is due is read from SQLite and nowhere else.
+
+        *clock*, when given, is read again for **every** attempt; *now_ms*
+        then only anchors the due() snapshot. A poll that outlives its lease
+        must not keep delivering on the timestamp it started with -- the fence
+        evaluates expiry against the instant of each write, so with a live
+        clock a long poll dies loudly (:class:`StaleWriterRefused`, refusal
+        recorded) at the first attempt past the expiry instead of draining
+        the whole batch under a dead lease. Callers with a fixed *now_ms* and
+        no clock get the deterministic single-instant semantics the tests
+        use.
         """
 
         envelopes: list[DeliveredEnvelope] = []
@@ -185,9 +196,10 @@ class MessageBus:
                 # of attempt() entirely, so no refusal is durably recorded for
                 # what is simply a settled message.
                 continue
+            attempt_now = clock() if clock is not None else now_ms
             try:
                 outcome = self._outbox.attempt(
-                    message.message_id, now_ms=now_ms, epoch=epoch
+                    message.message_id, now_ms=attempt_now, epoch=epoch
                 )
             except (ValueError, StaleWriterRefused):
                 # The residual window: an ack that lands after the re-read

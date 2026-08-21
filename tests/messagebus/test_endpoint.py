@@ -157,6 +157,11 @@ def test_malformed_params_are_answered_not_fatal(rt_env):
         "params": {"name": "poll", "arguments": []},
     })
     assert bad_args["error"]["code"] == -32602
+    bad_proto = endpoint.handle({
+        "jsonrpc": "2.0", "id": 5, "method": "initialize",
+        "params": {"protocolVersion": ["2025-06-18"]},
+    })
+    assert bad_proto["result"]["protocolVersion"] == "2025-06-18"
     alive = endpoint.handle({"jsonrpc": "2.0", "id": 3, "method": "ping"})
     assert alive == {"jsonrpc": "2.0", "id": 3, "result": {}}
 
