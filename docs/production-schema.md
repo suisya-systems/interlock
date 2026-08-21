@@ -348,6 +348,30 @@ CREATE TABLE consumer_subscription (
     CHECK (removed_at_ms IS NULL OR removed_at_ms >= added_at_ms)
 );
 
+-- A cross-table invariant, so it is a trigger rather than a CHECK: outbox.recipient
+-- is NOT NULL, so a 'delivery' subscription registered without one does not fail
+-- at registration -- it fails later, inside the append transaction of the next
+-- matching event, taking the event down with it (section 5.4 commits all or
+-- nothing). Refusing the registration moves the failure to the party that can
+-- fix it.
+CREATE TRIGGER consumer_subscription_recipient_matches_kind_on_insert
+BEFORE INSERT ON consumer_subscription
+WHEN (SELECT kind FROM consumer WHERE consumer_id = NEW.consumer_id)
+     IS NOT (CASE WHEN NEW.recipient IS NULL THEN 'compute' ELSE 'delivery' END)
+BEGIN
+    SELECT RAISE(ABORT,
+        'a delivery subscription carries a recipient and a compute subscription does not');
+END;
+
+CREATE TRIGGER consumer_subscription_recipient_matches_kind_on_update
+BEFORE UPDATE OF recipient, consumer_id ON consumer_subscription
+WHEN (SELECT kind FROM consumer WHERE consumer_id = NEW.consumer_id)
+     IS NOT (CASE WHEN NEW.recipient IS NULL THEN 'compute' ELSE 'delivery' END)
+BEGIN
+    SELECT RAISE(ABORT,
+        'a delivery subscription carries a recipient and a compute subscription does not');
+END;
+
 CREATE TABLE event_consumption (
     consumer_id     TEXT    NOT NULL REFERENCES consumer(consumer_id),
     event_seq       INTEGER NOT NULL REFERENCES event(seq),
@@ -697,6 +721,26 @@ CREATE UNIQUE INDEX pull_request_identity ON pull_request(repo_id, pr_number);
 -- event rather than an edit: the update clears closed_at_ms (the CHECK above
 -- requires it) and re-activates the scope by clearing watcher_scope.retired_at_ms
 -- in the same transaction.
+-- The head projection is monotonic in the PROVIDER's order, not in ours.
+-- ci_current_verdict selects evidence by pull_request.head_sha (section 6.3
+-- rule 1), so a late-arriving older head observation that overwrote this column
+-- would make superseded CI evidence current again -- the same last-write-wins
+-- defect rule 4 removes from the verdict projection, reached through the column
+-- the verdict projection depends on. A head CHANGE therefore requires the
+-- provider's observation time to advance, and our own append order to advance
+-- with it; re-observing the SAME head may refresh the timestamp and no more.
+CREATE TRIGGER pull_request_head_is_monotonic
+BEFORE UPDATE OF head_sha, head_observed_at_ms, head_event_seq ON pull_request
+WHEN (NEW.head_sha <> OLD.head_sha
+      AND NOT (NEW.head_observed_at_ms > OLD.head_observed_at_ms
+               AND NEW.head_event_seq > OLD.head_event_seq))
+  OR NEW.head_observed_at_ms < OLD.head_observed_at_ms
+  OR NEW.head_event_seq < OLD.head_event_seq
+BEGIN
+    SELECT RAISE(ABORT,
+        'a pull request head only moves forward in the provider''s own order; a late older observation is evidence, not a projection');
+END;
+
 CREATE TRIGGER pull_request_merge_is_terminal
 BEFORE UPDATE OF state ON pull_request
 WHEN OLD.state = 'merged' AND NEW.state <> 'merged'
@@ -895,7 +939,14 @@ SELECT :scope_id, :holder, :epoch, :now_ms, :result,
        CASE WHEN :result =  'error'         THEN :error  END,
        CASE WHEN :result =  'error' THEN 1 ELSE 0 END, 1
  WHERE EXISTS (SELECT 1 FROM lease
-                WHERE resource = :scope_lease_resource
+                -- The lease resource is DERIVED from the target scope, never
+                -- passed alongside it. A separate :scope_lease_resource
+                -- parameter lets a watcher holding a valid lease for scope B
+                -- heartbeat scope A -- the row is written, the uncovered scope
+                -- looks healthy, and watcher_silence never fires for it. Binding
+                -- the two in the statement makes that unrepresentable rather
+                -- than merely discouraged.
+                WHERE resource = 'watcher_scope:' || :scope_id
                   AND holder = :holder AND epoch = :epoch
                   AND expires_at_ms > :now_ms)
     ON CONFLICT(scope_id) DO UPDATE
@@ -913,10 +964,16 @@ SELECT :scope_id, :holder, :epoch, :now_ms, :result,
        attempt_count      = attempt_count + 1
  WHERE watcher_liveness.holder_epoch <= :epoch
    AND EXISTS (SELECT 1 FROM lease
-                WHERE resource = :scope_lease_resource
+                WHERE resource = 'watcher_scope:' || :scope_id
                   AND holder = :holder AND epoch = :epoch
                   AND expires_at_ms > :now_ms);
 ```
+
+**The lease resource name is a function of the scope**, `'watcher_scope:' || scope_id`, and the
+statement computes it rather than accepting it. A watcher can therefore only ever heartbeat the
+scope it actually holds: a misrouted or stale heartbeat naming a different scope finds no matching
+lease and writes nothing, instead of marking an uncovered scope healthy and silencing its
+`watcher_silence` predicate.
 
 A replaced watcher returning with its old epoch matches neither arm and its heartbeat is refused —
 which is distinction (2). **Zero rows affected now has exactly two causes**, and the watcher
@@ -1304,9 +1361,14 @@ CREATE TABLE policy_revision (
 CREATE TABLE policy_detection_latency (
     revision_id      INTEGER NOT NULL REFERENCES policy_revision(revision_id),
     incident_class   TEXT    NOT NULL,
-    threshold_kind   TEXT    NOT NULL,
-    threshold_value  INTEGER NOT NULL,
-    budget_ms        INTEGER NOT NULL,   -- L: onset-to-alarm ceiling; T + P <= L
+    threshold_kind      TEXT    NOT NULL,
+    threshold_value     INTEGER NOT NULL,
+    -- P for THIS class. Section 3.3 of time-base-policy.md allows a class whose
+    -- L - T is large to be evaluated on a multiple of the base reconcile period;
+    -- carrying it per row is what lets the invariant below be checked at all,
+    -- since a CHECK cannot reach another table for the period.
+    reconcile_period_ms INTEGER NOT NULL,
+    budget_ms           INTEGER NOT NULL,   -- L: onset-to-alarm ceiling; T + P <= L
 
     PRIMARY KEY (revision_id, incident_class),
     -- T is not always a duration, and a single tolerance_ms column cannot say
@@ -1325,12 +1387,17 @@ CREATE TABLE policy_detection_latency (
     CHECK (threshold_kind IN ('absolute_ms', 'scope_interval_multiple',
                               'lease_ttl_multiple', 'consecutive_count')),
     CHECK (threshold_value >= 0),
+    CHECK (reconcile_period_ms > 0),
     CHECK (budget_ms > 0),
     -- The T + P <= L invariant is only checkable in DDL for absolute rows. For
     -- the relative kinds it is a PER-SUBJECT obligation evaluated at reconcile
     -- time, because T depends on the subject's own interval or TTL -- see the
     -- policy_budget_violation pass below.
-    CHECK (threshold_kind <> 'absolute_ms' OR threshold_value <= budget_ms)
+    -- The FULL inequality, not `T <= L`. A row with T = L passes the weaker
+    -- form and still lets the detector alarm a whole pass after its own declared
+    -- ceiling, which is the ceiling being meaningless.
+    CHECK (threshold_kind <> 'absolute_ms'
+           OR threshold_value + reconcile_period_ms <= budget_ms)
 );
 
 CREATE TABLE policy_gate_stage_tolerance (
@@ -1362,7 +1429,8 @@ effective over its period. Rows are never updated or deleted — a change is a n
 
 Because a relative threshold's `T` is only known per subject, the reconcile pass carries one more
 deterministic check — **`policy_budget_violation`**: for every live subject of a relative class,
-assert `T(subject) + P <= L`. A watcher scope registered with an `expected_interval_ms` so large
+assert `T(subject) + reconcile_period_ms <= budget_ms` — the same inequality the `CHECK` above
+enforces for absolute rows. A watcher scope registered with an `expected_interval_ms` so large
 that three missed polls exceed the `watcher_silence` budget is a misconfiguration that would
 otherwise present as a detector that is quietly slower than its stated ceiling for that one scope.
 Reporting it as its own incident class keeps the budget an assertion rather than an aspiration.
@@ -1404,6 +1472,10 @@ prepared, and the load-bearing constraints were exercised directly:
 | A closed, unmerged PR reopens; a merged one does not (§7.2) | `closed → open` accepted with `closed_at_ms` cleared; `merged → open` aborts |
 | A scope-relative multiple, a consecutive-failure count and a TTL multiple all store losslessly, and an absolute `T` above its own budget is refused (§10) | All four rows land; the over-budget row and an unknown `threshold_kind` both raise |
 | An invocation's output-token ceiling scales with its response count ([`measurement-harness.md`](./measurement-harness.md) §2.3) | 3000 tokens over 4 responses at a 1024 cap is accepted; the same 3000 over 1 response aborts |
+| A watcher holding scope B's lease cannot heartbeat scope A (§8.3) | The upsert affects 1 row for B and **0** for A; A keeps no liveness row and stays `watcher_scope_uncovered` |
+| A late, older head observation cannot revive superseded CI evidence (§7.2) | The newer head advances; the older one aborts, and the projection still reads the newer head |
+| A `delivery` subscription without a recipient — and a `compute` subscription with one — are both refused at registration (§5.3) | Both abort; the two well-formed rows land |
+| The budget `CHECK` includes the reconcile period (§10) | `T=180s + P=120s = L=300s` accepted; `T = L` and `T + P > L` both abort |
 
 Two things this does **not** establish, and they are the reasons it is not a substitute for the
 implementation Issue's tests. It does not exercise the `T + P ≤ L` timing behaviour, which needs the

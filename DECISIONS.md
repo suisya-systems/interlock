@@ -1302,6 +1302,10 @@ consumer named. The cursor-shaped view — a consumer's drain frontier — is de
   SQLite serialises write transactions**, so a committed gap is permanent and never back-filled.
   This is a dependency, not folklore: the implementation carries a test that interleaves two
   appending transactions and asserts no committed `seq` is observed out of commit order.
+- A `delivery` subscription without a recipient is refused **at registration**, by trigger, because
+  the alternative is that it fails later inside the append transaction of the next matching event —
+  taking the event down with it, since the append is all-or-nothing. The failure belongs to the party
+  that can fix it.
 - A `skipped` consumption must append a `consumption_skipped` event, so that a skip is
   distinguishable from a consumer quietly dropping work.
 - A late-registering consumer's back-fill decision is made once, in its registration transaction,
@@ -1335,7 +1339,8 @@ because the pass can only notice a crossing at its next run. The classes and the
 > **The reconcile period is 120 seconds.**
 
 The values live in `policy_detection_latency` / `policy_gate_stage_tolerance` /
-`policy_gate_stage_owner`, versioned by `policy_revision` and never updated in place, each revision
+`policy_gate_stage_owner`, with `P` itself carried per class row so that `T + P ≤ L` is a `CHECK`
+rather than a convention, versioned by `policy_revision` and never updated in place, each revision
 carrying the `D-` entry that set it. Three clock rules hold throughout: tolerances are evaluated
 against our clock only (never the provider's `occurred_at_ms`); the evaluation clock is the caller's
 parameter, never the database's; and every window is half-open `[start, end)`.
@@ -1448,6 +1453,12 @@ eligible evidence" rather than a pass.
   no-op and the PR stays projected `indeterminate` with the real verdict discarded. With it, a
   repeat of the same answer is still refused and a changed answer is a new observation. The cost is
   that a flapping provider appends a row per flap, which is genuine evidence rather than noise.
+- **The head projection is itself monotonic in the provider's order.** `ci_current_verdict` selects
+  eligible evidence by `pull_request.head_sha`, so a late older head observation overwriting that
+  column would make superseded CI evidence current again — the same last-write-wins defect, reached
+  through the column the verdict projection depends on rather than through the verdict. A head
+  *change* requires the provider's observation time and our append order both to advance;
+  re-observing the same head may refresh the timestamp and no more.
 - The rollup's subordinate eligibility is enforced **in the `ci_current_verdict` view**, not only in
   prose: a view that returned a coarse rollup beside the fine-grained scopes would let a stale
   `failed` dominate the severity fold while every real check is green.
@@ -1529,6 +1540,10 @@ never silently dropped.
   produce them**, so their constraints are implications rather than biconditionals. Tying either to
   `last_result` both ways would abort the first success-after-error and the first error-after-success
   — every recovery and every failure, which is precisely the alternation the table exists to record.
+- **The lease resource is derived from the scope**, `'watcher_scope:' || scope_id`, computed inside
+  the statement rather than passed beside it. Accepting it as a separate parameter would let a
+  watcher holding a valid lease for one scope heartbeat another — marking an uncovered scope healthy
+  and silencing exactly the `watcher_silence` predicate the fence exists to protect.
 - The heartbeat is an **upsert**, not an `UPDATE`. A newly registered scope has no row, so a bare
   `UPDATE` affects zero rows on every scope's first heartbeat — and zero rows is also how a stale
   writer is refused, so bootstrap would be permanently indistinguishable from rejection. The insert

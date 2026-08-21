@@ -233,8 +233,9 @@ fixtures/<class>/<case>/
 | Field | Meaning |
 |---|---|
 | `incident_class` | Which class should be raised, or `none` for a negative case |
-| `onset_offset_ms` | When the condition crossed its tolerance, relative to `t0` |
-| `budget_ms` | The `L` from the policy revision under test |
+| `onset_offset_ms` | When the condition **began** — the state entry — relative to `t0`. Not the tolerance crossing: `T` is part of `L`, not a head start on it ([`time-base-policy.md`](./time-base-policy.md) §3.1), and labelling the crossing here would hand every fixture an extra `T` of slack and pass alarms that landed at `T + L` |
+| `tolerance_ms` | The `T` from the policy revision under test — how much of the budget the condition was entitled to |
+| `budget_ms` | The `L` from the policy revision under test, measured from `onset_offset_ms` |
 | `fact_state` | The `D-0005` state the detector should classify to |
 | `must_not_recommend` | Recommendations that would be wrong for this case (e.g. `terminate` on an observation outage) |
 | `provenance` | Where the case came from: an accident, a dogfood capture, or a constructed edge |
