@@ -63,7 +63,7 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | # | Item (short) | Verdict | D-0022 label | Provider | Evidence | Discharge point |
 |---|---|---|---|---|---|---|
 | 1 | Public CLI alone can start / read state / stop / resume | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#6`, `#7` — not yet landed | The spike (phases 1a/1b) |
-| 2 | Unique session↔run re-match across the crash window; no duplicate writer | `failed` on C1; `pending` on C2 | `n/a — failed` (C1); `pending` (C2) | `C1 (Agent View)` → `C2 (claude -p subprocesses)` | D-0027; `investigation/u1-session-id-bg-experiment.md`; `investigation/pre-spawn-fence-search.md`. C2 re-proof: `#18` — not yet landed; its provider (`#17`, S2) landed 2026-08-21 | The spike (phase 6), on C2 |
+| 2 | Unique session↔run re-match across the crash window; no duplicate writer | `failed` on C1; `discharged` on C2 | `n/a — failed` (C1); `proven on the spike slice` (C2) | `C1 (Agent View)` → `C2 (claude -p subprocesses)` | D-0027; `investigation/u1-session-id-bg-experiment.md`; `investigation/pre-spawn-fence-search.md`. C2 proof: `#18` landed 2026-08-21 — `docs/crash-window-orchestration.md`, `tests/gate_item2/`, the `session-start` fault cases, `investigation/i18-crash-window-characterisation.md`; its provider (`#17`, S2) landed 2026-08-21 | The spike (phase 6), on C2 — reached 2026-08-21 |
 | 3 | Per-role permission / sandbox / hooks survive restart and fail closed | `discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#9`; `docs/per-role-fencing.md`; `src/claude_org_runtime/fencing/`; `tests/fencing/`; `investigation/i04-pretooluse-fence-probe.md` (U15, U35, U42). `#8` closed as **moot** under C2, not passed | The spike (phase 2b) |
 | 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `pending` | `pending` | `pending` | `#12` (S5), `#13` (S6, the lease and fencing token) and `#14` (S7 outbox + one declared handler) landed 2026-08-19; `#16` — not yet landed | The spike (phases 4–5) |
 | 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#12` (S5), `#13` (S6) and `#14` (S7) landed 2026-08-19; `#15`, `#16` — not yet landed | The spike (phases 4–5) |
@@ -98,8 +98,8 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 ### Item 2 — unique session↔run re-matching across the crash window, no duplicate active writer
 
-- **Verdict:** **`failed` on C1 (Agent View)**, 2026-08-18, per D-0027. **`pending` on C2.**
-- **D-0022 label:** `n/a — failed` for the C1 attempt; `pending` for C2.
+- **Verdict:** **`failed` on C1 (Agent View)**, 2026-08-18, per D-0027. **`discharged` on C2**, 2026-08-21.
+- **D-0022 label:** `n/a — failed` for the C1 attempt; `proven on the spike slice` for C2 — the orchestration and binding are throwaway under D-0026, the tests are the durable half, and re-proof on the real implementation is still owed (`ACCEPTANCE.md` §4 keeps item 2 on the re-run-in-full list for any provider change).
 - **Provider:** `C1 (Agent View)` → `C2 (claude -p subprocesses)`.
 - **Evidence (C1, the failure):**
   - U1 negative — `investigation/u1-session-id-bg-experiment.md`: a background session's identity
@@ -110,12 +110,45 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
     rows 1–3, 5, 11 and 12 refuted by experiment rather than by reading). Exhaustiveness is not
     claimed: anything outside §3.1 is *unsearched*, not *absent*.
   - D-0027 records the verdict, its falsification conditions, and the adoption of C2.
-- **Evidence (C2, pending):** `#18` proves single-writer re-identification across the crash window
-  on C2; `#17` builds the C2 provider it runs against. `#17` landed 2026-08-21; `#18` has not. `#12` (S5) landed
-  2026-08-19 and supplies the durable half the proof is read out of — the session↔run binding is a
-  row in `session`, and *at most one active binding per run* is a partial unique index there rather
-  than a check-then-insert, since a check-then-insert leaves exactly the window this item injects
-  into. Landing the store proves nothing about the item: the kill matrix is `#18`'s.
+- **Evidence (C2, the discharge):** `#18` landed 2026-08-21; `#17` (the C2 provider it runs
+  against) landed the same day, and `#12` (S5, landed 2026-08-19) supplies the durable store the
+  proof is read out of — the session↔run binding is a row in `session`, *at most one active binding
+  per run* is a partial unique index there rather than a check-then-insert (a check-then-insert
+  leaves exactly the window this item injects into), and `#18` gave the row its staged
+  `binding_phase` (`prepared → spawned → identity_confirmed`) so a pre-spawn commit is expressible
+  without claiming an observation that never happened. What `#18` demonstrates, each part durable
+  and automated:
+  - **Commit-before-spawn, killed at all four injection points.** The `--session-id` UUID is
+    generated by the orchestrator, committed under the fence before the process exists, and passed
+    verbatim to the provider; `tests/fault_injection/` (the `session-start` cases over
+    `session_driver.py`) SIGKILLs a real supervisor process at each armed point — before the
+    binding commit, between commit and spawn, between spawn and the read-back commit, and after the
+    read-back commit ("after the read-back" is defined as after that commit) — restarts it, and
+    asserts from the reopened database that re-identification yields exactly one session for the
+    run (`one-binding-per-run`: the index's at-most-one plus a non-empty read after recovery).
+  - **The mediated crash-and-retry shapes.** `tests/gate_item2/` runs the U27 shape (claimant dies
+    inside the admission window, retry lands inside it) and the U32 shape (recovery of a dead
+    holder's session) through the control plane, against providers that refuse nothing by
+    construction: the losing claimant is refused at a fenced write and never becomes a process; a
+    second resume is never issued while a claimant holds the lease; recovery resolves the surviving
+    process first and goes through `--resume`, never a fresh claim (U28); a supervisor-only kill
+    ends in adoption of the surviving child with no second spawn; orphans a binding does not name
+    are never adopted.
+  - **Refusals are rows.** Every second-writer refusal is an `action` row written by the lease
+    module inside the refused attempt's own transaction; no assertion anywhere reads an exit code
+    (under U27 both racers exit 0, so exit codes prove nothing here).
+  - **The transcript-level statement.** The destination observables
+    (`live-processes-per-session`, `transcript-single-writer`) are read from the destination's own
+    records — real process counts and the captured event streams — never from our rows; every
+    mediated stream names exactly the committed identity, with no doubled turn.
+  - **The unmediated characterisation**, re-measured on this machine rather than taken from the
+    report's figure: `investigation/i18-crash-window-characterisation.md` (CLI 2.1.238) reproduces
+    U27 (3/3 both-admitted, both wrote; window edge between 2 s and 3 s today, refusal ~0.34 s and
+    pre-model) and U32 (both concurrent resumes admitted; interleaved transcript, 3 user + 6
+    assistant turns under one id). No measured figure is a constant in any test (U34).
+  - The written protocol — the spawn-admission critical section, and the recovery ordering — is
+    `docs/crash-window-orchestration.md`; it keeps the two claims separate: the fencing token
+    proves protected writes, the spawn gate prevents a second model turn.
 - **Residual — stated as what it is: the absence of a backstop, not a tolerated violation.**
   Under C2 the provider supplies **no exclusion**:
   - **U27 (negative)** — the `-p` `--session-id` refusal is *not atomic*. Inside an admission window
@@ -132,6 +165,20 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   So nothing but **Interlock's own correctness** — the fencing token, validated atomically as part
   of each protected write (`ACCEPTANCE.md` §2, D-0027 part 3) — stands between a run and an
   interleaved transcript. That is the residual, and it is recorded here rather than left implicit.
+  The C2 discharge narrows it but does not remove it, and adds one honest bound of its own:
+
+  - **The admission→exec window is open by construction.** A process creation cannot be made
+    transactional with a SQLite commit, so a claimant that loses its lease *between* its fenced
+    admission commit and its `exec` (SIGSTOP across an expiry, in the tested shape) can bring a
+    process into existence. What is guaranteed — and tested — is that the very next fenced write
+    detects the stale token and the child is terminated at once; in the deterministic suite the
+    measured detection→termination latency is carried on the refusal
+    (`LoserTerminated.termination_latency_ms`) rather than implied to be zero. Against a live
+    model-backed child, termination speed bounds the exposure; it does not re-classify it — if such
+    a child ever took a model turn on a session id it did not own, that would be the violation this
+    item names, not an accepted cost.
+  - U34 (what sets the window's width) and U36 (what the refusal is keyed to) stay open; the
+    re-measurement confirms the hazard, not an explanation.
 
   **An interleaved transcript is not an accepted residual.** If two processes were ever concurrently
   live on one session id, **item 2 failed**, and this record says so.
@@ -140,7 +187,12 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   window). O6's grade stays `~` (D-0027); a move to `Y` or to `N` would both be wrong on this
   evidence. General rule fixed by the C1 failure and binding under any provider: **do not treat
   exit 0, or a binding committed before the spawn, as evidence that the identity was accepted** —
-  read back what the provider actually assigned.
+  read back what the provider actually assigned. The C2 walk enforces this: a binding is confirmed
+  only after a positive read-back is itself committed, and a disagreeing read-back impounds the
+  session rather than confirming it. One document correction rode with the discharge and is
+  disclosed here as in the PR: `ACCEPTANCE.md`'s item 2 row previously said "between spawn and
+  commit", which D-0024's commit-before-spawn ordering had already superseded; the row was
+  re-synchronised to the four injection points, with the change noted in the row itself.
 
 ### Item 3 — per-role permission / sandbox / hooks survive restart and fail closed
 
@@ -499,6 +551,7 @@ anything.
 | Stub Secretary intake (item 8 rehearsal) | throwaway implementation, durable tests and boundary contract | `#21` — landed 2026-08-21: `src/claude_org_runtime/secretary/` is throwaway; `tests/secretary/` (the structural and behavioural assertions) and `docs/secretary-intake-boundary.md` (the contract the real Secretary and `#29` build against) are the durable half; `investigation/i16_item8_rehearsal.py` is an S4-style throwaway harness and `investigation/i16-item8-rehearsal.md` its record |
 | Routing point, run-owner ledger, writer audit (item 10 rehearsal) | throwaway implementation, durable tests and contract | `#23` — landed 2026-08-21: `src/claude_org_runtime/canary/` (the routing point, the ledger with its own SQLite file, the audit and the synthetic counterparty) is throwaway; `tests/canary/` and `docs/canary-routing-rehearsal.md` (the contract the real canary cutover builds against) are the durable half. The ledger stays out of Q-0001's territory: `owning_system` names a system, never a component, role or lease holder |
 | S10 — per-role fencing renderer, `PreToolUse` deny hook, breach-probe battery | throwaway implementation, durable tests | `#9`; implementation `src/claude_org_runtime/fencing/`, tests `tests/fencing/`. Landed 2026-08-18; nothing here is promoted by having discharged item 3 |
+| Session-binding phases and lease-before-spawn orchestration (item 2, crash window) | throwaway implementation, durable tests and protocol contract | `#18` — landed 2026-08-21: `src/claude_org_runtime/control_plane/session_binding.py` and `src/claude_org_runtime/supervisor/session_orchestrator.py` are throwaway (the `binding_phase` column is a spike expression of the injection seams, not an answer to `Q-0001`); the durable half is `tests/gate_item2/`, the schema constraints in `tests/control_plane/test_spike_schema.py`, the `session-start` contract vocabulary, cases and assertion arms in `tests/fault_injection/` (with `session_driver.py` as the second adapter, replaceable like the first), and `docs/crash-window-orchestration.md` (the protocol the real supervisor builds against). `investigation/i18_recharacterisation.py` is an S4-style throwaway probe and `investigation/i18-crash-window-characterisation.md` its record |
 | Curator promotion gate implementation | throwaway | PR `#27`, `src/claude_org_runtime/curator/` |
 | Investigation records (U-register, fence search, U1, U8, U15/U35/U42) | evidence, not spike output — kept as the basis of the verdicts above | `investigation/` |
 
