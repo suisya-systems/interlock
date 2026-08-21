@@ -103,6 +103,7 @@ __all__ = [
     "classify_episodes",
     "default_grace_ms",
     "episode_window",
+    "require_grace_ms",
     "resolve_budget_ms",
 ]
 
@@ -468,6 +469,28 @@ def classify(
     return IN_PERIOD
 
 
+def require_grace_ms(grace_ms: int) -> None:
+    """Refuse a grace no window may be computed with.
+
+    The rule lives here, in one place, because the report declares grace in its
+    section 6 provenance (``D-0040``) while the window model is what the value
+    actually means: two copies of this check could drift, and the drift would
+    show up as a report attesting to a configuration :func:`episode_window`
+    refuses -- and on a report that classified no episodes, nothing would ever
+    raise, so it would render clean.
+
+    :raises WindowRefusal: if *grace_ms* is negative.
+    """
+
+    if grace_ms < 0:
+        raise WindowRefusal(
+            f"grace_ms={grace_ms} is negative; grace exists so an episode is not "
+            "judged a miss for losing a race with the pass that would have "
+            "caught it, and a negative value shortens the window below the "
+            "budget the detector is actually held to"
+        )
+
+
 def episode_window(
     connection: sqlite3.Connection,
     *,
@@ -484,13 +507,7 @@ def episode_window(
     recorded, and this function resolves none of its own.
     """
 
-    if grace_ms < 0:
-        raise WindowRefusal(
-            f"grace_ms={grace_ms} is negative; grace exists so an episode is not "
-            "judged a miss for losing a race with the pass that would have "
-            "caught it, and a negative value shortens the window below the "
-            "budget the detector is actually held to"
-        )
+    require_grace_ms(grace_ms)
 
     policy_row = policy.detection_latency(
         connection, revision_id=revision_id, incident_class=episode.incident_class

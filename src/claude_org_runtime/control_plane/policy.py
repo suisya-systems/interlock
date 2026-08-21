@@ -105,6 +105,34 @@ _SUBJECT_KIND_OF: Mapping[str, str] = MappingProxyType(
 )
 
 
+#: The one place "which revision is effective at an instant" is written.
+#:
+#: ``policy_revision`` may hold two rows sharing an ``effective_at_ms`` (a
+#: correction filed in the same pass as the row it corrects), and
+#: ``AUTOINCREMENT`` makes the higher ``revision_id`` the later decision. So at
+#: any given instant exactly one revision is in force: the highest
+#: ``revision_id`` among the rows at that instant. This ``SELECT`` collapses the
+#: table to that one row per instant, and both :func:`effective_revision_id` and
+#: :func:`revision_over_period` read *it* rather than each re-deriving the
+#: tie-break in their own ``ORDER BY``.
+#:
+#: What breaks if the two drift: they answered the same question two ways, and
+#: they did drift -- ``revision_over_period`` ordered by ``effective_at_ms,
+#: revision_id`` and returned *both* rows of a tie, while
+#: :func:`effective_revision_id` returned only the higher. The superseded row,
+#: never in force at any instant, then appeared in the period set, which made a
+#: report announce a NON-HOMOGENEOUS period (``measurement-harness.md`` section
+#: 6, ``D-0040``) across a policy change that never happened, and let
+#: ``build_header`` accept that superseded revision as having been in force.
+#: A banner that fires on a non-event is a banner readers learn to ignore, and
+#: it is the signal that the latency figures cannot be trusted.
+_EFFECTIVE_REVISION_AT_INSTANT = """
+        SELECT effective_at_ms, MAX(revision_id) AS revision_id
+          FROM policy_revision
+         GROUP BY effective_at_ms
+"""
+
+
 class PolicyRefusal(Exception):
     """A policy read that cannot be answered, stated rather than guessed at."""
 
@@ -144,19 +172,21 @@ class PolicyUsageError(ValueError):
 def effective_revision_id(connection: sqlite3.Connection, *, now_ms: int) -> int:
     """The revision in force at *now_ms* -- what a detector binds.
 
-    ``ORDER BY effective_at_ms DESC, revision_id DESC`` and not ``effective_at_ms``
-    alone: two revisions may legitimately share an instant (a correction inserted
-    in the same pass as the row it corrects), and ``AUTOINCREMENT`` makes the
-    higher ``revision_id`` the later decision. Without the tiebreaker SQLite is
-    free to return either, and a detector would silently alternate between two
-    sets of numbers across restarts.
+    Two revisions may legitimately share an instant (a correction inserted in
+    the same pass as the row it corrects), and the higher ``revision_id`` is the
+    later decision. Without that tie-break SQLite is free to return either, and a
+    detector would silently alternate between two sets of numbers across
+    restarts. The tie-break is not written here: it lives once in
+    :data:`_EFFECTIVE_REVISION_AT_INSTANT`, which this query selects from, so
+    that :func:`revision_over_period` cannot answer the same question a second
+    way.
     """
 
     row = connection.execute(
-        """
-        SELECT revision_id FROM policy_revision
+        f"""
+        SELECT revision_id FROM ({_EFFECTIVE_REVISION_AT_INSTANT})
          WHERE effective_at_ms <= ?
-         ORDER BY effective_at_ms DESC, revision_id DESC
+         ORDER BY effective_at_ms DESC
          LIMIT 1
         """,
         (now_ms,),
@@ -180,6 +210,11 @@ def revision_over_period(
     even though it took effect long before. Every revision that took effect
     *inside* ``[start, end)`` then joins it.
 
+    Both halves select from :data:`_EFFECTIVE_REVISION_AT_INSTANT` rather than
+    from ``policy_revision`` directly, so a revision superseded at its own
+    instant is absent from *both* -- it was never in force for a millisecond, and
+    a member of this set is a revision that governed some part of the period.
+
     A revision whose ``effective_at_ms`` equals ``period_end_ms`` is excluded: the
     window is half-open, so that instant belongs to the next period, and to
     exactly one (``time-base-policy.md`` section 2, rule 4). A report that
@@ -199,10 +234,10 @@ def revision_over_period(
 
     revisions: list[int] = []
     opening = connection.execute(
-        """
-        SELECT revision_id FROM policy_revision
+        f"""
+        SELECT revision_id FROM ({_EFFECTIVE_REVISION_AT_INSTANT})
          WHERE effective_at_ms <= ?
-         ORDER BY effective_at_ms DESC, revision_id DESC
+         ORDER BY effective_at_ms DESC
          LIMIT 1
         """,
         (period_start_ms,),
@@ -211,10 +246,10 @@ def revision_over_period(
         revisions.append(int(opening[0]))
 
     for row in connection.execute(
-        """
-        SELECT revision_id FROM policy_revision
+        f"""
+        SELECT revision_id FROM ({_EFFECTIVE_REVISION_AT_INSTANT})
          WHERE effective_at_ms > ? AND effective_at_ms < ?
-         ORDER BY effective_at_ms ASC, revision_id ASC
+         ORDER BY effective_at_ms ASC
         """,
         (period_start_ms, period_end_ms),
     ):

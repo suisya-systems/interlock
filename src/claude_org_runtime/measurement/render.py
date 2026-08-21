@@ -504,6 +504,11 @@ def section_from_window_declaration(
     might explain.
     """
 
+    # The window model's own rule, not a copy of it: a grace it refuses would
+    # otherwise be stamped as this report's declared configuration, and this
+    # branch classifies no episodes, so nothing downstream would ever raise it.
+    windows_module.require_grace_ms(grace_ms)
+
     return ReportSection(
         name="observation_window",
         title="Observation window - the grace this report was computed under",
@@ -612,9 +617,12 @@ def build_measurement_report(
     needed it, and both are declared per report rather than derived from the
     database.
 
-    *grace_ms* declares the observation-window grace. ``None`` resolves it from
-    the policy revision in force (``windows.default_grace_ms``, one reconcile
-    period) and stamps the source as such, which is a derivation the report
+    *grace_ms* declares the observation-window grace, and is held to
+    :func:`~.windows.require_grace_ms` -- the same rule
+    :func:`~.windows.episode_window` applies -- so the section 6 provenance
+    cannot attest to a configuration no window could have been computed under.
+    ``None`` resolves it from the policy revision in force
+    (``windows.default_grace_ms``, one reconcile period) and stamps the source as such, which is a derivation the report
     records rather than a constant it hides.
 
     The censoring counts on the header are zero here and
@@ -633,6 +641,13 @@ def build_measurement_report(
     holds a SHARED lock and **blocks every writer on the control plane until it
     finishes**.
     """
+
+    if grace_ms is not None:
+        # Checked here as well as in section_from_window_declaration, for the
+        # reason the fingerprint mode is checked twice below: a caller who
+        # declares a grace the window model refuses learns it before the cohort
+        # scan holds a SHARED lock on every writer, rather than after.
+        windows_module.require_grace_ms(grace_ms)
 
     if fingerprint_mode not in FINGERPRINT_MODES:
         # Refused here as well as inside fingerprint_database, so a caller that

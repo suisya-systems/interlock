@@ -49,6 +49,7 @@ from claude_org_runtime.control_plane.migrator import (
 from claude_org_runtime.measurement import ac9 as ac9_module
 from claude_org_runtime.measurement import cohort as cohort_module
 from claude_org_runtime.measurement import render as render_module
+from claude_org_runtime.measurement import windows as windows_module
 from claude_org_runtime.measurement.provenance import (
     AGGREGATE_STATEMENT,
     CONTENT_STATEMENT,
@@ -444,6 +445,67 @@ def test_grace_from_the_revision_is_stamped_as_derived_and_a_declared_one_is_not
     stated = report_over(db, grace_ms=1_234).section("observation_window").facts
     assert stated["grace_ms"] == 1_234
     assert stated["grace_source"] == "declared"
+
+
+def test_a_negative_declared_grace_is_refused_before_the_cohort_scan(
+    db: Path,
+) -> None:
+    """A grace the window model refuses must not reach the report either.
+
+    windows.episode_window rejects grace_ms < 0 (it shortens the window below
+    the budget the detector is held to), so a report built with one attests, in
+    its section 6 provenance, to a configuration that could never have produced
+    a valid window -- and this branch classifies no episodes, so nothing
+    downstream would raise and the report would render clean. The library entry
+    point has to refuse it, with the window model's own type rather than a
+    second copy of the rule.
+    """
+
+    with pytest.raises(windows_module.WindowRefusal):
+        report_over(db, grace_ms=-1)
+
+
+def test_the_grace_rule_the_report_enforces_is_the_window_model_s_own(
+    db: Path, monkeypatch
+) -> None:
+    """The two must not be able to drift about what a valid grace is.
+
+    Bound to the code: windows.require_grace_ms is replaced, and the report is
+    asserted to refuse what the replacement refuses. A second copy of the rule
+    inside render.py passes the test above and fails this one.
+    """
+
+    def only_multiples_of_seven(grace_ms: int) -> None:
+        if grace_ms % 7:
+            raise windows_module.WindowRefusal("not a multiple of seven")
+
+    monkeypatch.setattr(
+        windows_module, "require_grace_ms", only_multiples_of_seven
+    )
+    with pytest.raises(windows_module.WindowRefusal):
+        report_over(db, grace_ms=1_234)
+    assert (
+        report_over(db, grace_ms=14).section("observation_window").facts[
+            "grace_ms"
+        ]
+        == 14
+    )
+
+
+def test_a_negative_grace_is_refused_by_the_section_builder_too(db: Path) -> None:
+    """The section builder is a public entry point of its own (``__all__``).
+
+    Validating only in build_measurement_report would leave a caller who
+    assembles a MeasurementReport from sections -- which this module exports the
+    pieces for -- able to stamp the invalid grace anyway.
+    """
+
+    with pytest.raises(windows_module.WindowRefusal):
+        render_module.section_from_window_declaration(
+            grace_ms=-1,
+            grace_source=windows_module.GRACE_DECLARED,
+            episodes_classified=0,
+        )
 
 
 def test_the_zero_censoring_counts_say_why_they_are_zero(db: Path) -> None:

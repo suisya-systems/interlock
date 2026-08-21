@@ -141,7 +141,9 @@ _FINGERPRINT_HELP = (
 _GRACE_HELP = (
     "observation-window grace in milliseconds, declared for this report. "
     "Omitted, it is resolved from the policy revision in force as one reconcile "
-    "period and the report records that this is where it came from."
+    "period and the report records that this is where it came from. A negative "
+    "value is refused: it shortens the observation window below the budget the "
+    "detector is held to."
 )
 _SHADOW_HELP = (
     "path to a JSON file holding the v1 shadow input: a list of v1-owned run "

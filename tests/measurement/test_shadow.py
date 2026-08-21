@@ -80,6 +80,9 @@ from claude_org_runtime.measurement.shadow import (
     read_worker_escalation_episodes,
     reconcile,
     render_shadow_reconciliation,
+    BOUNDED_ONSET_CAVEAT,
+    ONSET_OBSERVED,
+    ONSET_UPPER_BOUND,
 )
 from claude_org_runtime.measurement.windows import Episode, classify_episodes
 
@@ -1194,3 +1197,165 @@ def test_the_rendered_report_is_ascii_and_survives_a_cp932_console():
     assert POSITIONAL_KEY_CAVEAT.isascii()
     assert list(report.counts()) == list(RECONCILIATION_BUCKETS)
     assert list(ADJUDICATIONS) == [MISS, V1_FALSE_POSITIVE, UNDETERMINED]
+
+
+def test_a_malformed_liveness_incident_outside_the_window_is_not_selected(db: Path):
+    """A key gap is not a window exemption.
+
+    An incident that cannot compute its key still has to belong to the period
+    before it is reported in it. Letting keyless incidents past the selection
+    window would put every historical malformed row into ``unmatched_key`` in
+    every report forever, and two adjacent periods would count the same ancient
+    rows twice -- destroying the one signal section 7 reads out of that bucket,
+    that the key itself needs replacing.
+    """
+
+    cp = writable(db)
+    try:
+        add_run(cp, "run-1")
+        add_incident(
+            cp,
+            "inc-ancient-no-elapsed",
+            run_id="run-1",
+            session_id=None,
+            created_at_ms=T0 - 30 * DAY_MS,
+            elapsed_ms=None,
+        )
+        add_incident(
+            cp,
+            "inc-ancient-no-run",
+            run_id=None,
+            session_id=None,
+            created_at_ms=T0 - 30 * DAY_MS,
+            elapsed_ms=MINUTE,
+        )
+    finally:
+        cp.close()
+
+    connection = open_for_measurement(db)
+    try:
+        episodes = read_session_liveness_episodes(
+            connection,
+            onset_from_ms=PERIOD_START,
+            onset_to_ms=PERIOD_END,
+            fact_states=(LIVENESS_STATE,),
+        )
+    finally:
+        connection.close()
+
+    assert [episode.episode_id for episode in episodes] == []
+
+
+def test_a_malformed_liveness_incident_inside_the_window_says_it_was_bounded(db: Path):
+    """Not dropped, and not passed off as an onset either.
+
+    Section 3.3's fallback chain never silently drops, so the row is still
+    reported; ``created_at_ms`` is an upper bound on the onset
+    (``0001_initial.sql`` pins it ``NOT NULL`` and checks ``elapsed_ms >= 0``),
+    and the episode declares that it was selected on the bound so a reader can
+    see the period boundary is not exact for it.
+    """
+
+    cp = writable(db)
+    try:
+        add_run(cp, "run-1")
+        add_incident(
+            cp,
+            "inc-no-elapsed",
+            run_id="run-1",
+            session_id=None,
+            created_at_ms=T0 + 2 * MINUTE,
+            elapsed_ms=None,
+        )
+    finally:
+        cp.close()
+
+    connection = open_for_measurement(db)
+    try:
+        episodes = read_session_liveness_episodes(
+            connection,
+            onset_from_ms=PERIOD_START,
+            onset_to_ms=PERIOD_END,
+            fact_states=(LIVENESS_STATE,),
+        )
+    finally:
+        connection.close()
+
+    assert len(episodes) == 1
+    assert episodes[0].key is None
+    assert episodes[0].onset_basis == ONSET_UPPER_BOUND
+    assert episodes[0].onset_ms == T0 + 2 * MINUTE
+    assert episodes[0].evidence["onset_basis"] == ONSET_UPPER_BOUND
+
+    report = reconciled(episodes, [an_episode("v1-1")])
+    assert report.counts()[UNMATCHED_KEY] == 1
+    assert BOUNDED_ONSET_CAVEAT in render_shadow_reconciliation(report)
+
+
+def test_a_liveness_incident_with_no_run_is_windowed_on_its_derivable_onset(db: Path):
+    """``run_id`` missing does not make the onset unknown, so the onset windows it.
+
+    The incident is *raised* inside the period and its condition began before
+    the period started. Windowing it on ``created_at_ms`` would pull an episode
+    belonging to the previous period into this one; windowing it on the onset
+    -- which ``elapsed_ms`` still makes derivable -- keeps the two reports
+    disjoint.
+    """
+
+    cp = writable(db)
+    try:
+        add_incident(
+            cp,
+            "inc-no-run",
+            run_id=None,
+            session_id=None,
+            created_at_ms=PERIOD_START + MINUTE,
+            elapsed_ms=10 * MINUTE,
+        )
+    finally:
+        cp.close()
+
+    connection = open_for_measurement(db)
+    try:
+        this_period = read_session_liveness_episodes(
+            connection,
+            onset_from_ms=PERIOD_START,
+            onset_to_ms=PERIOD_END,
+            fact_states=(LIVENESS_STATE,),
+        )
+        previous_period = read_session_liveness_episodes(
+            connection,
+            onset_from_ms=PERIOD_START - DAY_MS,
+            onset_to_ms=PERIOD_START,
+            fact_states=(LIVENESS_STATE,),
+        )
+    finally:
+        connection.close()
+
+    assert [episode.episode_id for episode in this_period] == []
+    assert [episode.episode_id for episode in previous_period] == ["liveness:inc-no-run"]
+    assert previous_period[0].key is None
+    assert previous_period[0].onset_basis == ONSET_OBSERVED
+    assert previous_period[0].onset_ms == PERIOD_START - 9 * MINUTE
+
+
+def test_an_episode_selected_on_a_bound_may_not_carry_a_correlation_key():
+    """A latency measured against a bound is not a latency.
+
+    ``MatchedPair.onset_delta_ms`` subtracts the two sides' onsets, so a keyed
+    episode whose instant is only an upper bound would report a fabricated
+    detection latency as a measured one.
+    """
+
+    with pytest.raises(EpisodeKeyRefused) as raised:
+        ShadowEpisode(
+            episode_id="liveness:inc-1",
+            subject_class=SUBJECT_SESSION_LIVENESS,
+            shape=LIVENESS_STATE,
+            onset_ms=T0,
+            key=CorrelationKey(
+                subject_class=SUBJECT_SESSION_LIVENESS, parts=("run-1", "1")
+            ),
+            onset_basis=ONSET_UPPER_BOUND,
+        )
+    assert "latency" in str(raised.value)

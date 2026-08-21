@@ -643,7 +643,11 @@ def close_gate(
     The event's ``dedup_key`` is ``'gate_closed/<gate_id>'`` for every outcome:
     a gate closes once, so one identity per gate is the strongest statement of
     that and makes a re-run of the sweep an idempotent no-op on the spine as
-    well as in the table.
+    well as in the table. Because that identity is shared by every outcome, a
+    duplicate append is *not* on its own evidence that this outcome landed: the
+    gate is re-read on that path and a different committed outcome is refused,
+    which is what keeps ``False`` meaning "already done, identically" rather
+    than "already done, somehow".
 
     **Closure retires the relay nobody is waiting for any more, in this same
     transaction.** Every ``gate_relay`` of this gate whose ``outbox`` row is
@@ -676,7 +680,9 @@ def close_gate(
     re-check is the braces. No component in this branch does that check,
     because the delivery driver does not exist here yet.
 
-    :raises GateClosedRefused: if the gate is closed with a *different* outcome.
+    :raises GateClosedRefused: if the gate is closed with a *different*
+        outcome, whether that was already true on entry or became true while
+        this close was in flight.
     :raises InadmissibleTransitionRefused: if *outcome* is not reachable from
         the stage the gate is at (:data:`CLOSE_OUTCOME_STAGES`).
     :raises ValueError: if ``superseded_by`` does not accompany exactly the
@@ -730,7 +736,36 @@ def close_gate(
         ),
         side_effect=side_effect,
     )
-    return not appended.duplicate
+    if not appended.duplicate:
+        return True
+
+    # The duplicate is only an idempotent no-op if the closure already on the
+    # spine is *this* closure. The pre-check above reads the gate outside the
+    # append's transaction, so a second caller can pass it while a first caller
+    # with a different outcome is mid-commit; the loser then collides on
+    # 'gate_closed/<gate_id>' -- one dedup key per gate, whatever the outcome --
+    # and would otherwise be told its close was already done. Section 9.4's
+    # taxonomy exists so that *which* outcome a gate reached is a fact a reader
+    # can rely on, and returning False here for an 'expired' close of a gate
+    # that actually closed 'withdrawn' hands the caller the one false fact this
+    # function exists to prevent. So re-read and refuse, exactly as the
+    # pre-check would have if it had run a moment later.
+    settled = _load_gate(connection, gate_id)
+    if settled["closed_at_ms"] is not None and settled["outcome"] == outcome:
+        return False
+    if settled["closed_at_ms"] is None:
+        # The dedup key is on the spine with no closure behind it, which this
+        # module never produces (the closure is the append's side_effect and
+        # commits with it). Something else wrote that identity; say so plainly
+        # rather than reporting an outcome nobody recorded.
+        raise GateClosedRefused(
+            f"the closure identity 'gate_closed/{gate_id}' is already on the "
+            f"spine but gate {gate_id} is open; it does not become {outcome!r}"
+        )
+    raise GateClosedRefused(
+        f"gate {gate_id} was closed as {settled['outcome']!r} by a concurrent "
+        f"writer while this close was in flight; it does not become {outcome!r}"
+    )
 
 
 def sweep_subject_gone(

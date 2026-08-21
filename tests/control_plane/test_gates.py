@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_org_runtime.control_plane import policy
+from claude_org_runtime.control_plane import gates, policy
 from claude_org_runtime.control_plane.gates import (
     ADMISSIBLE,
     CLOSE_OUTCOME_STAGES,
@@ -1033,3 +1033,119 @@ def test_a_second_close_sweep_over_a_closed_gate_stays_a_no_op(cp) -> None:
     assert outbox_rows(cp, f"gate/{gate_id}/presented") == [
         ("msg-twice", "cancelled", 0)
     ]
+
+
+def test_a_losing_concurrent_close_is_refused_instead_of_told_its_outcome_landed(
+    cp, monkeypatch
+) -> None:
+    """The loser of a race for the close must not be handed the winner's outcome.
+
+    ``close_gate`` reads the gate *outside* the append's transaction, so two
+    callers with different outcomes can both pass that read; the winner commits
+    and the loser then collides on ``gate_closed/<gate_id>`` and gets a
+    duplicate back. Reporting that as the ordinary idempotent ``False`` would
+    tell the loser its ``expired`` close was already done while section 9.4's
+    taxonomy actually records ``withdrawn`` -- a projection claiming something
+    the history does not say, which is the one thing the ledger is for.
+
+    The race is driven deterministically rather than with threads: the winner
+    commits from inside the append seam, which is exactly the window between
+    the loser's pre-check and its append.
+    """
+
+    gate_id = a_gate(cp)
+    reach_presented(cp, gate_id, base=T0 + MINUTE)
+
+    real_append = gates.append_event
+    winner_committed: list[bool] = []
+
+    def append_after_the_winner_commits(connection, **kwargs):
+        if not winner_committed:
+            winner_committed.append(True)
+            assert close_gate(
+                cp, gate_id=gate_id, outcome="withdrawn", actor_kind="worker",
+                actor_id="worker-7", occurred_at_ms=T0 + 5 * MINUTE,
+                recorded_at_ms=T0 + 5 * MINUTE,
+            ) is True
+        return real_append(connection, **kwargs)
+
+    monkeypatch.setattr(gates, "append_event", append_after_the_winner_commits)
+
+    with pytest.raises(GateClosedRefused):
+        close_gate(
+            cp, gate_id=gate_id, outcome="expired", actor_kind="system",
+            actor_id="reconcile", occurred_at_ms=T0 + 6 * MINUTE,
+            recorded_at_ms=T0 + 6 * MINUTE,
+        )
+    assert winner_committed == [True]
+    row = gate_row(cp, gate_id)
+    assert (row["outcome"], row["closed_at_ms"]) == ("withdrawn", T0 + 5 * MINUTE)
+
+
+def test_a_concurrent_close_with_the_same_outcome_stays_the_idempotent_no_op(
+    cp, monkeypatch
+) -> None:
+    """Losing the race to an *identical* close is still "already done", not a refusal.
+
+    The counterpart to the test above: the duplicate path must distinguish
+    "already done, identically" from "already done, differently", and collapsing
+    both into a refusal would break the reconcile sweep, whose second pass over
+    a gate it closed last time is the ordinary case and not an incident.
+    """
+
+    gate_id = a_gate(cp)
+    reach_presented(cp, gate_id, base=T0 + MINUTE)
+
+    real_append = gates.append_event
+    winner_committed: list[bool] = []
+
+    def append_after_the_winner_commits(connection, **kwargs):
+        if not winner_committed:
+            winner_committed.append(True)
+            assert close_gate(
+                cp, gate_id=gate_id, outcome="expired", actor_kind="system",
+                actor_id="reconcile", occurred_at_ms=T0 + 5 * MINUTE,
+                recorded_at_ms=T0 + 5 * MINUTE,
+            ) is True
+        return real_append(connection, **kwargs)
+
+    monkeypatch.setattr(gates, "append_event", append_after_the_winner_commits)
+
+    assert close_gate(
+        cp, gate_id=gate_id, outcome="expired", actor_kind="system",
+        actor_id="reconcile", occurred_at_ms=T0 + 6 * MINUTE,
+        recorded_at_ms=T0 + 6 * MINUTE,
+    ) is False
+    row = gate_row(cp, gate_id)
+    assert (row["outcome"], row["closed_at_ms"]) == ("expired", T0 + 5 * MINUTE)
+
+
+def test_a_closure_identity_on_the_spine_without_a_closure_is_refused(cp) -> None:
+    """The dedup key alone is never taken as evidence that the gate closed.
+
+    ``close_gate`` writes the closure as the append's ``side_effect``, so the
+    two commit together and this state cannot arise from this module. It is
+    asserted because the duplicate path's re-read is what makes that true: an
+    outside writer that took the identity must not be able to make a later
+    close report success for a closure that is not in the table.
+    """
+
+    gate_id = a_gate(cp)
+    cp.execute(
+        """
+        INSERT INTO event (event_id, event_type, subject_kind, subject_id, run_id,
+                           producer, dedup_key, occurred_at_ms, ingested_at_ms)
+        VALUES (?, 'gate_closed', 'gate', ?, 'run-1', 'dispatcher_core', ?, ?, ?)
+        """,
+        (f"gate_closed/{gate_id}", gate_id, f"gate_closed/{gate_id}",
+         T0 + MINUTE, T0 + MINUTE),
+    )
+    cp.commit()
+
+    with pytest.raises(GateClosedRefused):
+        close_gate(
+            cp, gate_id=gate_id, outcome="withdrawn", actor_kind="worker",
+            actor_id="worker-7", occurred_at_ms=T0 + 2 * MINUTE,
+            recorded_at_ms=T0 + 2 * MINUTE,
+        )
+    assert gate_row(cp, gate_id)["closed_at_ms"] is None

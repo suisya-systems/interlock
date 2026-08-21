@@ -249,6 +249,59 @@ def test_a_revision_effective_exactly_at_a_boundary_belongs_to_the_later_window_
     assert set(earlier) & set(later) == set()
 
 
+def test_two_revisions_sharing_an_instant_inside_a_period_count_once(cp):
+    """A correction filed in the same millisecond is one change, not two.
+
+    ``effective_revision_id`` has always resolved a tie to the higher
+    ``revision_id``; ``revision_over_period`` used to order by
+    ``effective_at_ms, revision_id`` and return *both* rows, so the superseded
+    row -- in force for zero milliseconds -- joined the period set. That is a
+    revision the report names as having governed part of the period when it never
+    governed any of it (``measurement-harness.md`` section 6, ``D-0040``).
+    """
+
+    first = seed_revision_id(cp)
+    superseded = add_revision(cp, note="a correction filed in the same pass", at=T0 + 5_000)
+    superseding = add_revision(cp, note="and the row that corrects it", at=T0 + 5_000)
+
+    over = policy.revision_over_period(cp, period_start_ms=T0, period_end_ms=T0 + 10_000)
+
+    assert over == (first, superseding)
+    assert superseded not in over, "a revision in force for zero ms is not in the period"
+
+
+def test_the_period_set_is_exactly_what_the_detector_would_bind_at_each_instant(cp):
+    """The two functions must agree by construction, not by coincidence.
+
+    They answer the same question -- which revision is in force -- for one
+    instant and for a window, so the window's members can only be revisions the
+    per-instant reader would itself have returned. Sweeping the instants and
+    comparing against :func:`policy.effective_revision_id` binds the pair to each
+    other rather than to a tie-break rule pasted into this file: if one of them
+    ever re-derives the rule locally and drifts, this fails.
+    """
+
+    seed_revision_id(cp)
+    add_revision(cp, note="a correction filed in the same pass", at=T0 + 5_000)
+    add_revision(cp, note="and the row that corrects it", at=T0 + 5_000)
+    add_revision(cp, note="a later change", at=T0 + 9_000)
+
+    instants = [T0, T0 + 4_999, T0 + 5_000, T0 + 5_001, T0 + 8_999, T0 + 9_000, T0 + 9_999]
+    bound_at_each_instant = {
+        policy.effective_revision_id(cp, now_ms=instant) for instant in instants
+    }
+
+    over = policy.revision_over_period(cp, period_start_ms=T0, period_end_ms=T0 + 10_000)
+
+    assert set(over) == bound_at_each_instant
+    assert len(set(over)) == len(over), "no revision is named twice"
+    for instant in instants:
+        # every member is in force somewhere, and the last member is in force at
+        # the period's final millisecond -- the two ends of the same claim.
+        assert policy.effective_revision_id(cp, now_ms=instant) in over
+    assert over[-1] == policy.effective_revision_id(cp, now_ms=T0 + 9_999)
+
+
 def test_a_period_is_refused_when_its_end_precedes_its_start(cp, two_revisions):
     with pytest.raises(policy.PolicyUsageError):
         policy.revision_over_period(cp, period_start_ms=T0 + 1, period_end_ms=T0)

@@ -42,6 +42,7 @@ from claude_org_runtime.control_plane.migrator import (
 from claude_org_runtime.measurement import cli as measurement_cli
 from claude_org_runtime.measurement.provenance import FINGERPRINT_AGGREGATE
 from claude_org_runtime.measurement.reader import ControlPlaneRefusal
+from claude_org_runtime.measurement.windows import WindowRefusal
 
 from .test_render import (
     GENERATED_AT,
@@ -404,3 +405,18 @@ def test_help_runs_in_a_real_cp932_console() -> None:
     )
     assert b"--fingerprint" in completed.stdout
     completed.stdout.decode("cp932")
+
+
+def test_a_negative_declared_grace_is_refused_by_the_command(db: Path) -> None:
+    """--grace-ms -1 must not reach the report's provenance.
+
+    windows.episode_window refuses a negative grace because it shortens the
+    detector window below the budget it is held to. A report built with one
+    would stamp measurement-harness.md section 6 provenance for a configuration
+    the window model itself rejects -- and with no episodes classified (this
+    branch classifies none) nothing downstream would ever raise, so it renders
+    clean. The refusal has to be the window model's own type.
+    """
+
+    with pytest.raises(WindowRefusal):
+        measurement_cli.main(argv_for(db, "--grace-ms", "-1"))

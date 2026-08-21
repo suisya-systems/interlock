@@ -200,6 +200,29 @@ POSITIONAL_KEY_CAVEAT = (
 #: two genuinely distinct conditions on one run collapse into one episode.
 ONSET_BUCKET_MS = 60_000
 
+#: What an episode's ``onset_ms`` actually is. Section 3.2 says the onset is
+#: "when the condition **began**"; a row that cannot state that still has to be
+#: placed in a period, so it is placed on the instant it *can* state and says
+#: which one that was. The distinction is a field rather than a branch because a
+#: reader comparing two periods has to be able to see that an episode was
+#: selected on a bound instead of on its onset -- and because a latency
+#: (:attr:`MatchedPair.onset_delta_ms`) computed against a bound is not a
+#: latency at all.
+ONSET_OBSERVED = "onset"
+ONSET_UPPER_BOUND = "created_at_upper_bound"
+
+ONSET_BASES: tuple[str, ...] = (ONSET_OBSERVED, ONSET_UPPER_BOUND)
+
+#: Rides on any report whose ``unmatched_key`` bucket holds an episode selected
+#: on a bound. Without it the bucket's period boundaries look exact.
+BOUNDED_ONSET_CAVEAT = (
+    "one or more unmatched_key episodes were selected into this period on an "
+    "upper bound of their onset (the instant the incident was raised), not on "
+    "the onset itself, because the row does not carry what the onset is derived "
+    "from; the true onset is at or before that instant and may belong to an "
+    "earlier period"
+)
+
 #: Section 3.3's five buckets, always emitted in this order.
 BOTH = "both"
 INTERLOCK_ONLY = "interlock_only"
@@ -393,6 +416,7 @@ class ShadowEpisode:
     onset_ms: int
     key: CorrelationKey | None = None
     key_gap: str | None = None
+    onset_basis: str = ONSET_OBSERVED
     evidence: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -414,6 +438,23 @@ class ShadowEpisode:
             raise EpisodeKeyRefused(
                 f"episode {self.episode_id!r} is a {self.subject_class!r} "
                 f"episode carrying a {self.key.subject_class!r} key"
+            )
+        if self.onset_basis not in ONSET_BASES:
+            raise EpisodeKeyRefused(
+                f"episode {self.episode_id!r} declares onset_basis "
+                f"{self.onset_basis!r}, which is outside {', '.join(ONSET_BASES)}"
+            )
+        if self.key is not None and self.onset_basis != ONSET_OBSERVED:
+            # A keyed episode can be matched, and a matched pair reports
+            # onset_delta_ms as a detection latency (section 3.3's "latency and
+            # outcome are compared"). Measuring that against an instant that is
+            # only a bound would report a fabricated latency as a real one, so
+            # an episode that cannot state its onset cannot carry a key either.
+            raise EpisodeKeyRefused(
+                f"episode {self.episode_id!r} carries a correlation key while "
+                f"its onset is only {self.onset_basis!r}; a pair matched on it "
+                "would report a latency measured against an instant that is "
+                "not the onset"
             )
         object.__setattr__(self, "evidence", _freeze(self.evidence))
 
@@ -1032,6 +1073,26 @@ def read_session_liveness_episodes(
     session binding -- section 3.3's "``incident`` joined to ``session``". Both
     columns are nullable, and an incident that names neither carries a
     ``key_gap``.
+
+    **Keyless rows are windowed too.** A row that cannot compute its key is
+    still selected only if the instant it *can* state falls in
+    ``[onset_from_ms, onset_to_ms)``. Without that, every historical malformed
+    incident would be filed ``unmatched_key`` in every report and counted again
+    by each adjacent period, and section 7 reads that bucket as the signal that
+    the key needs replacing -- a signal a permanent backlog of ancient rows
+    would drown. The instant differs by which column is missing, and the episode
+    declares which it used in :attr:`ShadowEpisode.onset_basis` rather than
+    hiding it in a branch:
+
+    * ``run_id`` missing but ``elapsed_ms`` present: the onset is still
+      derivable, so it is windowed on the onset (``ONSET_OBSERVED``).
+    * ``elapsed_ms`` missing: no onset is derivable, and the row is windowed on
+      ``created_at_ms`` (``ONSET_UPPER_BOUND``), which ``0001_initial.sql`` pins
+      ``NOT NULL`` and whose ``elapsed_ms >= 0`` check makes an upper bound on
+      the onset. The true onset may belong to an earlier period, so the report
+      carries :data:`BOUNDED_ONSET_CAVEAT`; that is a disclosed one-period
+      uncertainty, where the alternatives were dropping the row silently
+      (section 3.3 forbids it) or admitting it to every period at once.
     """
 
     _require_selection_window(onset_from_ms, onset_to_ms)
@@ -1080,30 +1141,48 @@ def read_session_liveness_episodes(
                 "incident.elapsed_ms is NULL, so the condition's onset cannot be "
                 "derived from the instant we raised the incident"
             )
+        # The instant this episode is selected on, and what that instant is.
+        # With elapsed_ms the onset is derivable even when run_id is missing;
+        # without it the only instant the row carries is created_at_ms, which
+        # 0001_initial.sql pins NOT NULL and (elapsed_ms >= 0) makes an upper
+        # bound on the onset -- so it is a bound, not the onset, and the episode
+        # says so rather than passing it off as one.
+        if elapsed_ms is None:
+            instant_ms = created_at_ms
+            onset_basis = ONSET_UPPER_BOUND
+        else:
+            instant_ms = created_at_ms - int(elapsed_ms)
+            onset_basis = ONSET_OBSERVED
+
+        # The window is applied to every row, keyless ones included. A key gap
+        # is not a window exemption: a keyless row admitted here regardless of
+        # period would land in unmatched_key in every report forever and be
+        # counted again by every adjacent period, and section 7 reads that
+        # bucket as "the key needs replacing" -- a reading a permanent backlog
+        # of ancient rows destroys.
+        if not (onset_from_ms <= instant_ms < onset_to_ms):
+            continue
+
         if gaps:
             episodes.append(
                 ShadowEpisode(
                     episode_id=f"liveness:{incident_id}",
                     subject_class=SUBJECT_SESSION_LIVENESS,
                     shape=fact_state,
-                    # With no elapsed_ms the onset is unknown; created_at_ms is
-                    # reported as the episode's only known instant and the
-                    # key_gap says it is not the onset, so no consumer can read
-                    # it as one.
-                    onset_ms=created_at_ms,
+                    onset_ms=instant_ms,
+                    onset_basis=onset_basis,
                     key_gap="; ".join(gaps),
                     evidence={
                         "incident_id": incident_id,
                         "fact_state": fact_state,
                         "created_at_ms": str(created_at_ms),
+                        "onset_basis": onset_basis,
                     },
                 )
             )
             continue
 
-        onset_ms = created_at_ms - int(elapsed_ms)
-        if not (onset_from_ms <= onset_ms < onset_to_ms):
-            continue
+        onset_ms = instant_ms
         # Floor division, so a negative onset (a clock the caller handed us from
         # before the epoch of the selection window) buckets downward like every
         # other instant rather than toward zero, which would put two adjacent
@@ -1449,4 +1528,11 @@ def render_shadow_reconciliation(report: ShadowReconciliation) -> str:
 
     if any(episode.positional_key for episode in report.unmatched_key):
         lines.append(f"  NOTE: {report.positional_caveat}")
+    if any(
+        episode.onset_basis != ONSET_OBSERVED for episode in report.unmatched_key
+    ):
+        # Otherwise the bucket's period boundaries read as exact, and a reader
+        # comparing two adjacent reports has no way to see that some of these
+        # episodes were placed on a bound.
+        lines.append(f"  NOTE: {BOUNDED_ONSET_CAVEAT}")
     return "\n".join(lines)

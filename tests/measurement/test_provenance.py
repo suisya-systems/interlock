@@ -634,6 +634,37 @@ def test_a_policy_revision_change_inside_the_period_raises_the_banner(
     assert json.loads(render_header_json(header))["non_homogeneous"] is True
 
 
+def test_a_revision_superseded_at_its_own_instant_never_reaches_the_header(
+    db: Path,
+) -> None:
+    """The tie case of the cause above: one change, named once, by its winner.
+
+    Two revisions may share an ``effective_at_ms`` (a correction filed in the
+    same pass as the row it corrects) and only the higher ``revision_id`` is ever
+    in force. The header must therefore name two revisions here -- the seed and
+    the winner -- not three, and must refuse the superseded one as a subject: a
+    report headed by a revision that governed zero milliseconds states its
+    latency figures were judged against numbers nobody ever applied.
+    """
+
+    cp = writable(db)
+    try:
+        add_run(cp, "run-1")
+        add_incident(cp, "inc-1", run_id="run-1")
+        superseded = add_revision(cp, effective_at_ms=PERIOD_START + DAY_MS // 2)
+        superseding = add_revision(cp, effective_at_ms=PERIOD_START + DAY_MS // 2)
+    finally:
+        cp.close()
+
+    header = header_over(db, revision_id=seed_revision_id(db))
+    assert header.policy_revision_ids == (seed_revision_id(db), superseding)
+    assert superseded not in header.policy_revision_ids
+    assert header.non_homogeneous, "the change itself is real; only its count was wrong"
+
+    with pytest.raises(RevisionNotInPeriod):
+        header_over(db, revision_id=superseded)
+
+
 def test_a_homogeneous_period_says_so_rather_than_printing_nothing(db: Path) -> None:
     populate(db)
     header = header_over(db, revision_id=seed_revision_id(db))
