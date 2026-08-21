@@ -350,10 +350,13 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 - **Evidence:** `#15` (PR `#50` — `docs/s9-fault-injection-harness.md`, the design; PR `#51` —
   the harness) and `#16` (PR `#52` — the matrix), both landed 2026-08-20, on top of `#12` (S5),
   `#13` (S6) and `#14` (S7), landed 2026-08-19. What the suite demonstrates for this item: each
-  of the three roles is SIGKILLed **separately and in combination** — all three pairs and the
-  triple, staggered kill orders included — at deterministic points straddling the durable write
-  (before the write; after the record, before the effect; after the effect, before its record;
-  delivered, before the ack); on restart each role entrypoint **recovers before it proceeds** —
+  of the three roles is SIGKILLed **separately** at all four deterministic points straddling the
+  durable write (before the write; after the record, before the effect; after the effect, before
+  its record; delivered, before the ack), and **in combination** — all three pairs and the
+  triple, staggered kill orders included — at two of them, *before the durable write* and *after
+  the effect, before its record*; the other two windows are exercised by single-role cases only,
+  and that narrower combined coverage is stated here rather than implied away. On restart each
+  role entrypoint **recovers before it proceeds** —
   reconstructing its view by query from SQLite alone, with no warm state across the restart (the
   command line and the database file are the whole input), re-establishing its lease and driving
   unfinished work to resolution; and exactly-once is evidenced by the dedup record on our side
@@ -394,8 +397,9 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   lease-expiry boundary and SIGSTOP through lapse-and-resume; every assertion is against a
   durable record — a SQLite query or a persisted incident field — and every external-effect case
   is additionally proven against the **destination's own** effect record. The observation-outage
-  rows classify an unreadable or silent observation `OBSERVATION_UNAVAILABLE`, never as an
-  anomaly, and produce no termination or restart recommendation (D-0006). No manual one-shots
+  rows keep D-0006's two fact states distinct: an unreadable observation is classified
+  `OBSERVATION_UNAVAILABLE` and a silent-but-readable one `NO_ACTIVITY_EVIDENCE` — neither is
+  ever an anomaly, and neither produces a termination or restart recommendation. No manual one-shots
   anywhere: the suite runs in CI (full, fast and portable profiles).
 - **Residual:** the three recorded before `#16` landed, one of them updated, plus one new pair.
   **(1)** The spike schema keeps one lease row per resource and no history table (`Q-0001`), so a
