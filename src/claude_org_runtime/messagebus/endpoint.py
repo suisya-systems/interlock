@@ -182,8 +182,19 @@ class Endpoint:
             return None
         mid = msg["id"]
 
+        params = msg.get("params")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            # A long-running endpoint must answer malformed parameters, not
+            # die of them: an array or scalar params is the caller's error,
+            # reported as invalid params with the transport intact.
+            return {"jsonrpc": "2.0", "id": mid,
+                    "error": {"code": -32602,
+                              "message": "params must be an object"}}
+
         if method == "initialize":
-            want = (msg.get("params") or {}).get("protocolVersion", _DEFAULT_PROTO)
+            want = params.get("protocolVersion", _DEFAULT_PROTO)
             proto = want if want in _SUPPORTED_PROTO else _DEFAULT_PROTO
             return {
                 "jsonrpc": "2.0", "id": mid,
@@ -203,9 +214,14 @@ class Endpoint:
         if method == "tools/list":
             return {"jsonrpc": "2.0", "id": mid, "result": {"tools": list(_TOOLS)}}
         if method == "tools/call":
-            params = msg.get("params") or {}
             name = params.get("name")
-            arguments = params.get("arguments") or {}
+            arguments = params.get("arguments")
+            if arguments is None:
+                arguments = {}
+            if not isinstance(arguments, dict):
+                return {"jsonrpc": "2.0", "id": mid,
+                        "error": {"code": -32602,
+                                  "message": "arguments must be an object"}}
             try:
                 if name == "poll":
                     payload = self._tool_poll()

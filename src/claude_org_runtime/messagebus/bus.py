@@ -178,19 +178,32 @@ class MessageBus:
         for message in self._outbox.due(now_ms):
             if message.recipient != recipient:
                 continue
+            if self._outbox.load(message.message_id).status == "acked":
+                # Settled since the due() snapshot -- the common shape of a
+                # late ack (an endpoint restart overlapping its predecessor's
+                # unflushed ack). Re-reading here keeps the ordinary race out
+                # of attempt() entirely, so no refusal is durably recorded for
+                # what is simply a settled message.
+                continue
             try:
                 outcome = self._outbox.attempt(
                     message.message_id, now_ms=now_ms, epoch=epoch
                 )
             except (ValueError, StaleWriterRefused):
-                # A row can be settled between the due() snapshot and this
-                # attempt -- a late ack from an earlier delivery landing
-                # concurrently. The outbox surfaces that as "already acked"
-                # (ValueError) or, one instant later, as the fenced
-                # attempt-count update finding no row to move. A settled
-                # message is a poll's success case, not its error: skip it and
-                # keep presenting the rest. Anything else re-raises -- a fence
-                # refusal on a genuinely unsettled row must stay loud.
+                # The residual window: an ack that lands after the re-read
+                # above but inside attempt() itself. The outbox surfaces it as
+                # "already acked" (ValueError) or as the fenced attempt-count
+                # update finding no row to move. A settled message is a poll's
+                # success case, not its error: skip it and keep presenting the
+                # rest. Anything else re-raises -- a fence refusal on a
+                # genuinely unsettled row must stay loud. Known cost, accepted:
+                # on the StaleWriterRefused branch the outbox has already
+                # durably recorded a refusal row before raising; inside this
+                # residual window that row is audit noise (an attempt refused
+                # because the message was settled), never a delivery fault --
+                # eliminating it would need the outbox itself to classify why
+                # the fenced update moved no row, which Issue #19 keeps out of
+                # scope (the outbox API is used as found).
                 if self._outbox.load(message.message_id).status == "acked":
                     continue
                 raise

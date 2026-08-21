@@ -142,6 +142,25 @@ def test_a_notification_never_gets_a_response(rt_env):
     assert ponged == {"jsonrpc": "2.0", "id": 7, "result": {}}
 
 
+def test_malformed_params_are_answered_not_fatal(rt_env):
+    """Invalid params get -32602 and the endpoint keeps serving."""
+
+    endpoint = Endpoint(rt_env.bus, _config())
+    for bad in ([], "x", 7):
+        for method in ("initialize", "tools/call"):
+            response = endpoint.handle(
+                {"jsonrpc": "2.0", "id": 1, "method": method, "params": bad}
+            )
+            assert response["error"]["code"] == -32602
+    bad_args = endpoint.handle({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "poll", "arguments": []},
+    })
+    assert bad_args["error"]["code"] == -32602
+    alive = endpoint.handle({"jsonrpc": "2.0", "id": 3, "method": "ping"})
+    assert alive == {"jsonrpc": "2.0", "id": 3, "result": {}}
+
+
 def test_a_refusal_surfaces_as_a_tool_error_not_a_crash(rt_env):
     endpoint = Endpoint(rt_env.bus, _config())
     send(rt_env)

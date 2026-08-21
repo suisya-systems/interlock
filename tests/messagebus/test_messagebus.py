@@ -117,6 +117,30 @@ def test_a_stale_writer_cannot_poll_a_delivery_out(bus_env):
         bus_env.bus.poll(RECIPIENT, now_ms=T0 + 1_000, epoch=EPOCH + 1)
 
 
+def refused_action_count(env) -> int:
+    row = env.connection.execute(
+        "SELECT COUNT(*) FROM action WHERE status = 'refused'"
+    ).fetchone()
+    return int(row[0])
+
+
+def test_a_message_acked_between_polls_is_skipped_without_audit_noise(bus_env):
+    """The common late-ack shape: settled between the snapshot and the attempt.
+
+    The poll re-reads the row before attempting it, so an ordinary concurrent
+    ack neither errors the poll nor leaves a durable stale-writer refusal
+    behind -- the audit trail records only real fence refusals.
+    """
+
+    send(bus_env, message_id="task-1")
+    send(bus_env, message_id="task-2")
+    bus_env.bus.poll(RECIPIENT, now_ms=T0 + 1_000, epoch=EPOCH)
+    bus_env.bus.ack("task-2", now_ms=T0 + 1_500, recipient=RECIPIENT)
+    second = bus_env.bus.poll(RECIPIENT, now_ms=T0 + 2_000, epoch=EPOCH)
+    assert [e.message_id for e in second] == ["task-1"]
+    assert refused_action_count(bus_env) == 0
+
+
 def test_a_message_settled_mid_poll_is_skipped_not_an_error(tmp_path):
     """A late ack landing between the due() snapshot and the attempt.
 
@@ -127,12 +151,17 @@ def test_a_message_settled_mid_poll_is_skipped_not_an_error(tmp_path):
     deterministically by acking task-2 from inside task-1's first checkpoint.
     """
 
-    state = {"armed": False, "done": False}
+    # Fire inside task-2's own attempt (the second BEFORE_DURABLE_WRITE of the
+    # armed poll): task-1's attempt runs first, then task-2 is re-read as
+    # still unsettled, enters attempt(), and only then is acked -- the
+    # residual window the pre-attempt re-read cannot close.
+    state = {"armed": False, "seen": 0}
 
     def settle_task2_mid_poll(name: str) -> None:
-        if state["armed"] and not state["done"] and name == CHECKPOINT_BEFORE_DURABLE_WRITE:
-            state["done"] = True
-            env.bus.ack("task-2", now_ms=T0 + 1_500, recipient=RECIPIENT)
+        if state["armed"] and name == CHECKPOINT_BEFORE_DURABLE_WRITE:
+            state["seen"] += 1
+            if state["seen"] == 2:
+                env.bus.ack("task-2", now_ms=T0 + 1_500, recipient=RECIPIENT)
 
     env = make_bus_env(tmp_path, "mid-poll", checkpoint=settle_task2_mid_poll)
     try:
@@ -144,6 +173,14 @@ def test_a_message_settled_mid_poll_is_skipped_not_an_error(tmp_path):
         second = env.bus.poll(RECIPIENT, now_ms=T0 + 2_000, epoch=EPOCH)
         assert [e.message_id for e in second] == ["task-1"]
         assert env.acked_row_count() == 1
+        # The known cost of the residual window, pinned so it stays known:
+        # the fenced attempt-count update had already recorded one refusal
+        # row before the settle was recognised. Audit noise, not a delivery
+        # fault -- see MessageBus.poll's own comment.
+        row = env.connection.execute(
+            "SELECT COUNT(*) FROM action WHERE status = 'refused'"
+        ).fetchone()
+        assert int(row[0]) == 1
     finally:
         env.close()
 
