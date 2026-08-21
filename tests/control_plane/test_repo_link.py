@@ -447,6 +447,73 @@ def test_a_reopen_clears_closed_at_ms_and_unretires_the_watcher_scope(cp) -> Non
     assert rows(cp, "SELECT retired_at_ms FROM watcher_scope") == [{"retired_at_ms": None}]
 
 
+def test_a_late_state_observation_with_an_unchanged_head_is_refused_too(cp) -> None:
+    """A stale state cannot rewind the projection just because the head stood still.
+
+    ``pull_request_head_is_monotonic`` (migrations/0001_initial.sql) orders the
+    *head*, and the Python head test above orders it by name -- but neither says
+    anything when the head does not move and only ``state`` does. The provider
+    sequence close -> reopen -> close leaves a poll from the intervening open
+    period in flight; it carries the same ``head_sha``, so it reached none of
+    those checks, and its default dedup key (built from ``observed_at_ms`` for a
+    reopen) differs from the earlier reopen's, so the spine did not stop it
+    either. It was accepted as a *second* reopen: the PR went back to open,
+    ``closed_at_ms`` was cleared, a ``pr_reopened`` event landed on the spine
+    behind the newer ``pr_closed``, and -- the wider blast radius -- section
+    8.2's retired ``watcher_scope`` was reactivated, putting a watcher back on a
+    pull request the provider has closed.
+
+    ``head_observed_at_ms`` is the watermark that stops it: the projection writes
+    ``max(observed_at_ms, current)`` on every transition, so it is the instant of
+    the newest observation we have projected and not merely of the head's first
+    sighting -- which is what section 7.2's "re-observing the SAME head may
+    refresh the timestamp and no more" describes.
+    """
+
+    repo = add_repo(cp)
+    pr = observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, at=T0).pr_id
+    scope = add_scope(cp, "scope-1", repo_id=repo, pr_id=pr, at=T0)
+    observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, state="closed", at=T0 + 10)
+    observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, state="open", at=T0 + 20)
+    observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, state="closed", at=T0 + 30)
+    cp.execute("UPDATE watcher_scope SET retired_at_ms = ? WHERE scope_id = ?", (T0 + 30, scope))
+    before_pr = rows(cp, "SELECT state, closed_at_ms, head_observed_at_ms FROM pull_request")
+    before_events = rows(cp, "SELECT seq, event_type FROM event")
+
+    # The delayed poll from between the reopen and the second close. Same head,
+    # so only the ordering of the STATE can refuse it.
+    with pytest.raises(PullRequestObservationRefused):
+        observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, state="open", at=T0 + 25,
+                event_id="evt-delayed-open")
+
+    assert rows(cp, "SELECT state, closed_at_ms, head_observed_at_ms FROM pull_request") == before_pr
+    assert rows(cp, "SELECT seq, event_type FROM event") == before_events
+    # The half with the wider blast radius: a retired scope stays retired.
+    assert rows(cp, "SELECT retired_at_ms FROM watcher_scope") == [{"retired_at_ms": T0 + 30}]
+
+
+def test_a_state_transition_at_the_watermark_instant_is_refused_like_a_head_move(cp) -> None:
+    """The tie goes the same way for a state as for a head, and for one reason.
+
+    ``head_moved and observed_at_ms <= head_observed_at_ms`` refuses the tie
+    because the section 7.2 trigger requires the head's observation instant to
+    *advance*. Section 7.2 states no rule for a state that moves alone, so the
+    choice is ours, and admitting the tie would leave exactly the reviewer's
+    sequence open one millisecond wide: a delayed observation stamped at the
+    recorded instant would still rewind the state. Two contradictory provider
+    states cannot both be true of one instant, so the later arrival is a late
+    read, not a projection.
+    """
+
+    repo = add_repo(cp)
+    observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, at=T0)
+    observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, state="closed", at=T0 + 30)
+
+    with pytest.raises(PullRequestObservationRefused):
+        observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, state="open", at=T0 + 30,
+                event_id="evt-tie")
+    assert rows(cp, "SELECT state FROM pull_request") == [{"state": "closed"}]
+
 def test_a_merged_pull_request_does_not_reopen(cp) -> None:
     repo = add_repo(cp)
     observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, at=T0)

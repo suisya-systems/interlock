@@ -92,6 +92,7 @@ from typing import Collection, Iterable, Mapping, Sequence
 # and open_for_measurement proves it only for the connection it opens itself --
 # a different object from the one handed to this module.
 from claude_org_runtime.measurement.reader import (
+    measurement_snapshot,
     ControlPlaneRefusal,
     ReadOnlyCapabilityRefused,
     prove_read_only,
@@ -977,9 +978,54 @@ def measure_canary_divergence(
 
     The read-only evidence is gathered **first**, before any measurement query
     touches *connection*.
+
+    **The whole report is read inside one snapshot**
+    (:func:`~claude_org_runtime.measurement.reader.measurement_snapshot`). The
+    writer audit and the ownership ledger are two separate scans of the same
+    control plane, and on an autocommit connection a commit landing between them
+    produces a report whose two halves describe different states of the database
+    -- a run present in one and absent from the other, reported as a divergence
+    that never existed. The cost is the one that function states: production
+    databases here are not in WAL, so the report holds a SHARED lock and blocks
+    writers until it finishes.
     """
 
     _require_window(period_start_ms, period_end_ms)
+    with measurement_snapshot(connection):
+        return _measure_inside_the_snapshot(
+            connection,
+            period_start_ms=period_start_ms,
+            period_end_ms=period_end_ms,
+            interlock_episodes=interlock_episodes,
+            v1_reference=v1_reference,
+            censored_ids=censored_ids,
+            fixture_labels=fixture_labels,
+            v1_writer_ledger=v1_writer_ledger,
+            v1_ownership=v1_ownership,
+            record_classes=record_classes,
+        )
+
+
+def _measure_inside_the_snapshot(
+    connection: sqlite3.Connection,
+    *,
+    period_start_ms: int,
+    period_end_ms: int,
+    interlock_episodes: Iterable[ShadowEpisode],
+    v1_reference: V1Reference,
+    censored_ids: Collection[str],
+    fixture_labels: Mapping[str, str],
+    v1_writer_ledger: V1WriterLedger,
+    v1_ownership: V1OwnershipInput,
+    record_classes: Sequence[RecordClass],
+) -> CanaryDivergenceReport:
+    """The body of :func:`measure_canary_divergence`, with the snapshot held.
+
+    Split out so the snapshot is one scope with one exit rather than a ``with``
+    wrapped around forty lines whose ``return`` a later edit could move outside
+    it.
+    """
+
     read_only = evidence_of_read_only(connection)
 
     reconciliation = reconcile(

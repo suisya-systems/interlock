@@ -3,7 +3,7 @@
 Mounted into the top-level CLI by :mod:`claude_org_runtime.cli`, and runnable as
 ``python -m claude_org_runtime.measurement.cli`` for direct testing.
 
-Three failures shape this module, and each one is closed by a mechanism rather
+Four failures shape this module, and each one is closed by a mechanism rather
 than by a rule an operator has to remember.
 
 **1. A report tool that writes.** ``measurement-harness.md`` section 1 records
@@ -40,6 +40,17 @@ reaches ``--help`` on a cp932 console. A single em-dash there is a
 ``redirect_stdout`` captures UTF-8 and cannot see it, so
 ``tests/measurement/test_render.py`` encodes every help string to cp932 and a
 subprocess runs ``--help`` for real.
+
+**4. A report over a database that moved while it was being read.** Every read
+this command makes happens inside one snapshot, opened by
+:func:`~.render.build_measurement_report` (``measurement-harness.md`` section 6):
+without it the cohort, the AC-9 aggregation and the ``db_fingerprint`` would each
+see their own state of the database, and the header would attest content the
+figures never came from. **The operational cost is real and is stated in
+``--help``**: the production databases here are not in WAL, so the report holds a
+SQLite SHARED lock and every writer on the control plane -- watcher, dispatcher,
+CI ingest -- blocks with "database is locked" until the report finishes. Run a
+long period against a copy, or at a quiet moment.
 
 **No verdict.** ``Q-0005`` is open (section 7). This command prints measurements
 and returns 0 when it produced a report; the exit code is "the report was
@@ -102,7 +113,11 @@ NO_SHADOW_REASON = (
 # ASCII only: these reach --help on a cp932 console.
 _DB_HELP = (
     "path to the production control plane database. Opened read-only by "
-    "capability (mode=ro plus PRAGMA query_only) and never migrated."
+    "capability (mode=ro plus PRAGMA query_only) and never migrated. The "
+    "report is read inside one held transaction so that its figures and its "
+    "fingerprint come from one state of the database; these databases are not "
+    "in WAL, so that transaction blocks every writer on the control plane for "
+    "as long as the report runs. Report a long period against a copy."
 )
 _PERIOD_START_HELP = (
     "start of the report period, epoch milliseconds, inclusive."
@@ -218,6 +233,12 @@ def build_report_from_args(args: argparse.Namespace, *, now_ms: int):
 
     *now_ms* is a required keyword and is never defaulted here: this function is
     below the boundary, and the boundary is :func:`run`.
+
+    The read snapshot is not opened here: it belongs to
+    :func:`~.render.build_measurement_report`, which holds it across every read
+    including the fingerprint. This function only opens and closes the handle,
+    so there is no ordering for a caller of this module to get wrong -- and no
+    way to obtain the pre-snapshot behaviour by forgetting something.
 
     The connection comes from :func:`~.reader.open_for_measurement` and from
     nowhere else. That is the whole of condition 5's enforcement in this command:

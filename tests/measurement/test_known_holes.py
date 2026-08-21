@@ -132,11 +132,19 @@ READ_VERBS = frozenset({"SELECT", "WITH", "EXPLAIN"})
 #: refuse (``reader.prove_read_only``'s docstring,
 #: ``D-0040``). Named function by function rather than module by module, so a
 #: second function added to ``reader.py`` is still covered.
+#: ``reader.measurement_snapshot`` and ``reader._undo_the_probe`` are here for a
+#: second reason, and it is not a write either: a report has to hold one read
+#: transaction across all of its reads or its fingerprint attests a state its
+#: figures did not come from (``measurement-harness.md`` section 6). BEGIN,
+#: ROLLBACK and the probe's SAVEPOINT/RELEASE are transaction control over reads;
+#: no statement inside them writes, which is what the rest of this scan proves.
 WRITE_PROBE_EXEMPTIONS = frozenset(
     {
         ("reader", "_arm_and_verify_both_mechanisms"),
         ("reader", "_require_query_only"),
         ("reader", "prove_read_only"),
+        ("reader", "_undo_the_probe"),
+        ("reader", "measurement_snapshot"),
     }
 )
 
@@ -622,9 +630,11 @@ def test_no_module_executes_a_write_statement() -> None:
 
     Parsed rather than grepped, so an ``INSERT`` inside a docstring (there are
     several, explaining what the writers do) does not fire and an ``INSERT``
-    built by an f-string does. The only exemptions are the three functions of
+    built by an f-string does. The only exemptions are the functions of
     ``reader.py``'s read-only proof, which attempt a write *in order to be
-    refused*; a statement whose text cannot be read statically fails too,
+    refused*, and its read snapshot, whose BEGIN/ROLLBACK are transaction
+    control over reads (see :data:`WRITE_PROBE_EXEMPTIONS`); a statement whose
+    text cannot be read statically fails too,
     because an uninspectable statement is where a write would hide.
     """
 

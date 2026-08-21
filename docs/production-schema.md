@@ -813,6 +813,21 @@ the same transaction that clears `closed_at_ms`. Without that the PR is watched 
 The reconcile pass's scope-coverage query (§8.4) is the backstop that catches it if the transaction
 is ever written incompletely.
 
+**The ordering rule is the provider's order, and it covers the state as well as the head.** The
+trigger above fires on `head_sha` / `head_observed_at_ms` / `head_event_seq`, so an observation whose
+head stood still reaches none of it however late it arrives. That leaves the sequence
+close → reopen → close: a delayed poll from the intervening open period carries the same `head_sha`
+and its own `observed_at_ms`, so it is admitted as a *second* reopen — rewinding `state`, clearing
+`closed_at_ms`, and un-retiring the §8.2 watcher scope, which puts a watcher back on a pull request
+the provider has closed. The writer (`repo_link._plan`) therefore refuses **any** transition, head
+moving or not, whose `observed_at_ms` does not advance past `head_observed_at_ms`. No column is added
+for it: `head_observed_at_ms` is written as `max(observed_at_ms, current)` on every transition, so it
+already is the instant of the newest observation projected onto the row — which is what "re-observing
+the SAME head may refresh the timestamp and no more" above describes. The rule is in the writer
+rather than in a trigger because a trigger cannot tell a transition from a no-op refresh; the residual
+limit is that two late observations both post-dating the last projected one are still ordered only by
+their own timestamps, which needs a provider cursor this schema does not define.
+
 `head_event_seq` is what makes a head update auditable — the projection rule in §6.3 turns on
 `head_sha`, so the event that moved it must be identifiable, not merely a timestamp.
 

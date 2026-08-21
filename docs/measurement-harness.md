@@ -418,6 +418,18 @@ late adapter. Every one of those changes the answer and none of them changes a c
 so an aggregate fingerprint would certify two materially different reads as identical — the exact
 claim the provenance header is making.
 
+**One report, one state of the database.** The fingerprint only makes its claim if the rows it
+hashes are the rows the figures came from, so the report is built inside a **held read
+transaction** (`measurement.reader.measurement_snapshot`) that covers every read *including* the
+fingerprint. Without it each statement of a report is its own SQLite snapshot: a writer committing
+between cohort selection, the AC-9 aggregation and the header leaves a report whose fingerprint
+attests content its numbers were never computed from, and a numerator and denominator taken from
+two different states. The cost is stated rather than discovered — production databases are **not**
+in WAL (§3 of `production-schema.md`; `create_production_control_plane` leaves `journal_mode` at
+`delete`), so the read transaction holds a SHARED lock and **every writer on the control plane
+blocks for the duration of the report**. It is bounded by the report's runtime and released even
+when the report raises; a long period over a busy control plane is reported against a copy.
+
 The cost is linear in the rows read, which the measured baseline puts in the low thousands per
 week-long period, so it is affordable on every report. The aggregate form remains available as
 `--fingerprint=aggregate` for an interactive spot-check, and a report generated that way is stamped

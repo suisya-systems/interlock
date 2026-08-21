@@ -58,6 +58,18 @@ those imports as a static property, in the same spirit as S8's no-edge
 assertion, because an import added later would restore the capability without
 changing a line of this docstring.
 
+**A report is measured over one state of the database, held open.**
+``measurement-harness.md`` section 6 gives ``db_fingerprint`` its job: two
+reports over "the same" database are provably over the same content. An
+autocommit connection cannot make that claim, because every statement of a
+report is its own SQLite snapshot -- a writer committing between the cohort
+selection, the AC-9 aggregation and the fingerprint leaves a header attesting a
+database state that never produced the figures, and a numerator and a
+denominator that came from two. :func:`measurement_snapshot` is the mechanism:
+a read transaction the whole report, fingerprint included, is built inside.
+Its cost is stated there and is not free -- see that docstring before pointing a
+report at a live control plane.
+
 No clock is read here. The harness's periods are the caller's half-open
 ``[start, end)`` bounds (``time-base-policy.md`` section 2, rule 4) and this
 module has no timestamp of its own to supply -- opening a database is not an
@@ -67,7 +79,9 @@ event, and nothing about it is recorded.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from claude_org_runtime.control_plane.migrator import (
     ControlPlaneRefusal,
@@ -86,7 +100,9 @@ __all__ = [
     "DatabaseAheadOfCodeRefused",
     "MigrationChecksumRefused",
     "MissingStateRefused",
+    "NestedSnapshotRefused",
     "ReadOnlyCapabilityRefused",
+    "measurement_snapshot",
     "open_for_measurement",
     "prove_read_only",
 ]
@@ -104,6 +120,106 @@ class ReadOnlyCapabilityRefused(ControlPlaneRefusal):
     would go on to produce came off a connection that could have changed the
     thing it was measuring.
     """
+
+
+class NestedSnapshotRefused(ControlPlaneRefusal):
+    """A report snapshot was asked for on a connection that already holds one.
+
+    Nesting cannot do the thing the caller means. SQLite has no nested
+    transaction, so the inner ``BEGIN`` fails outright, and an inner scope that
+    "succeeded" by doing nothing would end the *outer* snapshot at its own exit
+    -- releasing the read lock in the middle of the report that was relying on
+    it, with no signal at all. So the second request is a refusal with a
+    message, rather than a scope that reads as if it had worked.
+    """
+
+
+#: The savepoint the read-only probe uses when it runs inside an open snapshot.
+#: A fixed, unmistakable name: it appears only in :func:`prove_read_only`, and a
+#: generic one ("probe") could collide with a savepoint a caller had opened.
+_PROBE_SAVEPOINT = "measurement_read_only_probe"
+
+
+@contextmanager
+def measurement_snapshot(
+    connection: sqlite3.Connection, *, target: str | Path | None = None
+) -> Iterator[sqlite3.Connection]:
+    """Hold *connection* on one state of the database for the whole of a report.
+
+    **What this is for.** :func:`open_for_measurement` returns an autocommit
+    connection, and on an autocommit connection every statement is its own
+    SQLite snapshot. A report is many statements -- select the cohort, aggregate
+    AC-9, then fingerprint the tables read -- so on a live control plane a
+    writer can commit *between* them. The result is not a slightly stale report:
+    it is a report whose ``db_fingerprint`` attests a state that never produced
+    its figures, which is the exact claim ``measurement-harness.md`` section 6
+    creates the field to make ("two reports over 'the same' database are
+    provably over the same content"). A numerator and a denominator can likewise
+    come off two different states. Holding one read transaction across the whole
+    report, fingerprint included, is what makes the header's claim true.
+
+    **What it costs, and who pays it.** The production databases here are **not
+    in WAL** -- ``create_production_control_plane`` leaves ``journal_mode`` at
+    SQLite's default ``delete`` (``production-schema.md`` section 3) -- so this
+    read transaction holds a SHARED lock, and a SHARED lock **blocks every
+    writer on the control plane for as long as the report runs**: the watcher,
+    the dispatcher and the CI ingest all get ``database is locked``. That is a
+    real operational cost and it is stated here rather than discovered in
+    production. It is bounded by the report's duration and released on the way
+    out, including when the report raises. A report over a large period on a
+    busy control plane should be run against a copy or at a quiet moment; the
+    alternative -- an unlocked report -- is the incoherent one this context
+    manager exists to remove, not a cheaper version of the same thing.
+
+    **The lock is taken here, not at the first read.** SQLite's ``BEGIN`` is
+    ``DEFERRED``: it acquires nothing until a statement actually reads, so a
+    ``BEGIN`` alone leaves exactly the moving database this guards against,
+    up until whatever the report happens to read first. The scope therefore
+    issues a read of its own to materialise the snapshot before yielding.
+
+    **The connection stays incapable of writing inside the scope.** A
+    transaction is the shape a write arrives in, so ``query_only`` is read back
+    before the snapshot opens and again once it is held: a fix for the moving
+    database bought with the read-only capability would be no fix at all
+    (``D-0040``, ``ACCEPTANCE.md`` section 3 condition 5). ``mode=ro`` is
+    unaffected -- it is a property of the open file handle -- and
+    :func:`prove_read_only` still evidences it from inside the scope.
+
+    The transaction is ended with ``ROLLBACK`` rather than ``COMMIT``. Nothing
+    was written, so the two are the same to the file; ``ROLLBACK`` is the one
+    that stays true if that ever stops being the case.
+
+    *target* names the database in refusal messages only; it is not used to
+    open anything.
+
+    :raises NestedSnapshotRefused: if *connection* is already in a transaction.
+    :raises ReadOnlyCapabilityRefused: if ``PRAGMA query_only`` is not in force
+        on *connection*, before or inside the snapshot.
+    """
+
+    if connection.in_transaction:
+        raise NestedSnapshotRefused(
+            f"{_names(target)} is already inside a "
+            "transaction; a report snapshot cannot nest (SQLite has no nested "
+            "transaction, and an inner scope's exit would release the outer "
+            "report's read lock mid-report). The report opens its own snapshot "
+            "-- build it once, inside one scope"
+        )
+    _require_query_only(target, connection, when="before the report snapshot opens")
+    connection.execute("BEGIN")
+    try:
+        # Materialise the snapshot: BEGIN is DEFERRED and takes no SHARED lock
+        # until something reads, so without this the database is still free to
+        # move under everything up to the report's first query.
+        connection.execute("SELECT count(*) FROM sqlite_master").fetchone()
+        _require_query_only(target, connection, when="inside the report snapshot")
+        yield connection
+    finally:
+        # In a finally because a snapshot left open by a failed report would go
+        # on blocking every writer on the control plane for the life of the
+        # process.
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
 
 
 def open_for_measurement(
@@ -239,8 +355,24 @@ def _arm_and_verify_both_mechanisms(
     _require_query_only(target, connection, when="after the file-mode probe")
 
 
+def _names(target: str | Path | None) -> str:
+    """How a refusal from this module names the database it is about.
+
+    ``None`` is a real case: a caller can hold a verified connection and no
+    longer have the path in hand (``canary.measure_canary_divergence`` is one),
+    and a message reading "the connection to None" would send an operator
+    looking for a file called None.
+    """
+
+    return (
+        f"the measurement connection to {target}"
+        if target is not None
+        else "the measurement connection"
+    )
+
+
 def _require_query_only(
-    target: Path, connection: sqlite3.Connection, *, when: str
+    target: str | Path | None, connection: sqlite3.Connection, *, when: str
 ) -> None:
     """Read ``PRAGMA query_only`` back and refuse anything but ``1``.
 
@@ -254,8 +386,8 @@ def _require_query_only(
     value = connection.execute("PRAGMA query_only").fetchone()[0]
     if value != 1:
         raise ReadOnlyCapabilityRefused(
-            f"PRAGMA query_only reads back as {value!r} {when} on the "
-            f"measurement connection to {target}; the harness is read-only by "
+            f"PRAGMA query_only reads back as {value!r} {when} on "
+            f"{_names(target)}; the harness is read-only by "
             "capability (ACCEPTANCE.md section 3 condition 5) and will not "
             "observe through a handle whose guard is not in force"
         )
@@ -339,9 +471,20 @@ def prove_read_only(connection: sqlite3.Connection, target: str | Path) -> None:
     """
 
     user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+    # A report holds its snapshot open (:func:`measurement_snapshot`) and this
+    # probe is exactly the kind of thing a caller runs on that live connection,
+    # so the probe has to work inside a transaction as well as outside one. A
+    # second BEGIN there is "cannot start a transaction within a transaction" --
+    # an OperationalError that does not name read-only, which this function
+    # would then report as an *inconclusive* probe and stop the report over.
+    # SAVEPOINT is the form that nests, so it is the form used when one is open.
+    inside_snapshot = connection.in_transaction
     connection.execute("PRAGMA query_only = OFF")
     try:
-        connection.execute("BEGIN")
+        if inside_snapshot:
+            connection.execute(f"SAVEPOINT {_PROBE_SAVEPOINT}")
+        else:
+            connection.execute("BEGIN")
         try:
             connection.execute(f"PRAGMA user_version = {int(user_version)}")
         except sqlite3.OperationalError as error:
@@ -366,8 +509,7 @@ def prove_read_only(connection: sqlite3.Connection, target: str | Path) -> None:
                 "ACCEPTANCE.md section 3 condition 5)"
             ) from error
         finally:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
+            _undo_the_probe(connection, inside_snapshot=inside_snapshot)
         raise ReadOnlyCapabilityRefused(
             f"the measurement connection to {target} accepted a write with "
             "query_only lowered, so it was not opened mode=ro -- the URI did "
@@ -379,6 +521,26 @@ def prove_read_only(connection: sqlite3.Connection, target: str | Path) -> None:
         )
     finally:
         connection.execute("PRAGMA query_only = ON")
+
+
+def _undo_the_probe(
+    connection: sqlite3.Connection, *, inside_snapshot: bool
+) -> None:
+    """Discard whatever the probe's write did, and nothing else.
+
+    Inside a report snapshot the outer transaction must survive: rolling back to
+    the savepoint undoes the probe's page and leaves the report's read lock and
+    its state exactly where they were, whereas a bare ``ROLLBACK`` would end the
+    report's snapshot as a side effect of checking that it was read-only. The
+    savepoint is released after the rollback so the name does not accumulate on
+    a connection that probes more than once.
+    """
+
+    if inside_snapshot:
+        connection.execute(f"ROLLBACK TO {_PROBE_SAVEPOINT}")
+        connection.execute(f"RELEASE {_PROBE_SAVEPOINT}")
+    elif connection.in_transaction:
+        connection.execute("ROLLBACK")
 
 
 #: SQLite's primary result code ``SQLITE_READONLY``. Extended codes carry it in

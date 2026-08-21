@@ -55,6 +55,7 @@ from claude_org_runtime.measurement.provenance import (
     FINGERPRINT_AGGREGATE,
     FINGERPRINT_CONTENT,
     FixtureSuiteRef,
+    fingerprint_database,
 )
 from claude_org_runtime.measurement.reader import open_for_measurement
 from claude_org_runtime.measurement.render import (
@@ -602,3 +603,109 @@ def test_the_ac9_section_reports_the_numbers_the_measurement_made(db: Path) -> N
         figure.label.replace(" ", "_") for figure in measured.figures()
     }
     assert facts["baseline"]["source"] == measured.baseline.source
+
+
+# --------------------------------------------------------------------------
+# section 6 -- the report is measured over one state of the database
+# --------------------------------------------------------------------------
+
+
+def _fingerprint_now(path: Path, mode: str = FINGERPRINT_CONTENT) -> str:
+    """The content digest of *path* right now, through a separate open."""
+
+    connection = open_for_measurement(path)
+    try:
+        return fingerprint_database(
+            connection, tables=render_module.FINGERPRINT_TABLES, mode=mode
+        ).digest
+    finally:
+        connection.close()
+
+
+def _racing_writer(path: Path, run_id: str):
+    """A writer that commits *run_id* on the first AC-9 measurement.
+
+    Patched over ``render.ac9_module.measure_ac9`` -- i.e. the point the report
+    reaches after the cohort has been selected and before the provenance header
+    is built -- so the commit lands exactly in the window section 6's
+    fingerprint claim depends on being closed. ``timeout=0`` so a blocked write
+    answers immediately instead of sitting on the busy handler.
+    """
+
+    real = ac9_module.measure_ac9
+    outcome: dict[str, object] = {}
+
+    def racing(connection, selected, **kwargs):
+        writer = sqlite3.connect(path, isolation_level=None, timeout=0)
+        try:
+            writer.execute(
+                "INSERT INTO run (run_id, status, created_at_ms, updated_at_ms)"
+                " VALUES (?, 'completed', ?, ?)",
+                (run_id, PERIOD_START + 3_000, PERIOD_START + 4_000),
+            )
+            outcome["committed"] = True
+        except sqlite3.OperationalError as error:
+            outcome["blocked"] = str(error)
+        finally:
+            writer.close()
+        return real(connection, selected, **kwargs)
+
+    return racing, outcome
+
+
+def test_a_writer_committing_mid_report_cannot_move_the_database_under_it(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Section 6's claim, tested against a control plane that is being written to.
+
+    ``db_fingerprint`` exists so that two reports over "the same" database are
+    provably over the same content. A fingerprint taken at the end of a report
+    whose rows moved during it certifies a state that never produced the
+    figures: the cohort would name one run and the header would attest a
+    database holding two. The report is built inside a read snapshot for exactly
+    this reason, so the writer is held off until it closes.
+    """
+
+    before = _fingerprint_now(db)
+    racing, outcome = _racing_writer(db, "run-mid-report")
+    monkeypatch.setattr(render_module.ac9_module, "measure_ac9", racing)
+
+    report = report_over(db)
+
+    assert "committed" not in outcome, (
+        "a writer committed inside the report: the report's reads are not over "
+        "one state of the database"
+    )
+    assert "locked" in str(outcome.get("blocked", ""))
+    facts = report.as_mapping()
+    assert facts["header"]["db_fingerprint"] == before, (
+        "the header fingerprints a state other than the one the figures were "
+        "computed from"
+    )
+    assert facts["sections"]["ac9"]["facts"]["cohort"]["run_ids"] == ["run-1"]
+    # And the writer that was held off is only held off for the report: the
+    # cost is bounded by the report's duration, not by the process's.
+    assert _fingerprint_now(db) == before
+    monkeypatch.undo()
+
+
+def test_the_report_is_built_inside_a_held_read_transaction(
+    db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot is the report's, not the caller's, so it cannot be forgotten.
+
+    Observed from inside the report rather than by reading the source: a caller
+    who wrapped the call themselves would satisfy a source test, and the point
+    is that ``build_measurement_report`` holds the snapshot whoever calls it.
+    """
+
+    seen: list[bool] = []
+    real = ac9_module.measure_ac9
+
+    def observing(connection, selected, **kwargs):
+        seen.append(connection.in_transaction)
+        return real(connection, selected, **kwargs)
+
+    monkeypatch.setattr(render_module.ac9_module, "measure_ac9", observing)
+    report_over(db)
+    assert seen == [True]

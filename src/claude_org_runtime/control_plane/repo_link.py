@@ -41,6 +41,16 @@ terminal, so a reopen that clears ``closed_at_ms`` without clearing
 ``watcher_scope.retired_at_ms`` leaves the PR watched in name only. Both happen
 in the one append transaction here.
 
+**The provider's order guards the state as well as the head.** The
+``pull_request_head_is_monotonic`` trigger fires on the head columns only, so an
+observation whose head stood still passes it untouched however late it is.
+:func:`_plan` therefore refuses any transition, head-moving or not, whose
+``observed_at_ms`` does not advance past ``head_observed_at_ms`` -- which is the
+instant of the newest observation projected onto the row, since every transition
+writes the ``max`` of it. Without that, ``close -> reopen -> close`` lets a
+delayed poll from the intervening open period land as a second reopen, rewinding
+the state and un-retiring the watcher scope section 8.2 had retired.
+
 **A no-change observation appends nothing.** Re-polling a PR whose head and
 state are unchanged is not a new fact, and section 7.2 allows refreshing the
 observation timestamp and no more. Spending an event row on it would put one row
@@ -366,8 +376,10 @@ def observe_pull_request(
     :raises PullRequestObservationRefused: for a state whose accompanying facts
         are missing or contradictory (a merge with no ``merge_commit_sha``, an
         open PR carrying ``closed_at_ms``, a non-lowercase or non-40-character
-        ``head_sha``), and for a head move the provider's own order does not
-        support.
+        ``head_sha``), and for a transition the provider's own order does not
+        support -- a head move or, on an unchanged head, a state change whose
+        ``observed_at_ms`` does not advance past the newest observation already
+        projected onto the row.
     :raises StalePullRequestObservation: if the projection changed between the
         transition being named and the transaction that writes it.
     """
@@ -654,12 +666,46 @@ def _plan(
     # PullRequestObservationRefused exists to prevent, and which a watcher cannot
     # tell apart from a corrupt read of the kind that produced the 2026-08-06
     # incident. Testing it per-branch instead leaves the hole one branch over.
-    if head_moved and observed_at_ms <= int(before["head_observed_at_ms"]):
+    watermark = int(before["head_observed_at_ms"])
+    if head_moved and observed_at_ms <= watermark:
         raise PullRequestObservationRefused(
             f"{before['pr_id']} head {was_head} was observed at "
             f"{before['head_observed_at_ms']}; a head move to {head_sha} claimed at "
             f"{observed_at_ms} with state {state!r} is a late arrival, which is evidence "
             "and not a projection (section 7.2)"
+        )
+    # ...and the same for a state that moves while the head stands still, which
+    # neither the test above nor the DDL trigger reaches -- the trigger fires on
+    # head_sha / head_observed_at_ms / head_event_seq, and an unchanged head
+    # touches none of them. Without this, the provider sequence
+    # close -> reopen -> close leaves a poll from the intervening open period in
+    # flight that is accepted as a SECOND reopen: it carries the same head_sha,
+    # and its default dedup key is built from its own observed_at_ms, so the
+    # spine's one-row-per-fact index sees a different fact. It rewinds state to
+    # 'open', clears closed_at_ms, and -- section 8.2 -- clears
+    # watcher_scope.retired_at_ms, putting a watcher back on a pull request the
+    # provider has closed.
+    #
+    # The watermark is head_observed_at_ms rather than a column of its own
+    # because _write_projection already stores max(observed_at_ms, current) on
+    # every transition: the column is the instant of the newest observation we
+    # have PROJECTED, not of the head's first sighting, which is what section
+    # 7.2's "re-observing the SAME head may refresh the timestamp and no more"
+    # licenses. Known limit of reusing it: a no-change observation writes
+    # nothing, so it does not advance the watermark, and two late observations
+    # that both post-date the last projected one are still ordered only by their
+    # own timestamps. Closing that needs a provider cursor the design does not
+    # define.
+    #
+    # The tie is refused, as it is for a head move: two contradictory provider
+    # states cannot both be true of one instant, and admitting it would leave
+    # the sequence above open one millisecond wide.
+    if state != was_state and observed_at_ms <= watermark:
+        raise PullRequestObservationRefused(
+            f"{before['pr_id']} is recorded {was_state!r} from an observation at "
+            f"{watermark}; a transition to {state!r} claimed at {observed_at_ms} on the "
+            f"unchanged head {head_sha} is a late arrival, which is evidence and not a "
+            "projection (section 7.2)"
         )
 
     if state == "merged" and was_state != "merged":

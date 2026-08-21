@@ -65,7 +65,7 @@ from .provenance import (
     coverage_from_ac9,
     imputation_from_ac9,
 )
-from .reader import ControlPlaneRefusal
+from .reader import ControlPlaneRefusal, measurement_snapshot
 
 __all__ = [
     "BLOCK_LANGUAGE",
@@ -165,6 +165,22 @@ REPORT_QUERY_SOURCES: Mapping[str, Mapping[str, str]] = MappingProxyType(
 #: here would be the pasted copy this note exists to avoid.
 UNATTESTED_STATEMENTS: Mapping[str, str] = MappingProxyType(
     {
+        "reader.measurement_snapshot": (
+            "the report's read snapshot: BEGIN, one read of sqlite_master to "
+            "take the SHARED lock the deferred BEGIN does not, and ROLLBACK. "
+            "Transaction control over the report's reads rather than a query "
+            "any figure comes from -- catalogued here so that the report's own "
+            "trace stays complete, since section 6's catalogue is of the "
+            "queries a reader would re-run by hand and re-running these would "
+            "reproduce no number"
+        ),
+        "reader._require_query_only": (
+            "PRAGMA query_only, read back before and inside the snapshot to "
+            "prove the read-only capability is still in force (D-0040, "
+            "ACCEPTANCE.md section 3 condition 5). It is the instrument's "
+            "self-check, not a measurement; its result is attested by the "
+            "report existing at all, since a guard not in force is a refusal"
+        ),
         "provenance._columns_of": (
             "the table introspection behind the content fingerprint; composed "
             "per table at call time, so it has no fixed text to carry"
@@ -605,6 +621,17 @@ def build_measurement_report(
     :data:`WINDOW_EPISODES_NOT_CLASSIFIED` says why: this branch implements
     detectors and reporting, and the driver that produces episodes is not part of
     it, so there is nothing to censor yet.
+
+    **Every read below happens inside one snapshot**
+    (:func:`~.reader.measurement_snapshot`), the header's fingerprint included.
+    The scope is opened *here* rather than asked of the caller because a caller
+    who forgot it would get an autocommit report back -- the cohort selected on
+    one state of the database, AC-9 aggregated on another and the fingerprint
+    taken over a third -- with nothing in the output to say so, which is the
+    section 6 claim quietly becoming false. The cost is stated in that function
+    and is not small: production databases here are not in WAL, so the report
+    holds a SHARED lock and **blocks every writer on the control plane until it
+    finishes**.
     """
 
     if fingerprint_mode not in FINGERPRINT_MODES:
@@ -615,71 +642,75 @@ def build_measurement_report(
             f"{', '.join(FINGERPRINT_MODES)}"
         )
 
-    # Every policy read binds a caller-resolved revision (D-0031's corollary),
-    # and the revision this report binds is the one in force at its period's
-    # start -- the instant its earliest judgement would have been made under.
-    revision_id = policy.effective_revision_id(connection, now_ms=period_start_ms)
+    # One snapshot for the whole report, the fingerprint included: see
+    # reader.measurement_snapshot for why a report that reads outside one
+    # cannot make section 6's claim, and for what holding it costs writers.
+    with measurement_snapshot(connection, target=db_path):
+        # Every policy read binds a caller-resolved revision (D-0031's corollary),
+        # and the revision this report binds is the one in force at its period's
+        # start -- the instant its earliest judgement would have been made under.
+        revision_id = policy.effective_revision_id(connection, now_ms=period_start_ms)
 
-    if grace_ms is None:
-        resolved_grace_ms = windows_module.default_grace_ms(
-            connection, revision_id=revision_id
+        if grace_ms is None:
+            resolved_grace_ms = windows_module.default_grace_ms(
+                connection, revision_id=revision_id
+            )
+            grace_source = windows_module.GRACE_REVISION_RECONCILE_PERIOD
+        else:
+            resolved_grace_ms = grace_ms
+            grace_source = windows_module.GRACE_DECLARED
+
+        selected = cohort_module.select_cohort(
+            connection,
+            period_start_ms=period_start_ms,
+            period_end_ms=period_end_ms,
+            now_ms=now_ms,
+            v1_shadow_run_ids=v1_shadow.run_ids,
         )
-        grace_source = windows_module.GRACE_REVISION_RECONCILE_PERIOD
-    else:
-        resolved_grace_ms = grace_ms
-        grace_source = windows_module.GRACE_DECLARED
+        measured = ac9_module.measure_ac9(
+            connection, selected, now_ms=now_ms, baseline=baseline
+        )
 
-    selected = cohort_module.select_cohort(
-        connection,
-        period_start_ms=period_start_ms,
-        period_end_ms=period_end_ms,
-        now_ms=now_ms,
-        v1_shadow_run_ids=v1_shadow.run_ids,
-    )
-    measured = ac9_module.measure_ac9(
-        connection, selected, now_ms=now_ms, baseline=baseline
-    )
+        header = build_header(
+            connection,
+            db_path=db_path,
+            period_start_ms=period_start_ms,
+            period_end_ms=period_end_ms,
+            generated_at_ms=now_ms,
+            policy_revision_id=revision_id,
+            fingerprint_tables=FINGERPRINT_TABLES,
+            query_definitions=report_query_definitions(),
+            fixture_suite=fixture_suite,
+            imputation=imputation_from_ac9(measured),
+            coverage=coverage_from_ac9(measured, selected),
+            censored=0,
+            censored_left=0,
+            unmatched={},
+            fingerprint_mode=fingerprint_mode,
+        )
 
-    header = build_header(
-        connection,
-        db_path=db_path,
-        period_start_ms=period_start_ms,
-        period_end_ms=period_end_ms,
-        generated_at_ms=now_ms,
-        policy_revision_id=revision_id,
-        fingerprint_tables=FINGERPRINT_TABLES,
-        query_definitions=report_query_definitions(),
-        fixture_suite=fixture_suite,
-        imputation=imputation_from_ac9(measured),
-        coverage=coverage_from_ac9(measured, selected),
-        censored=0,
-        censored_left=0,
-        unmatched={},
-        fingerprint_mode=fingerprint_mode,
-    )
-
-    inputs = ReportSection(
-        name="inputs",
-        title="Inputs declared for this report",
-        narrative=None,
-        facts={
-            "v1_shadow": v1_shadow.as_mapping(),
-            "query_catalogue_limitation": QUERY_CATALOGUE_LIMITATION,
-            "query_catalogue_exemptions": dict(UNATTESTED_STATEMENTS),
-        },
-    )
-    return MeasurementReport(
-        header=header,
-        sections=(
-            inputs,
-            section_from_window_declaration(
-                grace_ms=resolved_grace_ms,
-                grace_source=grace_source,
-                episodes_classified=0,
+        inputs = ReportSection(
+            name="inputs",
+            title="Inputs declared for this report",
+            narrative=None,
+            facts={
+                "v1_shadow": v1_shadow.as_mapping(),
+                "query_catalogue_limitation": QUERY_CATALOGUE_LIMITATION,
+                "query_catalogue_exemptions": dict(UNATTESTED_STATEMENTS),
+            },
+        )
+        return MeasurementReport(
+            header=header,
+            sections=(
+                inputs,
+                section_from_window_declaration(
+                    grace_ms=resolved_grace_ms,
+                    grace_source=grace_source,
+                    episodes_classified=0,
+                ),
+                section_from_ac9(measured, selected),
             ),
-            section_from_ac9(measured, selected),
-        ),
-    )
+        )
 
 
 # --------------------------------------------------------------------------

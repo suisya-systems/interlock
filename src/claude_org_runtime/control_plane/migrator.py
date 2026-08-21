@@ -41,6 +41,11 @@ number alone, which is exactly what makes it dangerous.
 migrations (``docs/production-schema.md`` section 3.2 rule 1): a rollback is a
 restore of the database file. A reverse step that has never been exercised is a
 promise the recovery path cannot keep, so none is written and none is inferred.
+That refusal is bound to the connection the caller ends up holding, not only to
+the read-only one used to check: verification runs again over the returned
+handle, and each step re-checks the head with the write lock held, because a
+rolling deployment is by definition two builds opening the same database and
+the older one must not be handed a database the newer one has moved.
 
 Corrupt state is refused, never recovered as empty (R3). That posture, the
 typed-refusal family (:class:`~.schema.ControlPlaneRefusal` and its two
@@ -453,7 +458,16 @@ def open_production_control_plane(
     :func:`migrate_control_plane` and says so.
 
     Verification runs over a **read-only** connection first, so a database that
-    fails it is not written to at all -- not even a rollback journal.
+    fails it is not written to at all -- not even a rollback journal -- and then
+    a second time over the writable connection this returns, because the
+    read-only one is closed before that connection is opened and a newer build
+    can migrate the file in the gap (a rolling deployment is exactly that gap,
+    repeated). The guarantee the caller gets is therefore *the database was at
+    this build's head when this handle first read it*; SQLite gives a returned
+    handle no lock it could hold across the return, so a writer that moves the
+    database afterwards is outside this mechanism. A caller that needs to know
+    the database is *still* at head calls :func:`verify_production_database` on
+    this connection at that moment.
 
     :raises MissingStateRefused: if there is no file at *path*.
     :raises CorruptStateRefused: for a file that is not SQLite, a failed
@@ -478,17 +492,40 @@ def open_production_control_plane(
     if not target.is_file():
         raise CorruptStateRefused(f"{target} is not a regular file")
 
-    applied = _verify_readonly(target, steps, require_ledger=True)
-    current = applied[-1]["version"] if applied else 0
-    if current != head_version(steps):
-        raise ControlPlaneRefusal(
-            f"{target} is at version {current} and this build knows steps up "
-            f"to {head_version(steps)}; opening never migrates as a side "
-            "effect (D-0029), so call migrate_control_plane explicitly"
-        )
+    _refuse_unless_at_head(target, _verify_readonly(target, steps, require_ledger=True), steps)
 
     connection = sqlite3.connect(target, isolation_level=None)
-    _configure(connection)
+    try:
+        _configure(connection)
+        # Verified again, on the handle that is actually handed back. The pass
+        # above ran on a read-only connection that is closed by the time this
+        # one is opened, and a rolling deployment is precisely a period in
+        # which a newer build may migrate the file in that gap -- after which
+        # this older build would return a writable handle to a database ahead
+        # of its code, which is the one thing DatabaseAheadOfCodeRefused exists
+        # to prevent (D-0029, docs/production-schema.md section 3.2 rule 1). A
+        # refusal that can be false in the deployment shape it was written for
+        # is not a mechanism, so the check is bound to the connection the
+        # caller gets rather than to one nobody keeps.
+        #
+        # What this does *not* give, stated plainly because the module's
+        # register is that a promise must be a mechanism: verification is a
+        # read at an instant, and SQLite offers a returned handle no lock it
+        # could hold open across the return. A writer can still move the
+        # database after this line and before the caller's first statement.
+        # The claim is therefore "this database was at this build's head when
+        # this handle first read it", not "it stays there for the life of the
+        # handle". A caller that needs the stronger fact calls
+        # verify_production_database on this connection at the moment it needs
+        # it -- that is why it takes a connection.
+        _refuse_unless_at_head(
+            target,
+            verify_production_database(target, connection, steps, require_ledger=True),
+            steps,
+        )
+    except BaseException:
+        connection.close()
+        raise
     return connection
 
 
@@ -511,7 +548,12 @@ def migrate_control_plane(
     already-applied step is re-hashed against its recorded checksum, a database
     ahead of this build is refused, and ``PRAGMA user_version`` must agree with
     ``MAX(version)``. Migration is therefore never the operation that papers
-    over a divergence it should have reported.
+    over a divergence it should have reported. Given a path that verification
+    happens twice -- read-only, then again on the writable connection, because
+    another build can migrate the database between the two -- and each step
+    re-checks the head with the write lock already held, which is where the
+    check stops being a narrowed window and becomes a guarantee: a step is
+    applied only onto the exact version this build verified.
 
     *now_ms* is the caller's clock and is written verbatim into
     ``applied_at_ms``. The database's own clock is never consulted: there is no
@@ -524,9 +566,10 @@ def migrate_control_plane(
     :raises MissingStateRefused: if *path_or_connection* is a path with no file.
     :raises MigrationChecksumRefused: if an applied step's bytes have changed.
     :raises DatabaseAheadOfCodeRefused: if the database is ahead of this build.
-    :raises MigrationStepsRefused: if a step's SQL fails; that step's
-        transaction is rolled back and the database stays at the previous
-        version.
+    :raises MigrationStepsRefused: if a step's SQL fails, or if another
+        migrator moved the database between this call's verification and the
+        step's transaction; that step's transaction is rolled back and the
+        database stays at the version the other writer left it at.
     """
 
     _require_epoch_ms(now_ms)
@@ -587,6 +630,17 @@ def migrate_control_plane(
     connection = sqlite3.connect(target, isolation_level=None)
     try:
         _configure(connection)
+        # Same reason as in open_production_control_plane: the read-only pass
+        # above is closed before this handle exists, and a newer build in a
+        # rolling deploy can migrate the file in between. The no-op migration
+        # is where that hides -- with the database already past this build's
+        # head there is nothing to apply, so without this second pass the
+        # older build would quietly be handed a writable connection to a
+        # database ahead of its code instead of DatabaseAheadOfCodeRefused.
+        # This narrows the window rather than closing it; what closes it for
+        # the writes themselves is the head check _apply_step makes with the
+        # write lock already held.
+        verify_production_database(target, connection, steps, require_ledger=False)
         _bootstrap_ledger(connection)
         _apply_pending(connection, steps, now_ms=now_ms)
     except BaseException:
@@ -746,6 +800,29 @@ def _apply_step(
     try:
         connection.execute("BEGIN IMMEDIATE")
         began = True
+        # With the write lock now held, re-read the head. Everything checked
+        # before this line was checked without the lock, so between that
+        # verification and this transaction another migrator -- the newer half
+        # of a rolling deploy -- may have moved the database. Applying this
+        # step anyway would run its DDL against a shape this build never
+        # verified, and the failure would surface as a raw "table already
+        # exists" or a primary-key collision on schema_migration rather than as
+        # a refusal that says what happened. Inside the transaction the check
+        # is not a narrowed window but an actual guarantee: no other writer can
+        # move the database between this SELECT and the COMMIT.
+        head = connection.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migration"
+        ).fetchone()[0]
+        if head != step.version - 1:
+            raise MigrationStepsRefused(
+                f"migration step {step.path.name} expected the database at "
+                f"version {step.version - 1} but found it at {head}: another "
+                "migrator moved it after this one verified it (a rolling "
+                "deploy migrating the same database). Nothing was applied; "
+                "re-run migrate_control_plane, which will verify the database "
+                "as it now stands and refuse it if it is ahead of this build "
+                "(docs/production-schema.md section 3.2 rule 1)"
+            )
         for statement in _statements(step):
             connection.execute(statement)
         connection.execute(
@@ -957,6 +1034,29 @@ def verify_production_database(
             "refusing rather than reading partial state"
         )
     return applied
+
+
+def _refuse_unless_at_head(
+    target: Path,
+    applied: Sequence[dict[str, object]],
+    steps: Sequence[MigrationStep],
+) -> None:
+    """Refuse a database that is *behind* this build's steps.
+
+    One function rather than two copies because
+    :func:`open_production_control_plane` now makes this judgement twice -- once
+    read-only, once on the handle it returns -- and a check whose two copies can
+    drift is a check that eventually says two different things about the same
+    database.
+    """
+
+    current = int(applied[-1]["version"]) if applied else 0
+    if current != head_version(steps):
+        raise ControlPlaneRefusal(
+            f"{target} is at version {current} and this build knows steps up "
+            f"to {head_version(steps)}; opening never migrates as a side "
+            "effect (D-0029), so call migrate_control_plane explicitly"
+        )
 
 
 def _require_epoch_ms(now_ms: int) -> None:

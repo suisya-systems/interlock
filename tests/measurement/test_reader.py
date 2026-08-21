@@ -533,3 +533,118 @@ def test_the_package_exports_no_way_to_write():
         if any(word in name.lower() for word in ("migrate", "create", "write", "lease"))
     ]
     assert offenders == []
+
+
+# --------------------------------------------------------------------------
+# the report snapshot -- one state for the whole report, and what it costs
+# --------------------------------------------------------------------------
+
+
+def _run_count(connection: sqlite3.Connection) -> int:
+    return connection.execute("SELECT count(*) FROM run").fetchone()[0]
+
+
+def _insert_a_run(connection: sqlite3.Connection, run_id: str) -> None:
+    connection.execute(
+        "INSERT INTO run (run_id, status, created_at_ms, updated_at_ms)"
+        " VALUES (?, 'completed', ?, ?)",
+        (run_id, T0, T0),
+    )
+
+
+def test_a_writer_cannot_move_the_database_under_an_open_snapshot(
+    production_db: Path,
+):
+    # The defect the snapshot exists for: without a held read transaction every
+    # statement of a report is its own SQLite snapshot, so a writer committing
+    # mid-report puts the figures and the fingerprint on different states of the
+    # database (measurement-harness.md section 6).
+    connection = open_for_measurement(production_db)
+    # timeout=0: the blocked writer must answer now rather than sit on the
+    # default five-second busy handler, which would make this test slow and say
+    # nothing more.
+    writer = sqlite3.connect(production_db, isolation_level=None, timeout=0)
+    try:
+        with reader.measurement_snapshot(connection, target=production_db):
+            before = _run_count(connection)
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                _insert_a_run(writer, "run-mid-report")
+            assert _run_count(connection) == before
+        # ...and the lock is released when the snapshot closes, so the writer
+        # that was blocked is blocked for the report's duration and no longer.
+        _insert_a_run(writer, "run-after-report")
+        assert _run_count(connection) == before + 1
+    finally:
+        writer.close()
+        connection.close()
+
+
+def test_both_read_only_mechanisms_are_still_in_force_inside_the_snapshot(
+    production_db: Path,
+):
+    # A snapshot is a transaction, and a transaction is the shape a write comes
+    # in: if holding one had cost the connection either mechanism, the fix for
+    # the moving database would have bought it with the capability that makes
+    # the harness an instrument (D-0040, ACCEPTANCE.md section 3 condition 5).
+    before = digest(production_db)
+    connection = open_for_measurement(production_db)
+    try:
+        with reader.measurement_snapshot(connection, target=production_db):
+            assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                connection.execute(A_VALID_WRITE)
+            # mode=ro proved off the live connection, inside the snapshot: the
+            # probe has to work here or a caller who holds a report open cannot
+            # evidence the capability the report is measured through.
+            assert prove_read_only(connection, production_db) is None
+            assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+    finally:
+        connection.close()
+    assert digest(production_db) == before
+    assert sidecars(production_db) == []
+
+
+def test_a_snapshot_inside_a_snapshot_is_refused(production_db: Path):
+    # Nesting would silently do nothing -- the inner BEGIN would fail or the
+    # inner exit would end the outer snapshot early -- so it is a refusal with a
+    # message rather than a second scope that reads as if it worked.
+    connection = open_for_measurement(production_db)
+    try:
+        with reader.measurement_snapshot(connection, target=production_db):
+            with pytest.raises(reader.NestedSnapshotRefused):
+                with reader.measurement_snapshot(connection, target=production_db):
+                    pass
+            # The outer snapshot survived the refusal.
+            assert connection.in_transaction
+    finally:
+        connection.close()
+
+
+def test_the_snapshot_is_released_even_when_the_report_raises(production_db: Path):
+    connection = open_for_measurement(production_db)
+    writer = sqlite3.connect(production_db, isolation_level=None, timeout=0)
+    try:
+        with pytest.raises(ZeroDivisionError):
+            with reader.measurement_snapshot(connection, target=production_db):
+                _run_count(connection)
+                raise ZeroDivisionError("the report failed halfway")
+        assert not connection.in_transaction
+        # A snapshot left open would block every writer on the control plane
+        # for as long as the process lived, which is why the release is in a
+        # finally rather than at the end of the body.
+        _insert_a_run(writer, "run-after-the-failure")
+    finally:
+        writer.close()
+        connection.close()
+
+
+def test_the_snapshot_refuses_a_connection_whose_guard_is_down(production_db: Path):
+    connection = open_for_measurement(production_db)
+    try:
+        connection.execute("PRAGMA query_only = OFF")
+        with pytest.raises(ReadOnlyCapabilityRefused):
+            with reader.measurement_snapshot(connection, target=production_db):
+                pass
+        assert not connection.in_transaction
+    finally:
+        connection.close()

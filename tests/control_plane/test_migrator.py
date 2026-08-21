@@ -53,6 +53,7 @@ from claude_org_runtime.control_plane.schema import (
 
 T0 = 1_700_000_000_000  # an arbitrary fixed epoch-milliseconds instant
 T1 = T0 + 60_000
+T2 = T0 + 120_000
 
 
 # --------------------------------------------------------------------------
@@ -889,3 +890,115 @@ def test_an_autocommit_connection_is_still_migrated(ledger, db_path):
     finally:
         connection.close()
     assert "gamma" in tables_of(db_path)
+
+
+# --------------------------------------------------------------------------
+# the verify-close-reopen window: a rolling deploy migrating in the gap
+# --------------------------------------------------------------------------
+
+
+def _older_build_ledger(ledger: Path) -> Path:
+    """A build that knows step 0001 only -- the older half of a rolling deploy."""
+
+    older = ledger.parent / "older-build"
+    write_step(older, "0001_alpha.sql", (ledger / "0001_alpha.sql").read_text(encoding="utf-8"))
+    return older
+
+
+def _migrate_in_the_gap(monkeypatch, ledger: Path, db_path: Path) -> None:
+    """Let a newer build migrate *db_path* after verification and before connect.
+
+    The window is driven deterministically rather than by timing: the real
+    _verify_readonly runs, and the newer build's migration is spliced in
+    immediately after it returns -- exactly where the closed read-only
+    connection leaves the file unobserved.
+    """
+
+    real = m._verify_readonly
+
+    def verify_then_let_the_newer_build_migrate(*args, **kwargs):
+        applied = real(*args, **kwargs)
+        monkeypatch.setattr(m, "_verify_readonly", real)  # once, not on re-verification
+        migrate_control_plane(db_path, now_ms=T1, migrations_dir=ledger).close()
+        return applied
+
+    monkeypatch.setattr(m, "_verify_readonly", verify_then_let_the_newer_build_migrate)
+
+
+def test_opening_refuses_a_database_a_newer_build_migrated_in_the_verify_reopen_gap(
+    ledger, db_path, monkeypatch
+):
+    # DatabaseAheadOfCodeRefused exists so an older build cannot operate on a
+    # database a newer one has moved forward, and a rolling deploy is the
+    # deployment shape it was written for. Verification on a read-only
+    # connection that is closed before the writable one is opened leaves a
+    # window in which exactly that can happen, so the returned handle is
+    # verified again on itself.
+    older_build = _older_build_ledger(ledger)
+    create_production_control_plane(db_path, now_ms=T0, migrations_dir=older_build).close()
+    assert version_of(db_path) == (1, 1)
+
+    _migrate_in_the_gap(monkeypatch, ledger, db_path)
+
+    with pytest.raises(DatabaseAheadOfCodeRefused, match="only up to 1"):
+        open_production_control_plane(db_path, migrations_dir=older_build)
+    assert version_of(db_path) == (2, 2)
+
+
+def test_migrating_refuses_a_database_a_newer_build_migrated_in_the_verify_reopen_gap(
+    ledger, db_path, monkeypatch
+):
+    # migrate_control_plane's path branch has the same window, and a no-op
+    # migration is where it hides: with the database already past this build's
+    # head there is nothing to apply, so without re-verification the older
+    # build silently gets a writable handle to a database ahead of its code.
+    older_build = _older_build_ledger(ledger)
+    create_production_control_plane(db_path, now_ms=T0, migrations_dir=older_build).close()
+
+    _migrate_in_the_gap(monkeypatch, ledger, db_path)
+
+    with pytest.raises(DatabaseAheadOfCodeRefused, match="only up to 1"):
+        migrate_control_plane(db_path, now_ms=T2, migrations_dir=older_build)
+    assert version_of(db_path) == (2, 2)
+
+
+def test_a_step_is_not_applied_over_a_database_another_migrator_moved(
+    ledger, db_path, monkeypatch
+):
+    # Re-verification is a read at a point in time; the write path needs the
+    # check inside the transaction that does the writing. With the write lock
+    # held, a ledger head that is not exactly step.version - 1 means another
+    # migrator moved the database between the verification and this step, so
+    # the step is refused instead of applied on top of a shape this build never
+    # saw.
+    create_production_control_plane(db_path, now_ms=T0, migrations_dir=ledger).close()
+    write_step(ledger, "0003_gamma.sql", "CREATE TABLE gamma (id INTEGER PRIMARY KEY);\n")
+
+    real_apply_step = m._apply_step
+    moved = False
+
+    def move_the_database_first(connection, step, *, now_ms):
+        nonlocal moved
+        if not moved:
+            moved = True
+            other = raw(db_path)
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("CREATE TABLE gamma (id INTEGER PRIMARY KEY)")
+                other.execute(
+                    "INSERT INTO schema_migration (version, name, checksum, applied_at_ms) "
+                    "VALUES (3, 'gamma', ?, ?)",
+                    (m.discover_migration_steps(ledger)[-1].checksum, T1),
+                )
+                other.execute("PRAGMA user_version = 3")
+                other.execute("COMMIT")
+            finally:
+                other.close()
+        return real_apply_step(connection, step, now_ms=now_ms)
+
+    monkeypatch.setattr(m, "_apply_step", move_the_database_first)
+
+    with pytest.raises(MigrationStepsRefused, match="moved"):
+        migrate_control_plane(db_path, now_ms=T2, migrations_dir=ledger)
+    assert version_of(db_path) == (3, 3)
+    assert [row["version"] for row in _ledger_rows(db_path)] == [1, 2, 3]
