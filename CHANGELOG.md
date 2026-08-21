@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **S8 -- the `MessageBus` as a worker-outbound MCP endpoint, with the static
+  no-edge assertion** (Issue #19, D-0009, D-0028, throwaway under D-0026;
+  discharges gate item 6). `src/claude_org_runtime/messagebus/` adds the
+  delivery half of D-0009's two-contract split over the S7 outbox unchanged:
+  `bus.py` (send to a registered recipient, poll -- each due message
+  re-attempted and re-presented until acked -- and an idempotent,
+  recipient-checked ack), and `endpoint.py`, a stdio MCP server a worker runs
+  as a client-side tool surface (`poll`/`ack`), because per F1 delivery is
+  necessarily a pull. `tests/messagebus/` is the durable output: the item 6
+  acceptance sequence (send, first delivery dropped -- in-process and over
+  real stdio via `INTERLOCK_MESSAGEBUS_FAULT=drop-first-poll` -- outbox
+  resend, exactly one recorded ack, destination effect count 1), the stale
+  readout case translated for C2 (delivery transcripts compared `==` under a
+  child-gone and a could-not-observe readout from the S3 stub), and
+  `test_import_graph.py`, the CI-enforced static assertion that no module in
+  the package imports a session backend (also a named step in `test.yml`,
+  pairing with item 11's). The gate record states the F1 caveat plainly: the
+  "no UI attached" condition is trivially satisfied -- the UI is not on the
+  delivery path, and under C2 there is no UI to attach -- so what the
+  discharge earns is the stale-readout invariance and the no-edge assertion,
+  not the free condition. D-0028 resolves Q-0023 (carried end-to-end tests
+  land as failing specifications against the new contract; pane-liveness
+  lease release is discarded with the pane, its duties met by lease expiry
+  and fenced recovery): `tests/messagebus/test_carried_specifications.py`
+  lands the carried invariants (one still failing, `xfail(strict=True)`:
+  recipient aliasing), and `docs/messagebus-carry-drop.md` records the
+  assertion-level disposition of all 201 quarantined test functions,
+  consistent with `PORTING_LEDGER.md`'s partial-carry rows.
+
 - **S2 -- the C2 `SessionProvider` over Interlock-supervised `claude -p`
   subprocesses** (Issue #17, D-0025, D-0027, throwaway under D-0026).
   `src/claude_org_runtime/session/claude_cli_provider.py` implements every S1

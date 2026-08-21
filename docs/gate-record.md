@@ -67,7 +67,7 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 | 3 | Per-role permission / sandbox / hooks survive restart and fail closed | `discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#9`; `docs/per-role-fencing.md`; `src/claude_org_runtime/fencing/`; `tests/fencing/`; `investigation/i04-pretooluse-fence-probe.md` (U15, U35, U42). `#8` closed as **moot** under C2, not passed | The spike (phase 2b) |
 | 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `pending` | `pending` | `pending` | `#12` (S5), `#13` (S6, the lease and fencing token) and `#14` (S7 outbox + one declared handler) landed 2026-08-19; `#16` — not yet landed | The spike (phases 4–5) |
 | 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#12` (S5), `#13` (S6) and `#14` (S7) landed 2026-08-19; `#15`, `#16` — not yet landed | The spike (phases 4–5) |
-| 6 | `MessageBus` delivers and resends independently of the UI | `pending` | `pending` | `pending` | `#19` — not yet landed | The spike (phase 7) |
+| 6 | `MessageBus` delivers and resends independently of the UI | `discharged` | `proven on the spike slice` | `provider-independent` | `#19` — `src/claude_org_runtime/messagebus/`; `tests/messagebus/`; `docs/messagebus-carry-drop.md`; D-0028 | The spike (phase 7) |
 | 7 | Unsaved artifacts protected from the managed worktree lifecycle | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#7` — not yet landed | The spike (phase 1b) |
 | 8 | Secretary window responsiveness under worker load | `rehearsed — not discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#21` — `tests/secretary/`; `docs/secretary-intake-boundary.md`; `investigation/i16-item8-rehearsal.md` | **Before the canary starts** (D-0022) |
 | 9 | Curator output cannot reach a skill without human approval | `discharged` | `proven on the spike slice` | `provider-independent` | `#22`, PR `#27`; `docs/curator-promotion-gate.md`; `tests/curator/`; `investigation/u8-skill-hot-reload-probe.md` (U8) | **Discharged 2026-08-18**, independently of the spike |
@@ -288,11 +288,20 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 ### Item 6 — `MessageBus` delivers and resends independently of the Agent View UI
 
-- **Verdict:** `pending`
-- **D-0022 label:** `pending`
-- **Provider:** `pending` — control-plane property.
-- **Evidence:** `#19` (S8 as a worker-outbound MCP endpoint, plus the static no-edge assertion).
-  Not yet landed.
+- **Verdict:** `discharged`
+- **D-0022 label:** `proven on the spike slice`
+- **Provider:** `provider-independent` — by construction: the evidence is a delivery path with no
+  import edge to any provider, and the stale-readout case was driven against the S3 stub (`#11`)
+  precisely because item 6 is buildable against the stub alone — that is the no-edge property
+  demonstrated, not a shortcut around C2.
+- **Evidence:** `#19` (S8) — `src/claude_org_runtime/messagebus/` (the bus over the S7 outbox and
+  the worker-outbound stdio MCP endpoint); `tests/messagebus/test_messagebus.py` and
+  `tests/messagebus/test_endpoint.py` (send, first delivery dropped — in-process and over real
+  stdio via `INTERLOCK_MESSAGEBUS_FAULT=drop-first-poll` — outbox resends, **exactly one** ack
+  recorded, destination effect count 1); `tests/messagebus/test_stale_readout.py` (the translated
+  stale case, below); `tests/messagebus/test_import_graph.py` (the static assertion, run by CI both
+  in the full suite and as its own named step); `docs/messagebus-carry-drop.md` and D-0028 (the
+  Q-0023 disposition this item was gated on).
 - **The F1 caveat, in its now-stronger form — and it is a caveat, not a strength.** Per F1 there is
   no non-interactive path to deliver a message *into* a running background session, so the transport
   is necessarily **worker-outbound**: the worker connects to Interlock's bus as a client and
@@ -300,11 +309,30 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
   **trivially satisfied — the UI is not on the delivery path at all**. And under C2 there is **no
   Agent View UI to attach in the first place**. The condition is free for two independent reasons.
   **Two reasons a condition is free is not a stronger result; it is the same result, twice
-  unearned.** Claiming item 6 as a strong result would be overclaiming twice over.
-- **Residual:** the "UI attached but session state deliberately stale" case must be **translated,
-  not skipped**, under C2 — the stale readout becomes a provider readout that is stale or wrong (a
-  session id whose child is gone, a state read returning "could not observe"). The part of item 6
-  that is *not* free is the static no-dependency-edge assertion, enforced in CI.
+  unearned.** Claiming item 6 as a strong result would be overclaiming twice over. What this
+  discharge actually earns is the pair of non-free clauses: the stale-readout invariance and the
+  CI-enforced no-edge assertion.
+- **How the stale case was translated, not skipped.** The "UI attached but session state
+  deliberately stale" wording names a UI that no longer exists, so the staleness is a provider
+  readout that is stale or wrong: a session id whose child is gone (stub session stopped,
+  `read_state` answering `exited-*` for a roster entry with no process), and a `read_state`
+  answering "could not observe" (a running child that has announced nothing). Under each, the whole
+  acceptance sequence — send, dropped first delivery, resend, ack, duplicate ack — records a
+  transcript compared `==` against the same sequence run with no session backend in the process at
+  all. Equality, not similarity, is the assertion.
+- **How a later edge fails the build.** `tests/messagebus/test_import_graph.py` reads imports from
+  the AST of every file under `src/claude_org_runtime/messagebus/` (absolute and relative, aliases
+  included), refuses any name that reaches `claude_org_runtime.session` or a provider module, and
+  guards its own vacuity (the package must exist and must import the control plane). It pairs with
+  item 11's assertion: item 11 pins that the control plane knows no provider; this pins that the
+  delivery layer built on it doesn't either — D-0009's split, structural on both sides.
+- **Residual:** one failing specification (`xfail(strict=True)`) stands in
+  `tests/messagebus/test_carried_specifications.py` — recipient aliasing, carried from the
+  quarantined `test_store.py` — and the `carried-deferred` rows of `docs/messagebus-carry-drop.md`
+  stay quarantined until their non-MessageBus successor surfaces exist (D-0028). The spike endpoint
+  trusts its env-configured recipient identity; a real deployment needs the authenticated binding
+  Q-0001/Q-0007 leave open. Per D-0026 the implementation is throwaway; the durable output is the
+  suite and the assertion.
 
 ### Item 7 — unsaved artifacts protected from the managed worktree lifecycle
 

@@ -66,3 +66,13 @@ jobs:
         # parameterises the same comparison over the registry -- and this step is
         # the legible, named one a reader of the log can find.
         run: python -m pytest tests/control_plane -p tests.gate_item11.provider_plugin
+      - name: MessageBus static no-edge assertion (gate item 6)
+        # Issue #19: ACCEPTANCE.md item 6 asks for the no-dependency-edge
+        # property to be *enforced in CI, so a later edge fails the build
+        # rather than being found at the gate*. The full run above already
+        # collects this file; this named step exists so the assertion is
+        # legible in the log and so its accidental disappearance (a moved
+        # package, an emptied test file) fails loudly here -- the test guards
+        # its own vacuity. Deliberately not -x/-q, matching the item 11 step:
+        # the per-file parametrisation names every module that was checked.
+        run: python -m pytest tests/messagebus/test_import_graph.py
