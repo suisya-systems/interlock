@@ -1769,12 +1769,26 @@ def assert_invariants(
                         "all, so 'no two live processes per id' asserts nothing"
                     )
                 for session_uuid, count in sorted(live.items()):
+                    if count is None:
+                        # The destination's ledger holds a start with no exit
+                        # from a process that is dead now: when it died is
+                        # unknowable, so any overlap is unprovable either way.
+                        # Indeterminate fails loudly rather than passing as
+                        # "one" (ACCEPTANCE.md section 2: a case that cannot
+                        # observe its invariant does not certify it).
+                        fail(
+                            f"{role}: session {session_uuid!r}'s liveness "
+                            "record is indeterminate (a start with no exit, "
+                            "process gone); the overlap cannot be certified"
+                        )
+                        continue
                     if int(count) > 1:
                         fail(
-                            f"{role}: {count} provider processes live against "
-                            f"session {session_uuid!r}; two live processes on "
-                            "one id is the violation item 2 names, not a "
-                            "residual to be weighed"
+                            f"{role}: {count} provider processes were "
+                            f"concurrently live against session "
+                            f"{session_uuid!r}; two live processes on one id "
+                            "is the violation item 2 names, not a residual to "
+                            "be weighed"
                         )
             elif name == contract.INVARIANT_TRANSCRIPT_SINGLE_WRITER:
                 # The captured event streams are the C2 transcript stand-in:
@@ -1814,6 +1828,25 @@ def assert_invariants(
                             f"{duplicates} duplicated turn id(s) -- an "
                             "interleaved transcript is a failed gate item, not "
                             "an accepted weakening"
+                        )
+                    streams = shape.get("streams")
+                    ledger_starts = shape.get("ledger_starts")
+                    if (
+                        streams is not None
+                        and ledger_starts is not None
+                        and int(streams) > int(ledger_starts)
+                    ):
+                        # A stream is one child's stdout; every one must be
+                        # accounted for by an admitted spawn in the ledger. A
+                        # surplus stream is a writer nobody admitted, hiding
+                        # as "just another generation". (Cross-stream
+                        # concurrency itself is live-processes-per-session's
+                        # question -- the ledger's interval overlap.)
+                        fail(
+                            f"{role}: session {session_uuid!r} has {streams} "
+                            f"event stream(s) but only {ledger_starts} "
+                            "admitted spawn(s); a stream with no admitted "
+                            "spawn is an unaccounted writer"
                         )
             else:  # pragma: no cover - guarded by manifest validation
                 raise ContractViolation(

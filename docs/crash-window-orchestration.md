@@ -80,7 +80,11 @@ post-spawn validation, both fenced. Two shapes follow:
   confirmed the run's binding, the loser stops its just-created child at once;
   once one has, a session-level stop could kill the *winner's* adopted worker
   (a stop cannot name a process generation), so the loser stands down and
-  surfaces its possibly-rogue process as an unresolved hazard.
+  surfaces its possibly-rogue process as an unresolved hazard. The
+  check-and-stop is serialised against the winner's confirm — the database
+  write lock is held from before the read until after the stop, so this is
+  never a read-then-stop race (the provider's stop timeout must stay under
+  SQLite's busy timeout, which the C2 default does).
   `LoserTerminated` carries all of it without overstatement: whether a stop
   was attempted (`stop_attempted`), the provider's own verdict on it
   (`stop_confirmed` — an unconfirmed stop is reported as unconfirmed, never

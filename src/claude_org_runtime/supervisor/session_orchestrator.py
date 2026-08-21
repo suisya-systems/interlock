@@ -373,31 +373,45 @@ class SessionOrchestrator:
         # has, the loser stands down and surfaces its possibly-rogue process
         # as an unresolved hazard instead -- coordinated with the holder,
         # never a blind kill and never a silent trust.
-        binding = session_binding.binding_for_session(self._connection, session_id)
-        winner_confirmed = (
-            binding is not None
-            and binding.released_at_ms is None
-            and binding.binding_phase == PHASE_IDENTITY_CONFIRMED
-        )
-        if winner_confirmed:
-            terminated = self._now_ms()
-            return LoserTerminated(
-                f"claimant {self._holder!r} lost the lease on "
-                f"{self._resource!r} inside the spawn-admission critical "
-                f"section; the takeover writer has already confirmed the "
-                f"binding for session {session_id!r}, so no session-level stop "
-                "was fired (it could kill the winner's adopted worker). Any "
-                "process this claimant created is an UNRESOLVED hazard the "
-                "holder must reconcile",
-                session_id=session_id,
-                refusal=refusal,
-                detected_at_ms=detected,
-                terminated_at_ms=terminated,
-                stop_answer=None,
-                stop_confirmed=False,
-                stop_attempted=False,
+        #
+        # The check-and-stop is serialised against the winner's confirm, not a
+        # read-then-stop: the database write lock is held from before the read
+        # until after the stop, so a winner cannot move the binding to
+        # confirmed in between (its own confirm blocks on the same lock,
+        # within SQLite's busy timeout -- the provider's stop_timeout must
+        # stay under it, which the C2 default does). This is a coordination
+        # lock, not a protected write; nothing is committed under it.
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            binding = session_binding.binding_for_session(
+                self._connection, session_id
             )
-        stop_answer = self._provider.stop(session_id)
+            winner_confirmed = (
+                binding is not None
+                and binding.released_at_ms is None
+                and binding.binding_phase == PHASE_IDENTITY_CONFIRMED
+            )
+            if winner_confirmed:
+                terminated = self._now_ms()
+                return LoserTerminated(
+                    f"claimant {self._holder!r} lost the lease on "
+                    f"{self._resource!r} inside the spawn-admission critical "
+                    f"section; the takeover writer has already confirmed the "
+                    f"binding for session {session_id!r}, so no session-level "
+                    "stop was fired (it could kill the winner's adopted "
+                    "worker). Any process this claimant created is an "
+                    "UNRESOLVED hazard the holder must reconcile",
+                    session_id=session_id,
+                    refusal=refusal,
+                    detected_at_ms=detected,
+                    terminated_at_ms=terminated,
+                    stop_answer=None,
+                    stop_confirmed=False,
+                    stop_attempted=False,
+                )
+            stop_answer = self._provider.stop(session_id)
+        finally:
+            self._connection.rollback()
         terminated = self._now_ms()
         # The provider's own verdict, never assumed: an Ok is the post-stop
         # readout of a session the provider reports stopped; a Failure means

@@ -427,9 +427,10 @@ class _SessionObserver:
         SIGKILLed child writes no exit; its interval is not invented).
         """
 
-        report: dict[str, int] = {uuid_: 0 for uuid_ in self._session_uuids()}
+        report: dict[str, Any] = {uuid_: 0 for uuid_ in self._session_uuids()}
         intervals: dict[str, list[tuple[float, float]]] = {}
         opens: dict[tuple[str, int], float] = {}
+        indeterminate: set[str] = set()
         for entry in self._ledger():
             uuid_ = entry.get("uuid")
             pid = entry.get("pid")
@@ -443,10 +444,21 @@ class _SessionObserver:
                 if started is not None:
                     intervals.setdefault(uuid_, []).append((started, float(entry["t"])))
         for (uuid_, _pid), started in opens.items():
-            live_now = self._live_now(uuid_)
-            if live_now:
+            if self._live_now(uuid_):
                 intervals.setdefault(uuid_, []).append((started, float("inf")))
+            else:
+                # A start with no exit line from a process that is dead now:
+                # when it died is unknowable from the ledger, so any overlap
+                # it took part in is unprovable either way. Reported as
+                # indeterminate -- the assertion fails the case loudly rather
+                # than letting a hidden overlap pass as one (none of the
+                # shipped cases kills a fake child, so this arising at all is
+                # a harness fault worth a red build).
+                indeterminate.add(uuid_)
         for uuid_ in report:
+            if uuid_ in indeterminate:
+                report[uuid_] = None
+                continue
             spans = sorted(intervals.get(uuid_, ()))
             peak = 0
             for index, (start, end) in enumerate(spans):
@@ -462,18 +474,29 @@ class _SessionObserver:
     def transcript_report(self) -> Mapping[str, Mapping[str, Any]]:
         """Per session: the identities its streams name, and doubled turns.
 
-        A stream (one ``events-NNN.jsonl``) belongs to one child process. Two
-        writers into one stream would double its ``init``/``result`` events;
-        a foreign writer would put a second identity into it. Both are the
-        interleaving item 2 forbids.
+        Division of labour, stated: a stream (one ``events-NNN.jsonl``)
+        belongs to one child process, so *within* a stream two writers double
+        its ``init``/``result`` events and a foreign writer plants a second
+        identity -- both counted here. *Across* streams, a second stream is a
+        second process, and whether two processes were concurrently live is
+        the ledger's question (``live_process_report``); what this report
+        adds cross-stream is bookkeeping consistency -- every stream must be
+        accounted for by a ledger start record, so a writer nobody admitted
+        cannot hide as "just another generation".
         """
 
         report: dict[str, dict[str, Any]] = {}
+        starts_per_uuid: dict[str, int] = {}
+        for entry in self._ledger():
+            if entry.get("event") == "start" and entry.get("uuid"):
+                starts_per_uuid[entry["uuid"]] = starts_per_uuid.get(entry["uuid"], 0) + 1
         for session_uuid in self._session_uuids():
             distinct: set[str] = set()
             duplicates = 0
+            streams = 0
             directory = state_root_path(self._workdir) / session_uuid
             for stream in sorted(directory.glob("events-*.jsonl")):
+                streams += 1
                 seen: dict[str, int] = {}
                 for line in stream.read_text(encoding="utf-8").splitlines():
                     try:
@@ -489,6 +512,8 @@ class _SessionObserver:
             report[session_uuid] = {
                 "distinct_ids": sorted(distinct),
                 "duplicate_turn_ids": duplicates,
+                "streams": streams,
+                "ledger_starts": starts_per_uuid.get(session_uuid, 0),
             }
         return report
 
