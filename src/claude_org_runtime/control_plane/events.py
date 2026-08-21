@@ -92,7 +92,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from .policy import resolve_tolerance_ms
 from .schema import ControlPlaneRefusal
-from .txn import transaction
+from .txn import current_scope, transaction
 
 __all__ = [
     "BACKLOG_INCIDENT_CLASS",
@@ -163,16 +163,16 @@ CONSUMER_FENCE_SQL = (
     "                     AND lease.expires_at_ms > :now_ms)"
 )
 
-#: Consumers registered with ``backfill=True`` in the transaction that is open
-#: right now, keyed by ``id(connection)``. Transaction-local and nothing else:
-#: section 5.4's back-fill covers "a subscription added in the same
-#: transaction", so :func:`subscribe` has to know whether it is running inside
-#: its consumer's registration. The entry is dropped the moment either entry
-#: point observes the connection is no longer in a transaction, so a stale key
-#: cannot outlive the transaction that made it -- which also disposes of the
-#: identity-reuse hazard of keying by ``id()``, since a fresh connection is
-#: never mid-transaction at the entry to either function.
-_REGISTERING_WITH_BACKFILL: dict[int, set[str]] = {}
+#: Key under which the consumers registered with ``backfill=True`` are recorded
+#: in the current transaction's scope (:func:`claude_org_runtime.control_plane
+#: .txn.current_scope`). Section 5.4's back-fill covers "a subscription added in
+#: the same transaction" as the registration, so :func:`subscribe` has to know
+#: whether it is running inside its consumer's registration -- and *the same*
+#: transaction, not merely some open one. The scope is created and destroyed by
+#: the ``transaction()`` block that owns the boundary, so this note cannot
+#: outlive it and back-fill a subscription made in a later transaction: that
+#: would manufacture a backlog nobody subscribed for and nobody will drain.
+_BACKFILL_SCOPE_KEY = "events.registering_with_backfill"
 
 
 class EventSpineRefusal(ControlPlaneRefusal):
@@ -282,13 +282,6 @@ def _require_json(field: str, value: str) -> str:
             f"json_valid CHECK and would refuse this ({error})"
         ) from error
     return value
-
-
-def _forget_stale_backfill_scope(connection: sqlite3.Connection) -> None:
-    """Drop any back-fill scope left by a transaction that has already ended."""
-
-    if not connection.in_transaction:
-        _REGISTERING_WITH_BACKFILL.pop(id(connection), None)
 
 
 # --------------------------------------------------------------------------
@@ -629,7 +622,6 @@ def register_consumer(
     if registered_from_seq < 0:
         raise EventSpineUsageError("registered_from_seq must not be negative")
 
-    _forget_stale_backfill_scope(connection)
     with transaction(connection):
         connection.execute(
             """
@@ -647,11 +639,18 @@ def register_consumer(
             },
         )
         if backfill:
-            _REGISTERING_WITH_BACKFILL.setdefault(id(connection), set()).add(consumer_id)
             # Subscriptions cannot pre-exist a consumer (the FK forbids it), so
-            # this only matters when the caller has joined an outer transaction
-            # and subscribes below; the scope above is what carries the decision
-            # across to subscribe() without leaving the transaction.
+            # the note only matters when the caller has joined an outer
+            # transaction and subscribes below; the scope is what carries the
+            # decision across to subscribe() without leaving the transaction,
+            # and it dies with the transaction that made it. ``None`` only when
+            # the caller began a transaction by hand instead of through
+            # transaction(), which no control-plane module does; the note is
+            # then not carried at all -- a forward-only subscription, which is
+            # the safe way to be wrong.
+            scope = current_scope(connection)
+            if scope is not None:
+                scope.setdefault(_BACKFILL_SCOPE_KEY, set()).add(consumer_id)
             _backfill(
                 connection,
                 consumer_id=consumer_id,
@@ -666,7 +665,6 @@ def register_consumer(
                 from_seq=registered_from_seq,
                 created_at_ms=registered_at_ms,
             )
-    _forget_stale_backfill_scope(connection)
 
 
 def _backfill(
@@ -743,9 +741,11 @@ def subscribe(
         _require_identifier("recipient", recipient)
     _require_epoch_ms("added_at_ms", added_at_ms)
 
-    _forget_stale_backfill_scope(connection)
-    backfilling = consumer_id in _REGISTERING_WITH_BACKFILL.get(id(connection), frozenset())
     with transaction(connection):
+        # Read inside the block: outside it there is no scope to read, and a
+        # scope read before the block could be a *previous* transaction's.
+        scope = current_scope(connection) or {}
+        backfilling = consumer_id in scope.get(_BACKFILL_SCOPE_KEY, frozenset())
         connection.execute(
             """
             INSERT INTO consumer_subscription (consumer_id, event_type, recipient, added_at_ms)
@@ -770,7 +770,6 @@ def subscribe(
                 from_seq=int(row[0]),
                 created_at_ms=added_at_ms,
             )
-    _forget_stale_backfill_scope(connection)
 
 
 def unsubscribe(

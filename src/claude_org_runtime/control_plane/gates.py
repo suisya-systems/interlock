@@ -645,6 +645,31 @@ def close_gate(
     that and makes a re-run of the sweep an idempotent no-op on the spine as
     well as in the table.
 
+    **Closure does not neutralise an undelivered relay, and cannot today.** The
+    close writes the ``gate`` row and the spine event; a ``gate_relay`` whose
+    ``outbox`` row is still ``pending`` or ``delivered`` is left exactly as it
+    was. ``outbox.status`` runs ``pending -> delivered -> acked`` and
+    ``outbox_status_is_forward_only`` (``0001_initial.sql``) admits only steps
+    along that ladder, so the schema has no status meaning "this message is no
+    longer wanted" for a close to retire the row into -- adding one is a DDL
+    change to the settled section 5 vocabulary and a decision this function may
+    not make on its own. Two things follow for a caller, and both are real:
+
+    * a delivery worker reading the outbox is still instructed to send the
+      question, or forward the answer, for a gate that is already ``withdrawn``,
+      ``expired`` or ``subject_gone``. Any such worker must therefore re-check
+      ``gate.closed_at_ms`` at send time; the outbox row alone is not authority
+      that the message is still wanted. No component in this branch does that
+      check, because the delivery driver does not exist here yet.
+    * :func:`stalled_relays` keeps reporting that relay for as long as the row
+      exists -- section 9.6 writes its query with no ``closed_at_ms`` predicate
+      -- so a closed gate can alarm forever through its relay, which is the
+      failure the section 9.4 ``subject_gone`` outcome exists to end, displaced
+      one table over.
+
+    ``test_closing_a_gate_does_not_retire_its_undelivered_relay`` pins both
+    halves so the hole is visible in the suite and not only in this paragraph.
+
     :raises GateClosedRefused: if the gate is closed with a *different* outcome.
     :raises InadmissibleTransitionRefused: if *outcome* is not reachable from
         the stage the gate is at (:data:`CLOSE_OUTCOME_STAGES`).
@@ -868,6 +893,15 @@ def stalled_relays(
     moved on the send, an undelivered relay would look like a gate that had
     progressed normally, and the fault would surface later as a human who never
     answered a question they never received.
+
+    **Known hole, stated rather than silently carried.** Section 9.6 writes this
+    query with no ``closed_at_ms`` predicate and it is transcribed as written,
+    so a relay enqueued and never acked on a gate that has since been closed is
+    reported here forever: closing the gate cannot retire the outbox row (see
+    :func:`close_gate`), and nothing else ever will. Excluding closed gates here
+    would silence the report but not stop a delivery worker sending the message,
+    so it is half a fix and a design decision either way, not a transcription
+    fix. ``test_closing_a_gate_does_not_retire_its_undelivered_relay`` pins it.
     """
 
     rows = connection.execute(

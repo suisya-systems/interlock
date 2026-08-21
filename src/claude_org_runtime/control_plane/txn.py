@@ -48,9 +48,47 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Any, Dict, Iterator, Optional
 
-__all__ = ["TransactionUsageError", "in_autocommit", "transaction"]
+__all__ = [
+    "TransactionUsageError",
+    "current_scope",
+    "in_autocommit",
+    "transaction",
+]
+
+#: The mutable state of the transaction currently open on a connection, keyed
+#: by ``id(connection)``.
+#:
+#: A caller sometimes has to know whether two calls are in *the same*
+#: transaction --- section 5.4's back-fill covers "a subscription added in the
+#: same transaction as the registration", which is a question about the
+#: boundary, not about whether some transaction happens to be open. Answering
+#: it from ``connection.in_transaction`` is wrong in exactly one reachable way:
+#: two consecutive ``transaction()`` blocks on one connection both report
+#: ``True`` inside, so state left by the first is read by the second as if it
+#: were its own.
+#:
+#: So the scope is created by the block that issues ``BEGIN IMMEDIATE`` and
+#: removed by the same block in its ``finally``: it cannot outlive its
+#: transaction, and there is no clearing step elsewhere that could be forgotten.
+#: That also disposes of the ``id()`` reuse hazard --- CPython reuses an id only
+#: after the object is freed, and the connection is held alive by the running
+#: block for the entire lifetime of its entry here.
+_SCOPES: Dict[int, Dict[str, Any]] = {}
+
+
+def current_scope(connection: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+    """Return the mutable state of the transaction open on *connection*.
+
+    ``None`` when no :func:`transaction` block is open --- and, deliberately,
+    the *same* dict for an inner block that joined an outer one, which is what
+    makes "were these two calls in one transaction?" answerable at all. Keys
+    belong to the module that writes them; prefix them so two callers sharing a
+    transaction cannot collide.
+    """
+
+    return _SCOPES.get(id(connection))
 
 
 class TransactionUsageError(ValueError):
@@ -105,14 +143,24 @@ def transaction(connection: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 
     if connection.in_transaction:
         # Joined, not nested: the owner of the outermost block commits or rolls
-        # back, and this block must not do either on its behalf.
+        # back, and this block must not do either on its behalf. It owns the
+        # scope too, so this block neither creates nor drops one.
         yield connection
         return
 
+    key = id(connection)
+    scope: Dict[str, Any] = {}
+    _SCOPES[key] = scope
     connection.execute("BEGIN IMMEDIATE")
     try:
         yield connection
     except BaseException:
         connection.execute("ROLLBACK")
         raise
-    connection.execute("COMMIT")
+    else:
+        connection.execute("COMMIT")
+    finally:
+        # Dropped by the block that made it, on every exit path, so no scope can
+        # be read by the next transaction on this connection.
+        if _SCOPES.get(key) is scope:
+            del _SCOPES[key]

@@ -377,6 +377,45 @@ def test_a_late_older_head_observation_is_refused_as_evidence_not_a_projection(c
     assert rows(cp, "SELECT head_sha FROM pull_request") == [{"head_sha": SHA_B}]
 
 
+@pytest.mark.parametrize(
+    "state, extra",
+    [
+        ("merged", {"merge_commit_sha": SHA_MERGE}),
+        ("closed", {}),
+        ("open", {}),  # the reopen, from a prior closed
+    ],
+)
+def test_a_late_older_head_is_refused_by_name_on_every_transition(cp, state, extra) -> None:
+    """The staleness of a head is a property of the head, not of the transition.
+
+    ``_plan`` names the transition most-consequential-first, so a delayed merge,
+    close or reopen that also carries an older, different ``head_sha`` used to
+    return before the head-order test the bare ``pr_head_updated`` branch makes.
+    The ``pull_request_head_is_monotonic`` trigger (migrations/0001_initial.sql)
+    still refuses the write, so nothing stale ever landed -- but the caller got a
+    raw ``IntegrityError`` saying only that *some* constraint failed, which is
+    precisely the loss of naming :class:`PullRequestObservationRefused` exists to
+    prevent, and the docstring's contract promises the name "for a head move the
+    provider's own order does not support" on every transition alike.
+    """
+
+    repo = add_repo(cp)
+    observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, at=T0 + 10)
+    if state == "open":  # a reopen is only reachable from a prior close
+        observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, state="closed", at=T0 + 20)
+    before_state = rows(cp, "SELECT state, head_sha, head_observed_at_ms FROM pull_request")
+    before_events = rows(cp, "SELECT seq FROM event")
+
+    with pytest.raises(PullRequestObservationRefused):
+        observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_B, state=state, at=T0 + 5,
+                event_id="evt-late", **extra)
+
+    # Nothing of the observation survives: not the stale head, not the newer
+    # head_observed_at_ms it would have been paired with, not the event.
+    assert rows(cp, "SELECT state, head_sha, head_observed_at_ms FROM pull_request") == before_state
+    assert rows(cp, "SELECT seq FROM event") == before_events
+
+
 def test_a_no_change_observation_appends_nothing(cp) -> None:
     repo = add_repo(cp)
     observe(cp, repo_id=repo, pr_number=1, head_sha=SHA_A, at=T0)

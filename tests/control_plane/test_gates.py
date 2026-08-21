@@ -920,3 +920,61 @@ def test_only_a_named_stage_is_relayed(cp) -> None:
                 cp, gate_id=gate_id, to_stage=stage, recipient="secretary",
                 payload="{}", message_id=f"msg-{stage}", enqueued_at_ms=T0,
             )
+
+
+def test_closing_a_gate_does_not_retire_its_undelivered_relay(cp) -> None:
+    """A close is a fact about the gate only; the relay it enqueued stays live.
+
+    Pinned rather than fixed, because fixing it needs a decision the design does
+    not make. ``outbox.status`` is ``pending``/``delivered``/``acked`` and
+    ``outbox_status_is_forward_only`` admits only forward steps along exactly
+    that ladder (``0001_initial.sql``), so there is no status meaning "nobody
+    wants this message any more" for a close to move the row to; and section 9.6
+    writes the stalled-relay query with no ``closed_at_ms`` predicate, the same
+    way section 9.6 writes :func:`relay_gaps` as the inner join whose coverage
+    hole ``test_an_unpoliced_gate_type_is_silently_never_aged`` pins.
+
+    So the two consequences are asserted here in full: a delivery worker reading
+    the outbox is still told to send a question for a gate that is closed, and
+    :func:`stalled_relays` keeps naming that relay for as long as the database
+    lives -- which is precisely the "alarms forever" failure the section 9.4
+    ``subject_gone`` outcome was introduced to end, reappearing one table over.
+    """
+
+    gate_id = a_gate(cp)
+    enqueue_relay(
+        cp, gate_id=gate_id, to_stage="presented", recipient="secretary",
+        payload='{"question": "force-push?"}', message_id="msg-undelivered",
+        enqueued_at_ms=T0,
+    )
+    close_gate(
+        cp, gate_id=gate_id, outcome="withdrawn", actor_kind="worker",
+        actor_id="worker-7", occurred_at_ms=T0 + MINUTE, recorded_at_ms=T0 + MINUTE,
+    )
+
+    # Half one: the message is still queued for sending, after the question it
+    # asks has been withdrawn.
+    assert outbox_rows(cp, f"gate/{gate_id}/presented") == [
+        ("msg-undelivered", "pending", 0)
+    ]
+
+    # Half two: and it is reported as stalled indefinitely, growing older with
+    # every pass, with no state left in which it can stop being reported.
+    for now in (T0 + 10 * MINUTE, T0 + 600 * MINUTE, T0 + 60_000 * MINUTE):
+        stalled = stalled_relays(cp, now_ms=now, tolerance_ms=2 * MINUTE)
+        assert [(row["gate_id"], row["to_stage"]) for row in stalled] == [
+            (gate_id, "presented")
+        ]
+
+    # The vocabulary really has no exit: the trigger refuses even the closest
+    # thing to a retirement, and no fourth status exists to move to.
+    admitted = {
+        row[0] for row in cp.execute(
+            "SELECT DISTINCT status FROM outbox"
+        ).fetchall()
+    }
+    assert admitted <= {"pending", "delivered", "acked"}
+    with pytest.raises(sqlite3.IntegrityError):
+        cp.execute(
+            "UPDATE outbox SET status = 'cancelled' WHERE message_id = 'msg-undelivered'"
+        )

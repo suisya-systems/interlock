@@ -99,6 +99,16 @@ def tables_of(path: Path) -> set[str]:
         connection.close()
 
 
+def rows_of(path: Path, table: str) -> list[tuple]:
+    """Every row of *table* read back over a fresh connection, to see what committed."""
+
+    connection = raw(path)
+    try:
+        return connection.execute(f"SELECT * FROM {table}").fetchall()
+    finally:
+        connection.close()
+
+
 def version_of(path: Path) -> tuple[int, int]:
     """``(MAX(schema_migration.version), PRAGMA user_version)`` -- the authority and the cheap check."""
 
@@ -814,3 +824,68 @@ def test_rendering_leaves_no_database_behind(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     render_current_schema()
     assert list(tmp_path.iterdir()) == []
+
+
+# --------------------------------------------------------------------------
+# A caller's open transaction is not ours to commit
+# --------------------------------------------------------------------------
+
+
+def test_migrating_a_connection_with_an_open_transaction_is_refused(ledger, db_path):
+    # sqlite3's default isolation_level opens a transaction before DML and ends
+    # it when isolation_level is set to None. Migrating used to make that
+    # assignment blind, so handing over a connection mid-transaction committed
+    # the caller's work as a side effect of migrating.
+    create_production_control_plane(db_path, now_ms=1, migrations_dir=ledger).close()
+    connection = sqlite3.connect(db_path)  # driver default, not autocommit
+    try:
+        connection.execute("INSERT INTO alpha (id) VALUES (7)")
+        assert connection.in_transaction
+        with pytest.raises(ControlPlaneRefusal) as caught:
+            migrate_control_plane(connection, now_ms=2, migrations_dir=ledger)
+        # The message has to say what to do about it, since the caller is the
+        # only one that can decide whether that work should land.
+        assert "commit or roll it back" in str(caught.value)
+        # Still open, so a rollback still undoes it: nothing was decided for the
+        # caller.
+        assert connection.in_transaction
+        connection.rollback()
+    finally:
+        connection.close()
+    assert rows_of(db_path, "alpha") == []
+
+
+def test_a_refused_migration_does_not_commit_the_callers_open_transaction(ledger, tmp_path):
+    # The sharp end: the database is refused (a foreign application_id), and a
+    # refusal that has already persisted somebody's half-finished work is the
+    # opposite of what a refusal means (R3).
+    target = tmp_path / "foreign.sqlite3"
+    setup = raw(target)
+    try:
+        setup.execute("CREATE TABLE scratch (v TEXT)")
+        setup.execute(f"PRAGMA application_id = {SPIKE_APPLICATION_ID}")
+    finally:
+        setup.close()
+
+    connection = sqlite3.connect(target)
+    try:
+        connection.execute("INSERT INTO scratch VALUES ('half-finished')")
+        with pytest.raises(ControlPlaneRefusal):
+            migrate_control_plane(connection, now_ms=2, migrations_dir=ledger)
+        connection.rollback()
+    finally:
+        connection.close()
+    assert rows_of(target, "scratch") == []
+
+
+def test_an_autocommit_connection_is_still_migrated(ledger, db_path):
+    # The refusal is about an open transaction, not about isolation_level: the
+    # ordinary caller that opens its own autocommit connection must still work.
+    create_production_control_plane(db_path, now_ms=1, migrations_dir=ledger).close()
+    write_step(ledger, "0003_gamma.sql", "CREATE TABLE gamma (id INTEGER PRIMARY KEY);\n")
+    connection = raw(db_path)
+    try:
+        migrate_control_plane(connection, now_ms=2, migrations_dir=ledger)
+    finally:
+        connection.close()
+    assert "gamma" in tables_of(db_path)

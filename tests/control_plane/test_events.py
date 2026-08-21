@@ -68,6 +68,7 @@ from claude_org_runtime.control_plane.policy import (
 )
 from claude_org_runtime.control_plane.txn import (
     TransactionUsageError,
+    current_scope,
     in_autocommit,
     transaction,
 )
@@ -467,6 +468,68 @@ def test_a_subscription_added_in_a_later_transaction_does_not_backfill(cp):
         cp, consumer_id="late-subscriber", event_type="ci_observed", added_at_ms=T0 + 2
     )
     assert backlog_depth(cp, consumer_id="late-subscriber") == 0
+
+
+def test_a_subscription_in_a_second_transaction_does_not_inherit_the_first_ones_backfill(cp):
+    """The back-fill decision belongs to ONE transaction, and only that one.
+
+    Regression for a scope that outlived its transaction: the back-fill marker
+    was cleared only when the connection was seen outside *any* transaction, so
+    a registration committed in one ``transaction()`` block left the marker
+    standing, and a subscription opened inside a *second* block found the
+    connection already in a transaction, kept the marker, and back-filled
+    history the subscriber was never meant to see -- a backlog nobody will
+    drain (``docs/production-schema.md`` section 5.4, D-0030).
+    """
+
+    add_run(cp)
+    append(cp, event_id="evt-1")  # seq 1
+
+    with transaction(cp):
+        register_consumer(
+            cp,
+            consumer_id="two-transactions",
+            kind="compute",
+            lease_resource="consumer:two-transactions",
+            registered_at_ms=T0 + 1,
+            registered_from_seq=0,
+            backfill=True,
+        )
+
+    with transaction(cp):
+        subscribe(
+            cp,
+            consumer_id="two-transactions",
+            event_type="ci_observed",
+            added_at_ms=T0 + 2,
+        )
+
+    assert backlog_depth(cp, consumer_id="two-transactions") == 0
+
+
+def test_a_transaction_scope_lives_exactly_as_long_as_its_transaction(cp):
+    """The scope is the boundary itself, not "some transaction is open".
+
+    Two consecutive blocks must not share state, a joined inner block must, and
+    a block that rolls back must leave nothing behind for the next one to read.
+    """
+
+    assert current_scope(cp) is None
+    with transaction(cp):
+        outer = current_scope(cp)
+        assert outer is not None
+        with transaction(cp):  # joined, so the same scope
+            assert current_scope(cp) is outer
+    assert current_scope(cp) is None
+
+    with transaction(cp):
+        assert current_scope(cp) is not outer
+
+    with pytest.raises(RuntimeError):
+        with transaction(cp):
+            current_scope(cp)["events.probe"] = True
+            raise RuntimeError("rolled back")
+    assert current_scope(cp) is None
 
 
 def test_registering_the_same_consumer_twice_is_refused(cp):

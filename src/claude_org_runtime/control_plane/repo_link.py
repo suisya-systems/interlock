@@ -637,24 +637,38 @@ def _plan(
     was_head = str(before["head_sha"])
     head_moved = head_sha != was_head
 
-    if state == "merged" and was_state != "merged":
-        return ("pr_merged", head_moved, False, False)
     if was_state == "merged" and state != "merged":
         raise PullRequestObservationRefused(
             f"{before['pr_id']} is recorded merged and a merge is a fact; an observation "
             f"reporting {state!r} is either a different pull request or a bad read"
         )
+    # The staleness of a head is a property of the head, not of the transition
+    # that happens to carry it, so this is tested BEFORE the transition is named
+    # rather than inside the pr_head_updated branch. A delayed merge, close or
+    # reopen carrying an older, different head_sha is the same late provider read
+    # section 7.2 calls evidence and not a projection -- and the
+    # pull_request_head_is_monotonic trigger (migrations/0001_initial.sql) refuses
+    # the UPDATE either way, so what is at stake here is the *name*: reaching the
+    # trigger leaves the caller a raw IntegrityError saying only that some
+    # constraint failed, which is the loss of naming
+    # PullRequestObservationRefused exists to prevent, and which a watcher cannot
+    # tell apart from a corrupt read of the kind that produced the 2026-08-06
+    # incident. Testing it per-branch instead leaves the hole one branch over.
+    if head_moved and observed_at_ms <= int(before["head_observed_at_ms"]):
+        raise PullRequestObservationRefused(
+            f"{before['pr_id']} head {was_head} was observed at "
+            f"{before['head_observed_at_ms']}; a head move to {head_sha} claimed at "
+            f"{observed_at_ms} with state {state!r} is a late arrival, which is evidence "
+            "and not a projection (section 7.2)"
+        )
+
+    if state == "merged" and was_state != "merged":
+        return ("pr_merged", head_moved, False, False)
     if state == "closed" and was_state == "open":
         return ("pr_closed", head_moved, False, False)
     if state == "open" and was_state == "closed":
         return ("pr_reopened", head_moved, True, False)
     if head_moved:
-        if observed_at_ms <= int(before["head_observed_at_ms"]):
-            raise PullRequestObservationRefused(
-                f"{before['pr_id']} head {was_head} was observed at "
-                f"{before['head_observed_at_ms']}; a head move claimed at {observed_at_ms} is a "
-                "late arrival, which is evidence and not a projection (section 7.2)"
-            )
         return ("pr_head_updated", True, False, False)
     return None
 

@@ -517,6 +517,10 @@ def migrate_control_plane(
     ``applied_at_ms``. The database's own clock is never consulted: there is no
     ``DEFAULT`` on the column and no ``strftime`` anywhere in this module.
 
+    :raises ControlPlaneRefusal: if *path_or_connection* is a connection with a
+        transaction already open. Nothing is applied and nothing is committed:
+        ending that transaction is the caller's decision, not a side effect of
+        migrating.
     :raises MissingStateRefused: if *path_or_connection* is a path with no file.
     :raises MigrationChecksumRefused: if an applied step's bytes have changed.
     :raises DatabaseAheadOfCodeRefused: if the database is ahead of this build.
@@ -530,6 +534,25 @@ def migrate_control_plane(
 
     if isinstance(path_or_connection, sqlite3.Connection):
         connection = path_or_connection
+        # A transaction already open on the caller's connection is refused
+        # before anything else, because the very next line would end it: with
+        # the driver's implicit transaction management on, assigning
+        # isolation_level = None commits whatever is open. That commit is a
+        # write the caller never asked for and cannot see, inside a function
+        # whose whole contract is "one step per transaction, never backwards"
+        # (docs/production-schema.md section 3.2 rule 5, D-0029) -- and it
+        # survives even when migration then refuses, so a refusal would have
+        # persisted somebody's half-finished work, which is the opposite of
+        # what a refusal means here (R3). The caller's transaction is the
+        # caller's to end, so say which two ways there are to end it.
+        if connection.in_transaction:
+            raise ControlPlaneRefusal(
+                "the connection handed to migrate_control_plane has a "
+                "transaction open; commit or roll it back first, because "
+                "putting the connection in autocommit mode for the migration "
+                "would commit that work implicitly -- and it would stay "
+                "committed even if the migration is then refused"
+            )
         # The caller's connection may have been handed to us with Python's
         # implicit transaction management still on; the explicit BEGIN/COMMIT
         # of _apply_step is only honest with isolation_level = None.
