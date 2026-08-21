@@ -77,12 +77,19 @@ def add_session(cp, session_id: str = "sess-1", run_id: str = "run-1", at: int =
         "released_at_ms": None,
     }
     row.update(kwargs)
+    if "binding_phase" not in row:
+        # The schema ties the vocabularies together: only a confirmed binding
+        # may claim an observation. Derive the honest default so existing
+        # cases keep exercising what they were written for.
+        row["binding_phase"] = (
+            "identity_confirmed" if row["observation"] == "observed" else "prepared"
+        )
     cp.execute(
         """
-        INSERT INTO session (session_id, run_id, provider, observation, provider_state,
-                             observation_reason, bound_at_ms, released_at_ms)
-        VALUES (:session_id, :run_id, :provider, :observation, :provider_state,
-                :observation_reason, :bound_at_ms, :released_at_ms)
+        INSERT INTO session (session_id, run_id, provider, binding_phase, observation,
+                             provider_state, observation_reason, bound_at_ms, released_at_ms)
+        VALUES (:session_id, :run_id, :provider, :binding_phase, :observation,
+                :provider_state, :observation_reason, :bound_at_ms, :released_at_ms)
         """,
         {"session_id": session_id, "run_id": run_id, "bound_at_ms": at, **row},
     )
@@ -413,6 +420,55 @@ def test_a_readout_is_never_stored_empty(cp):
 
     add_session(cp, "sess-3", observation="unobserved", provider_state=None,
                 observation_reason="child has not reported yet")
+
+
+def test_the_binding_phase_vocabulary_is_closed(cp):
+    add_run(cp)
+    with pytest.raises(sqlite3.IntegrityError):
+        add_session(cp, "sess-1", binding_phase="adopted")
+
+
+def test_a_pre_readback_binding_may_not_claim_an_observation(cp):
+    # D-0024 / item 2: the binding is committed before the process exists, so a
+    # 'prepared' or 'spawned' row claiming an observation would record a
+    # read-back that never happened -- and a confirmed row without one would
+    # discard the read-back D-0027 makes mandatory.
+    add_run(cp)
+    for phase in ("prepared", "spawned"):
+        with pytest.raises(sqlite3.IntegrityError):
+            add_session(cp, f"sess-{phase}", binding_phase=phase,
+                        observation="observed", provider_state="running")
+    with pytest.raises(sqlite3.IntegrityError):
+        add_session(cp, "sess-confirmed", binding_phase="identity_confirmed",
+                    observation="unobserved", provider_state=None,
+                    observation_reason="never read back")
+
+    add_session(cp, "sess-1", binding_phase="prepared", observation="unobserved",
+                provider_state=None, observation_reason="spawn not yet attempted")
+
+
+def test_the_binding_phase_only_moves_forward(cp):
+    add_run(cp)
+    add_session(cp, "sess-1", binding_phase="prepared", observation="unobserved",
+                provider_state=None, observation_reason="spawn not yet attempted")
+
+    # The forward walk is the legal one: prepared -> spawned -> confirmed.
+    cp.execute("UPDATE session SET binding_phase = 'spawned' WHERE session_id = 'sess-1'")
+    with pytest.raises(sqlite3.IntegrityError):
+        cp.execute("UPDATE session SET binding_phase = 'prepared' WHERE session_id = 'sess-1'")
+    cp.execute(
+        "UPDATE session SET binding_phase = 'identity_confirmed', observation = 'observed',"
+        " provider_state = 'running', observation_reason = NULL"
+        " WHERE session_id = 'sess-1'"
+    )
+    for backwards in ("prepared", "spawned"):
+        with pytest.raises(sqlite3.IntegrityError):
+            cp.execute(
+                "UPDATE session SET binding_phase = ?, observation = 'unobserved',"
+                " provider_state = NULL, observation_reason = 'rewound'"
+                " WHERE session_id = 'sess-1'",
+                (backwards,),
+            )
 
 
 def test_a_timestamp_that_is_not_an_integer_is_refused(cp):
@@ -824,8 +880,9 @@ def test_a_dangling_reference_is_refused(cp, db_path):
     # leave a session pointing at no run. Recovery must not read that as state.
     raw = sqlite3.connect(db_path)
     raw.execute(
-        "INSERT INTO session (session_id, run_id, provider, observation, provider_state,"
-        " bound_at_ms) VALUES ('sess-1', 'ghost-run', 'stub', 'observed', 'running', ?)",
+        "INSERT INTO session (session_id, run_id, provider, binding_phase, observation,"
+        " provider_state, bound_at_ms) VALUES ('sess-1', 'ghost-run', 'stub',"
+        " 'identity_confirmed', 'observed', 'running', ?)",
         (T0,),
     )
     raw.commit()

@@ -891,6 +891,7 @@ def op_bind(ctx: Context) -> None:
             "session_id": param("session_id"),
             "run_id": param("run_id"),
             "provider": param("provider"),
+            "binding_phase": param("binding_phase"),
             "observation": param("observation"),
             "provider_state": param("provider_state"),
             "bound_at_ms": param("bound_at_ms"),
@@ -908,6 +909,10 @@ def op_bind(ctx: Context) -> None:
             "session_id": session_id,
             "run_id": ctx.run_id,
             "provider": "harness",
+            # The spike roles' bind is a one-step bind of an already-observed
+            # session; the staged prepared -> spawned -> identity_confirmed
+            # walk is the session-start operation's (issue #18), not this one's.
+            "binding_phase": "identity_confirmed",
             "observation": "observed",
             "provider_state": "running",
             "bound_at_ms": now_ms,

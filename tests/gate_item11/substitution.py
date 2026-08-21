@@ -106,6 +106,12 @@ def session_row(
         "session_id": readout.session_id,
         "run_id": run_id,
         "provider": provider,
+        # This harness binds a session it has already asked the provider about,
+        # so the spawn has happened; whether the identity is *confirmed* is
+        # exactly whether the readout observed anything (the schema ties
+        # 'identity_confirmed' to 'observed' by CHECK). The staged pre-spawn
+        # walk is the session-start orchestration's (issue #18), not S3's.
+        "binding_phase": "identity_confirmed" if word == "observed" else "spawned",
         "observation": word,
         "provider_state": readout.provider_state,
         "observation_reason": readout.could_not_observe_reason,
@@ -145,6 +151,7 @@ def bind_session(
             "session_id": param("session_id"),
             "run_id": param("run_id"),
             "provider": param("provider"),
+            "binding_phase": param("binding_phase"),
             "observation": param("observation"),
             "provider_state": param("provider_state"),
             "observation_reason": param("observation_reason"),

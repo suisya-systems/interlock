@@ -80,7 +80,7 @@ APPLICATION_ID = 0x494C4B35
 
 #: ``PRAGMA user_version``. Bumped whenever ``spike_schema.sql`` changes shape.
 #: A database at any other revision is refused: there is no migration (D-0026).
-SCHEMA_REVISION = 1
+SCHEMA_REVISION = 2
 
 #: The six tables of the slice, in the order Issue ``#12`` names them. Every one
 #: of them must be present for a database to be usable; a database missing one
@@ -106,8 +106,8 @@ RECONSTRUCTION_QUERIES: Mapping[str, str] = {
     # ``session_one_active_binding_per_run``); this query is how a recovering
     # supervisor reads it back.
     "active_sessions": """
-        SELECT session_id, run_id, provider, observation, provider_state,
-               observation_reason, bound_at_ms
+        SELECT session_id, run_id, provider, binding_phase, observation,
+               provider_state, observation_reason, bound_at_ms
           FROM session
          WHERE released_at_ms IS NULL
          ORDER BY bound_at_ms, session_id
