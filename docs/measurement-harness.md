@@ -34,8 +34,13 @@ holds no lease and no writer epoch, so even a bug cannot produce a fenced write.
 AC-9 is stated "per 100 worker runs", which is a normalisation, not a cohort. The cohort has to be
 decided, and the review named the choice: started, completed, or canary-owned.
 
-> **The cohort is: runs that reached a terminal status inside the report period, and that were
-> Interlock-owned for their entire life.**
+> **The cohort is: runs whose *entire lifetime* falls inside the report period — created at or after
+> `period_start_ms` and terminal before `period_end_ms` — and that were Interlock-owned throughout.**
+
+The "entire lifetime" clause is doing real work and is not a restatement of "terminal in period". A
+run that started before the window and finished inside it *is* terminal in the window, and it is
+excluded — see `started_before_period` below. Stating the cohort as terminal-in-period alone would
+leave two defensible readings and therefore two different denominators.
 
 Three reasons, in order of weight:
 
@@ -51,8 +56,8 @@ Three reasons, in order of weight:
    runs to roughly 1,576 dispatcher ticks per 100 runs. A comparison against a started-run cohort
    would not be against that number.
 
-Runs excluded from the cohort are **not** silently dropped. Every run whose terminal transition is
-absent or outside the period appears in an `excluded` bucket with a reason:
+Runs excluded from the cohort are **not** silently dropped. Every run that touches the period
+without lying wholly inside it appears in an `excluded` bucket with a reason:
 `in_flight_at_period_end`, `started_before_period` (its prompts are partly outside the window),
 `v1_owned`, `terminal_status_unknown`.
 
@@ -65,17 +70,27 @@ things, which is how a rate silently stops meaning anything.
 
 ### 2.2 What one "AI prompt" is
 
-> **One AI prompt = one Dispatcher AI *invocation*: one incident-triggered model turn boundary.**
+> **One AI prompt = one *model response*: one assistant turn returned by the provider.**
+> AC-9's numerator is `SUM(model_response_count)` over the cohort's invocations.
 
-Concretely: one row in the invocation ledger (§2.3), identified by `invocation_id`.
+The unit is chosen to match the baseline's, and getting it wrong is easy in *both* directions:
 
-- **Transport retries of the same invocation count once.** A 429 followed by a successful retry is
-  one prompt; counting it as two would make a flaky network look like an AI workload increase.
-- **Tool-call round trips inside one invocation do not add prompts.** This is the trap that makes or
-  breaks the comparison: the v1 baseline records **3,531 unique assistant/model responses** and
-  **4,960 AI tool calls** as *separate* figures. The comparable numerator is the response count, not
-  the tool-call count. A harness that counted tool calls would be comparing 4,960 against a number
-  built from invocations and would report a reduction that does not exist.
+- **Not the tool-call count.** The v1 baseline records **3,531 unique assistant/model responses** and
+  **4,960 AI tool calls** as *separate* figures. A harness counting tool calls would compare against
+  4,960 and report a reduction that does not exist.
+- **Not the agent invocation either.** One incident-triggered Dispatcher AI invocation that makes
+  three tool round trips returns **four** model responses. Counting that invocation as one prompt
+  would compare a coarser Interlock unit against a finer v1 numerator and **overstate the reduction**
+  by exactly the tool-use factor — the same error as the first, with the sign flipped. It would also
+  let an invocation's summed `output_tokens` exceed a per-request `max_output_tokens`, which is how
+  the mismatch shows up as an arithmetic contradiction rather than merely a debatable choice.
+- **Transport retries do not add a response.** A 429 followed by a successful retry produced one
+  assistant turn; counting it as two would make a flaky network look like AI workload.
+
+The invocation is still counted and reported, as `invocation_count` — it is the AC-1 quantity ("zero
+AI turns absent incidents" is a statement about invocations, not responses) and the natural unit for
+"how often did an incident need the AI at all". Both series are printed; neither is presented as the
+other.
 - **AC-1 is the same measurement from the other side.** "Zero AI turns absent incidents" is the
   assertion that every invocation row has an `incident_id`; the harness reports any row without one
   as an AC-1 violation rather than folding it into the count.
@@ -107,6 +122,10 @@ CREATE TABLE ai_invocation (
     -- time, so it is present even when no usage record ever comes back -- which
     -- is the only reason a missing invocation can be bounded at all (2.4).
     max_output_tokens INTEGER,
+    -- Assistant turns the provider returned inside this invocation: 1 plus one
+    -- per tool round trip. AC-9's numerator sums this column, so that Interlock
+    -- is counted on the same basis as the baseline's 3,531 model responses.
+    model_response_count INTEGER NOT NULL DEFAULT 1,
     attempt_count     INTEGER NOT NULL DEFAULT 1,
     started_at_ms     INTEGER NOT NULL,
     finished_at_ms    INTEGER,
@@ -120,8 +139,13 @@ CREATE TABLE ai_invocation (
     CHECK ((usage_status = 'reported') = (output_tokens IS NOT NULL)),
     CHECK (output_tokens IS NULL OR output_tokens >= 0),
     CHECK (max_output_tokens IS NULL OR max_output_tokens > 0),
+    -- The ceiling is PER REQUEST, and an invocation makes model_response_count
+    -- of them, so the invocation's ceiling is the product. Comparing the summed
+    -- output against a single request's cap would fail on every tool-using
+    -- invocation.
     CHECK (output_tokens IS NULL OR max_output_tokens IS NULL
-           OR output_tokens <= max_output_tokens),
+           OR output_tokens <= max_output_tokens * model_response_count),
+    CHECK (model_response_count >= 1),
     CHECK (attempt_count >= 1),
     CHECK (finished_at_ms IS NULL OR finished_at_ms >= started_at_ms)
 );
@@ -147,7 +171,7 @@ labels each with what kind of number it is:
 |---|---|---|
 | **Coverage** | `count(usage_status='reported') / count(*)` over the cohort's invocations, printed as a percentage with both counts | Fact |
 | **Observed reduction** | Computed over covered invocations only, explicitly labelled "over N of M invocations" | Fact about the covered subset |
-| **Bounded reduction** | Missing invocations imputed at each one's **`max_tokens` ceiling** — the per-invocation output cap the caller sent to the provider | **A genuine lower bound on the reduction** |
+| **Bounded reduction** | Missing invocations imputed at **`max_output_tokens × model_response_count`** — the caller's own per-request output cap, times the number of responses the invocation made | **A genuine lower bound on the reduction** |
 | **Sensitivity reduction** | Missing invocations imputed at the **p95 of the covered distribution** | **An assumption, not a bound** |
 
 The distinction between the last two rows is load-bearing and was got wrong on the first pass, so it
@@ -157,9 +181,9 @@ correlates with large responses — a truncated or aborted response is exactly t
 loses its usage record and runs long. Calling a p95 imputation "conservative" and then judging AC-9
 by it can pass a target that the real numbers fail.
 
-What *is* a bound is the request's own `max_tokens`: the provider cannot return more output tokens
-than the caller allowed, so imputing a missing invocation at its recorded ceiling cannot understate
-it. That is the figure the acceptance judgement uses. It is loose — usually far above the real
+What *is* a bound is the request's own ceiling: the provider cannot return more output tokens than
+the caller allowed, so imputing a missing invocation at `max_output_tokens × model_response_count`
+cannot understate it. That is the figure the acceptance judgement uses. It is loose — usually far above the real
 value — and being loose in the safe direction is the property being bought. Where an invocation has
 no recorded `max_output_tokens`, it is not imputed at all: it is reported as `unbounded_missing`,
 and a report with a non-zero `unbounded_missing` count **cannot support an AC-9 acceptance claim**

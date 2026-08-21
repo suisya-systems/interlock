@@ -1663,25 +1663,33 @@ design review found the denominator, the prompt unit, the period-crossing rule a
 missing-telemetry rule all undefined, and noted that treating a missing usage figure as zero
 overstates the reduction in exactly the criterion the reduction is judged by.
 
-**Decision.** The **cohort** is runs that reached a terminal status inside the report period and were
-Interlock-owned for their entire life. A started-run cohort is right-censored by construction and
+**Decision.** The **cohort** is runs whose **entire lifetime** falls inside the report period —
+created at or after its start and terminal before its end — and that were Interlock-owned
+throughout. Stating it as "terminal in period" alone leaves two defensible readings and therefore
+two denominators; the lifetime clause is what makes `started_before_period` an exclusion rather than
+a contradiction. A started-run cohort is right-censored by construction and
 its bias always flatters the target; ownership is decided once at run start (`D-0013`) so the second
 clause is automatic and is asserted rather than assumed; and the v1 baseline normalises *completed*
 runs, so a started-run cohort would not be comparable to it. Runs outside the cohort go to an
 `excluded` bucket with a reason — including `started_before_period`, which is excluded from the rate
 rather than contributing a partial numerator to a full denominator.
 
-**One AI prompt is one Dispatcher AI invocation**: one row in `ai_invocation`. Transport retries of
-one invocation count once; **tool-call round trips inside one invocation do not add prompts.** The
-comparable v1 numerator is its 3,531 unique assistant/model responses, not its 4,960 tool calls — a
-harness counting tool calls would report a reduction that does not exist. Cache-read tokens are
-neither input nor output tokens (`ACCEPTANCE.md` §5) and never enter the arithmetic.
+**One AI prompt is one model response** — one assistant turn returned by the provider — so AC-9's
+numerator is `SUM(model_response_count)` over the cohort's invocations. The unit matches the
+baseline's, and it is easy to get wrong in both directions: counting **tool calls** compares against
+v1's 4,960 rather than its 3,531 model responses and reports a reduction that does not exist, while
+counting whole **agent invocations** compares a coarser unit against a finer one and *overstates*
+the reduction by the tool-use factor. Transport retries of one request add no response. The
+invocation is still counted and printed as `invocation_count`, because AC-1 is a statement about
+invocations, not responses. Cache-read tokens are neither input nor output tokens (`ACCEPTANCE.md`
+§5) and never enter the arithmetic.
 
 **Coverage and the excluded-reason breakdown are required output. A reduction rate printed without
 them is not a valid report.** `ai_invocation.usage_status IN ('reported','partial','unavailable')`
 makes a missing usage record a named fact; the report prints coverage, an observed reduction over
 covered invocations only, a **bounded** reduction imputing each missing invocation at its recorded
-`max_output_tokens` ceiling, and a **sensitivity** reduction imputing at the covered p95.
+`max_output_tokens × model_response_count` ceiling, and a **sensitivity** reduction imputing at the
+covered p95.
 
 Only the bounded figure supports an acceptance claim, and the distinction is load-bearing: **a
 percentile of the observed sample does not bound the unobserved values.** A missing invocation may

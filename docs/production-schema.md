@@ -689,13 +689,19 @@ CREATE TABLE pull_request (
 
 CREATE UNIQUE INDEX pull_request_identity ON pull_request(repo_id, pr_number);
 
--- merged and closed are terminal; a reopened PR is a provider-side event we
--- record as a new observation, not a walk backwards through this column.
-CREATE TRIGGER pull_request_state_is_forward_only
+-- ONLY 'merged' is terminal. A closed, unmerged PR can be reopened on the
+-- provider with the same repository and number, and forbidding that here would
+-- leave the reopened PR permanently recorded as closed -- and, because the
+-- watcher scope is retired when a PR goes terminal, permanently unwatched too.
+-- So closed -> open is admitted, and it is the projection of a real provider
+-- event rather than an edit: the update clears closed_at_ms (the CHECK above
+-- requires it) and re-activates the scope by clearing watcher_scope.retired_at_ms
+-- in the same transaction.
+CREATE TRIGGER pull_request_merge_is_terminal
 BEFORE UPDATE OF state ON pull_request
-WHEN OLD.state IN ('merged', 'closed') AND NEW.state <> OLD.state
+WHEN OLD.state = 'merged' AND NEW.state <> 'merged'
 BEGIN
-    SELECT RAISE(ABORT, 'a merged or closed pull request does not reopen in this table');
+    SELECT RAISE(ABORT, 'a merged pull request does not reopen; its merge is a fact');
 END;
 ```
 
@@ -703,6 +709,12 @@ END;
 repository. That settles the "recreated PR" case the review raised without any extra machinery: a
 recreated PR has a new number and is therefore a new row, and the old row remains as the record of
 what happened.
+
+**A reopen is a projection, not an edit**, and it has a consequence beyond this table: §8.2 retires
+a watcher scope when its PR goes terminal, so a reopen must clear `watcher_scope.retired_at_ms` in
+the same transaction that clears `closed_at_ms`. Without that the PR is watched again in name only.
+The reconcile pass's scope-coverage query (§8.4) is the backstop that catches it if the transaction
+is ever written incompletely.
 
 `head_event_seq` is what makes a head update auditable — the projection rule in §6.3 turns on
 `head_sha`, so the event that moved it must be identifiable, not merely a timestamp.
@@ -1007,9 +1019,16 @@ WHEN NOT EXISTS (
      WHERE t.seq = NEW.stage_seq
        AND t.gate_id = NEW.gate_id
        AND t.to_stage = NEW.stage
-       AND t.transition_kind = 'advance')
+       -- 'open' is admitted alongside 'advance' because the opening transition
+       -- is what establishes the projection in the first place. Admitting only
+       -- 'advance' makes gate creation impossible: the gate is inserted with a
+       -- null stage_seq, the 'open' transition is inserted, and nothing may then
+       -- point the projection at it -- and the transition table has no
+       -- received -> received advance to reach instead.
+       AND t.transition_kind IN ('open', 'advance'))
 BEGIN
-    SELECT RAISE(ABORT, 'gate.stage is a projection; it may only name an advance transition of this gate');
+    SELECT RAISE(ABORT,
+        'gate.stage is a projection; it may only name an open or advance transition of this gate');
 END;
 
 CREATE TRIGGER gate_stage_seq_is_monotonic
@@ -1285,12 +1304,33 @@ CREATE TABLE policy_revision (
 CREATE TABLE policy_detection_latency (
     revision_id      INTEGER NOT NULL REFERENCES policy_revision(revision_id),
     incident_class   TEXT    NOT NULL,
-    tolerance_ms     INTEGER NOT NULL,   -- T: how long the condition may persist
+    threshold_kind   TEXT    NOT NULL,
+    threshold_value  INTEGER NOT NULL,
     budget_ms        INTEGER NOT NULL,   -- L: onset-to-alarm ceiling; T + P <= L
 
     PRIMARY KEY (revision_id, incident_class),
-    CHECK (tolerance_ms >= 0 AND budget_ms > 0),
-    CHECK (tolerance_ms <= budget_ms)
+    -- T is not always a duration, and a single tolerance_ms column cannot say
+    -- so. Three of the classes in time-base-policy.md section 3.2 are not
+    -- absolute times at all: watcher_silence is a multiple of THAT SCOPE's
+    -- expected_interval_ms, lease_orphan is a multiple of the lease's own TTL,
+    -- and watcher_error_streak is a count of consecutive failures with no
+    -- duration in it. Precomputing any of them into milliseconds would bake one
+    -- scope's interval into a global row and silently mis-age every other scope.
+    --
+    --   'absolute_ms'             -- T = threshold_value, in milliseconds
+    --   'scope_interval_multiple' -- T = threshold_value * watcher_scope.expected_interval_ms
+    --   'lease_ttl_multiple'      -- T = threshold_value * (expires_at_ms - acquired_at_ms)
+    --   'consecutive_count'       -- T is a COUNT, not a duration; the budget runs
+    --                                from the threshold_value-th consecutive failure
+    CHECK (threshold_kind IN ('absolute_ms', 'scope_interval_multiple',
+                              'lease_ttl_multiple', 'consecutive_count')),
+    CHECK (threshold_value >= 0),
+    CHECK (budget_ms > 0),
+    -- The T + P <= L invariant is only checkable in DDL for absolute rows. For
+    -- the relative kinds it is a PER-SUBJECT obligation evaluated at reconcile
+    -- time, because T depends on the subject's own interval or TTL -- see the
+    -- policy_budget_violation pass below.
+    CHECK (threshold_kind <> 'absolute_ms' OR threshold_value <= budget_ms)
 );
 
 CREATE TABLE policy_gate_stage_tolerance (
@@ -1319,6 +1359,13 @@ CREATE TABLE policy_gate_stage_owner (
 
 The detector joins the **currently effective** revision; a report joins the revision that was
 effective over its period. Rows are never updated or deleted — a change is a new `revision_id`.
+
+Because a relative threshold's `T` is only known per subject, the reconcile pass carries one more
+deterministic check — **`policy_budget_violation`**: for every live subject of a relative class,
+assert `T(subject) + P <= L`. A watcher scope registered with an `expected_interval_ms` so large
+that three missed polls exceed the `watcher_silence` budget is a misconfiguration that would
+otherwise present as a detector that is quietly slower than its stated ceiling for that one scope.
+Reporting it as its own incident class keeps the budget an assertion rather than an aspiration.
 
 ---
 
@@ -1353,6 +1400,10 @@ prepared, and the load-bearing constraints were exercised directly:
 | A rollup drops out of the projection once a fine-grained scope exists (§6.3 rule 3) | `ci_current_verdict` returns only the `check_suite` row |
 | A gate cannot be created already claiming a projection (§9.2) | Opening at `presented`, naming a `stage_seq`, or opening already closed all abort |
 | The relay-gap detector emits one row per gate with two policy revisions on record (§9.6) | 1 row, not 2 |
+| A gate can be opened end to end: create with a null projection, append the `open` transition, then point the projection at it (§9.2) | Accepted — and the projection still cannot claim a stage no transition reached, nor be asserted at creation |
+| A closed, unmerged PR reopens; a merged one does not (§7.2) | `closed → open` accepted with `closed_at_ms` cleared; `merged → open` aborts |
+| A scope-relative multiple, a consecutive-failure count and a TTL multiple all store losslessly, and an absolute `T` above its own budget is refused (§10) | All four rows land; the over-budget row and an unknown `threshold_kind` both raise |
+| An invocation's output-token ceiling scales with its response count ([`measurement-harness.md`](./measurement-harness.md) §2.3) | 3000 tokens over 4 responses at a 1024 cap is accepted; the same 3000 over 1 response aborts |
 
 Two things this does **not** establish, and they are the reasons it is not a substitute for the
 implementation Issue's tests. It does not exercise the `T + P ≤ L` timing behaviour, which needs the

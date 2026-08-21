@@ -78,8 +78,16 @@ For each incident class, three quantities:
   is a statement about the work, not about our machinery: a relay that has not happened in ten
   seconds is not late.
 - **`P` — reconcile period.** How often the deterministic pass evaluates the predicate.
-- **`L` — budget.** The ceiling on onset-to-alarm, where "onset" is when the condition first became
-  true.
+- **`L` — budget.** The ceiling on **onset-to-alarm**.
+
+> **Onset is the moment the condition begins — the state entry — not the moment it crosses `T`.**
+
+There is exactly one definition of onset and this is it. It is used by the budget arithmetic below,
+by the fixture harness's `onset_offset_ms`
+([`measurement-harness.md`](./measurement-harness.md) §3.2), and by every latency figure in a report.
+Defining it as the `T` crossing instead would double-count the tolerance: a `received` gate with
+`T = 3 min` inside an `L = 5 min` budget could then be alarmed at minute 8 and still be judged
+inside its ceiling. `T` is the part of `L` the work is *entitled* to; it is not a head start on it.
 
 The pass can only notice a crossing at its next run, so the worst case is that the condition crosses
 `T` immediately after a pass and waits a full period:
@@ -93,18 +101,25 @@ backstop. `L` is the guarantee that holds when the event path is the thing that 
 
 ### 3.2 The classes
 
-| Incident class | What crossed | `T` | `L` | Basis |
+`T`'s **kind** is part of the policy row, because three of these are not absolute durations:
+`watcher_silence` scales with the scope's own poll interval, `lease_orphan` with the lease's own
+TTL, and `watcher_error_streak` is a count with no duration in it at all. The
+`policy_detection_latency.threshold_kind` column carries which — see
+[`production-schema.md`](./production-schema.md) §10. Precomputing a relative threshold into
+milliseconds would bake one scope's interval into a row every other scope also reads.
+
+| Incident class | What crossed | `T` (kind) | `L` | Basis |
 |---|---|---|---|---|
-| `relay_gap` (gate stage) | A gate sat in a relay stage past its stage tolerance | per stage, §4 | **5 min** | v1's relay-gap detector ran on a 3-minute loop; 5 minutes is a non-regression with headroom for one missed pass |
-| `relay_delivery_stall` | A gate relay was enqueued and not acked | 2 min | **5 min** | Same budget; the stall is a delivery problem, detected on the same pass |
-| `ci_outcome_undrained` | A CI outcome is on the spine and its consumer has not drained it | 3 min | **5 min** | The canary's run completes via a PR (`#64`); a completion the organisation learns about later than v1 did is the AC-10 regression |
-| `consumer_backlog` | Any consumer's head-of-line age exceeded tolerance | 5 min | **10 min** | Generalisation of the above for non-CI consumers; a backlog is a slower-moving fact than a single missed relay |
-| `watcher_silence` | A watcher stopped attempting for a scope | `3 × expected_interval_ms` | **10 min** | `tools/relay_scan.py` found its equivalent failure after **20 days**; any bounded number is the improvement, and three missed polls distinguishes a stopped watcher from a slow one |
-| `watcher_error_streak` | A watcher is attempting and only failing | 5 consecutive errors | **10 min** | A separate class from silence because the remedy differs (a broken credential, not a dead process) |
-| `watcher_scope_uncovered` | An enabled scope has no liveness row at all | 0 | **10 min** | There is nothing to wait for: an unwatched scope is wrong the moment it exists |
-| `session_no_evidence` | A session produced no activity evidence past tolerance | 10 min | **15 min** | `NO_ACTIVITY_EVIDENCE` is **not an anomaly** (`D-0005`, `D-0006`); this class raises an incident for *assessment*, never a verdict, and the tolerance is deliberately generous because the p90 run is 2.55 h and quiet stretches are ordinary |
-| `observation_unavailable` | The observation path itself failed | 5 min | **10 min** | `D-0006`: an observation outage must not be able to masquerade as a fleet-wide worker failure, so it is its own class with its own alarm |
-| `lease_orphan` | A lease expired with work still attributed to its holder | 1 × lease TTL | **2 × lease TTL** | Expressed in TTLs because the TTL is the thing that defines staleness here |
+| `relay_gap` (gate stage) | A gate sat in a relay stage past its stage tolerance | per stage, §4 (`absolute_ms`) | **5 min** | v1's relay-gap detector ran on a 3-minute loop; 5 minutes is a non-regression with headroom for one missed pass |
+| `relay_delivery_stall` | A gate relay was enqueued and not acked | 2 min (`absolute_ms`) | **5 min** | Same budget; the stall is a delivery problem, detected on the same pass |
+| `ci_outcome_undrained` | A CI outcome is on the spine and its consumer has not drained it | 3 min (`absolute_ms`) | **5 min** | The canary's run completes via a PR (`#64`); a completion the organisation learns about later than v1 did is the AC-10 regression |
+| `consumer_backlog` | Any consumer's head-of-line age exceeded tolerance | 5 min (`absolute_ms`) | **10 min** | Generalisation of the above for non-CI consumers; a backlog is a slower-moving fact than a single missed relay |
+| `watcher_silence` | A watcher stopped attempting for a scope | 3 (`scope_interval_multiple`) | **10 min** | `tools/relay_scan.py` found its equivalent failure after **20 days**; any bounded number is the improvement, and three missed polls distinguishes a stopped watcher from a slow one |
+| `watcher_error_streak` | A watcher is attempting and only failing | 5 (`consecutive_count`) | **10 min** | A separate class from silence because the remedy differs (a broken credential, not a dead process) |
+| `watcher_scope_uncovered` | An enabled scope has no liveness row at all | 0 (`absolute_ms`) | **10 min** | There is nothing to wait for: an unwatched scope is wrong the moment it exists |
+| `session_no_evidence` | A session produced no activity evidence past tolerance | 10 min (`absolute_ms`) | **15 min** | `NO_ACTIVITY_EVIDENCE` is **not an anomaly** (`D-0005`, `D-0006`); this class raises an incident for *assessment*, never a verdict, and the tolerance is deliberately generous because the p90 run is 2.55 h and quiet stretches are ordinary |
+| `observation_unavailable` | The observation path itself failed | 5 min (`absolute_ms`) | **10 min** | `D-0006`: an observation outage must not be able to masquerade as a fleet-wide worker failure, so it is its own class with its own alarm |
+| `lease_orphan` | A lease expired with work still attributed to its holder | 1 (`lease_ttl_multiple`) | **2 × lease TTL** | Expressed in TTLs because the TTL is the thing that defines staleness here |
 
 ### 3.3 The reconcile interval
 
@@ -117,6 +132,14 @@ The binding constraint is the smallest `L - T` across the classes the pass serve
 | `ci_outcome_undrained` | 2 min |
 | `watcher_scope_uncovered` | 10 min |
 | everything else | ≥ 5 min |
+
+For the three relative classes, `L - T` is **not a constant** — it depends on the subject's own
+interval or TTL — so `T + P ≤ L` is asserted per subject at reconcile time rather than read off this
+table. A subject that violates it is a misconfiguration and raises `policy_budget_violation`
+([`production-schema.md`](./production-schema.md) §10). With the 10-minute `watcher_silence` budget
+and `P = 120 s`, the constraint bounds a scope's `expected_interval_ms` at
+`(600 000 − 120 000) / 3 ≈ 160 s`; a scope registered slower than that is reported rather than
+silently under-served.
 
 > **The reconcile period `P` is 120 seconds.**
 
@@ -140,10 +163,11 @@ hold, so the implementation may start simple and add the multiple when the pass 
 
 ### 3.4 Boundary conditions
 
-- **Onset is the crossing of `T`, not the start of the state.** A gate entering `received` is not an
-  onset; it becomes one `T` later. Every latency figure in [`measurement-harness.md`](./measurement-harness.md)
-  uses this definition, and it is why a report can distinguish "detected late" from "was legitimately
-  slow".
+- **Onset is the state entry** (§3.1), so a gate entering `received` is an onset immediately and its
+  clock is running from that moment. The distinction between "detected late" and "was legitimately
+  slow" is still available, and it is `T`: a report reads the alarm's age against both `T` and `L`,
+  so a detection at `T + ε` is prompt and a detection past `L` is a regression, without either
+  number having to move.
 - **A condition that resolves before the next pass is never detected, and that is correct.** It is
   not a miss. AC-10's miss counter (see the measurement document) counts only conditions that
   persisted past their budget, because a self-resolving condition has no incident to raise.
