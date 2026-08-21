@@ -1355,7 +1355,11 @@ parameter, never the database's; and every window is half-open `[start, end)`.
 - Suspension is expressed by a run status the predicates exclude, not by suppressing a tolerance:
   exclusion by status is auditable, a suppressed tolerance is not.
 - Changing any number is a new `policy_revision`, so a past report can be recomputed under the
-  tolerances it was actually judged by.
+  tolerances it was actually judged by. The corollary is a rule every reader must follow: **a
+  `policy_*` join without a `revision_id` predicate is a defect.** Omitting it matches every
+  historical tolerance at once, so the detector emits one incident per revision ever recorded and
+  some of them alarm on a tolerance that was retired. Detectors bind the revision effective at
+  `:now_ms`; reports bind the revision effective over their period.
 - These are **decisions, not measurements**, in the sense of this file's note on numbers. The only
   measured input is the 2026-07-18…2026-07-25 baseline.
 
@@ -1416,7 +1420,7 @@ observation overwrite a newer one — reporting a red PR as green because the re
 slower, which is `D-0006`'s verdict honesty violated in the most direct way available.
 
 **Decision.** A CI observation's identity is
-`(provider, repo_id, pr_number, head_sha, check_scope, scope_id, attempt)`, enforced by a unique
+`(provider, repo_id, pr_number, head_sha, check_scope, scope_id, attempt, verdict)`, enforced by a unique
 index on `ci_observation` and rendered as the event's `dedup_key` so a re-poll is an idempotent
 no-op at the first statement of the append transaction. `head_sha` is a full 40-character lowercase
 SHA; an abbreviated SHA is not an identity.
@@ -1439,6 +1443,14 @@ eligible evidence" rather than a pass.
 - Storing rather than overwriting late arrivals means the table grows with evidence that never
   affects a projection. That is the intended trade — `Q-0006` governs what is eventually done about
   it.
+- **`verdict` is part of the identity**, without which a fetch failure recorded as `indeterminate`
+  and a later successful poll of the *same* attempt collide: the recovery becomes an idempotent
+  no-op and the PR stays projected `indeterminate` with the real verdict discarded. With it, a
+  repeat of the same answer is still refused and a changed answer is a new observation. The cost is
+  that a flapping provider appends a row per flap, which is genuine evidence rather than noise.
+- The rollup's subordinate eligibility is enforced **in the `ci_current_verdict` view**, not only in
+  prose: a view that returned a coarse rollup beside the fine-grained scopes would let a stale
+  `failed` dominate the severity fold while every real check is green.
 - Multi-provider support is not designed in: `provider` is `CHECK`ed to `'github'` alone, matching
   `#64`'s statement that `gh` is the interface to GitHub and gate item 11's thin-seam target. A
   second provider widens the `CHECK` in a migration step and brings its substitution test then.
@@ -1513,6 +1525,15 @@ with its old epoch matches nothing; the refusal is recorded as an `action` row i
 never silently dropped.
 
 **Consequences.**
+- `last_success_at_ms` and `last_error_at_ms` are **history and survive the result that did not
+  produce them**, so their constraints are implications rather than biconditionals. Tying either to
+  `last_result` both ways would abort the first success-after-error and the first error-after-success
+  — every recovery and every failure, which is precisely the alternation the table exists to record.
+- The heartbeat is an **upsert**, not an `UPDATE`. A newly registered scope has no row, so a bare
+  `UPDATE` affects zero rows on every scope's first heartbeat — and zero rows is also how a stale
+  writer is refused, so bootstrap would be permanently indistinguishable from rejection. The insert
+  arm carries the same lease fence, and the two remaining causes of zero rows are disambiguated by
+  one follow-up read and recorded in the refusal.
 - Three distinct incident classes fall out and are kept distinct because their remedies differ:
   `watcher_silence` (a stopped process), `watcher_error_streak` (a broken credential — attempting but
   only failing), and `watcher_scope_uncovered` (a roster entry with no liveness row at all).
@@ -1570,6 +1591,13 @@ The terminal taxonomy is closed: `answered_and_forwarded`, `withdrawn`, `subject
 - A human answering a question is an **actor, not a writer**: the transition is appended through
   Dispatcher Core, because admissibility is a deterministic check and `D-0008` puts deterministic
   evaluation in Core's row.
+- **A gate is created without a projection.** `gate_transition` has a foreign key back to `gate`, so
+  the gate row must exist before its opening transition can — which means creation is the one moment
+  the projection trigger cannot validate. Rather than leave that moment unenforced, creation is
+  forbidden from asserting a projection at all: a gate opens at `received` with a null `stage_seq`
+  and no outcome, and the opening transition, in the same transaction, sets the projection through
+  the `UPDATE` path where the trigger governs. A gate can therefore never be created already
+  claiming to be presented, answered, or pointing at another gate's transition.
 
 **Status.** accepted
 
@@ -1652,8 +1680,16 @@ neither input nor output tokens (`ACCEPTANCE.md` §5) and never enter the arithm
 **Coverage and the excluded-reason breakdown are required output. A reduction rate printed without
 them is not a valid report.** `ai_invocation.usage_status IN ('reported','partial','unavailable')`
 makes a missing usage record a named fact; the report prints coverage, an observed reduction over
-covered invocations only, and a **conservative** reduction imputing missing invocations at the p95
-of the covered distribution, so the acceptance figure is a lower bound.
+covered invocations only, a **bounded** reduction imputing each missing invocation at its recorded
+`max_output_tokens` ceiling, and a **sensitivity** reduction imputing at the covered p95.
+
+Only the bounded figure supports an acceptance claim, and the distinction is load-bearing: **a
+percentile of the observed sample does not bound the unobserved values.** A missing invocation may
+exceed the covered p95, and is more likely to if telemetry loss correlates with long responses — so
+calling a p95 imputation "conservative" can pass a target the real numbers fail. The request's own
+output ceiling *is* a bound, because the provider cannot return more than the caller allowed. An
+invocation with no recorded ceiling is not imputed at all but counted as `unbounded_missing`, and a
+report with a non-zero `unbounded_missing` count cannot support an AC-9 acceptance claim.
 
 **Consequences.**
 - AC-1 is the same measurement from the other side: every invocation row must carry an
@@ -1663,8 +1699,9 @@ of the covered distribution, so the acceptance figure is a lower bound.
   exit criteria — `Q-0005`, open — and a threshold invented here would answer it by inertia.
 - The provider seam is one adapter filling three usage columns; everything else in the harness is
   provider-neutral, which is `#67`'s split.
-- The p95 imputation is a choice, not a law, and is recorded in the report header so a reader can
-  recompute under a different one.
+- The p95 imputation is a labelled assumption, not a law, and is recorded in the report header so a
+  reader can recompute under a different one. It is printed because the bounded figure alone is too
+  loose to say anything about the likely truth.
 
 **Status.** accepted
 
@@ -1756,9 +1793,13 @@ the report says so at the top rather than averaging across the change.
 - Reporting the *set* of detector versions rather than a single value is the report's obligation
   under `Q-0009`, which stays open: exposing the set is not the same as deciding cross-version
   compatibility, and collapsing it would hide the thing `Q-0009` exists to settle.
-- The database fingerprint is over row counts and `MAX(seq)`/`MAX(rowid)` per table read — enough to
-  prove two reports read the same state, cheap enough to run every time. A full content hash sits
-  behind a flag for the canary's final report, where the cost is paid once.
+- The database fingerprint is a **content** hash over the ordered rows of each table read. Row counts
+  and `MAX(seq)`/`MAX(rowid)` were considered and rejected: most of what a report reads is updated in
+  place — a verdict projection, an `outbox` status, a `gate` outcome, a backfilled `usage_status` —
+  and every one of those changes the answer while changing no count and no maximum, so an aggregate
+  fingerprint would certify two materially different reads as identical. The cost is linear in rows
+  read, which the measured baseline puts in the low thousands per period. The aggregate form survives
+  as an explicitly weaker interactive mode, stamped `fingerprint_mode: aggregate`.
 - Query definitions travel as data, in the same spirit as the spike's `RECONSTRUCTION_QUERIES`, so a
   reader can run them by hand against a recovered database.
 - The report emits no go/no-go verdict, for the same reason `D-0038` gives: `ACCEPTANCE.md` §3 says

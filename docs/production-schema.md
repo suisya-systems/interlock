@@ -529,15 +529,26 @@ CREATE UNIQUE INDEX ci_observation_event ON ci_observation(event_seq);
 
 -- The identity. Everything a re-poll would produce again is in it; everything a
 -- genuinely new observation changes is in it too.
+--
+-- `verdict` is IN the identity, and leaving it out is the mistake that costs a
+-- real result. A fetch failure records `indeterminate` for a scope; the next
+-- poll succeeds and the provider says `failed`. Provider, repo, PR, head, scope
+-- and attempt are all unchanged -- the rerun never happened, only our
+-- observation of it improved -- so an identity without `verdict` collides, the
+-- append is an idempotent no-op, and the PR stays projected `indeterminate`
+-- forever with the real verdict discarded. With `verdict` in the key, a repeat
+-- of the SAME answer is still refused (which is what idempotency needs) and a
+-- CHANGED answer is a new observation (which is what honesty needs).
 CREATE UNIQUE INDEX ci_observation_identity
-    ON ci_observation(provider, repo_id, pr_number, head_sha, check_scope, scope_id, attempt);
+    ON ci_observation(provider, repo_id, pr_number, head_sha, check_scope, scope_id,
+                      attempt, verdict);
 
 CREATE INDEX ci_observation_by_head
     ON ci_observation(repo_id, pr_number, head_sha, attempt DESC, occurred_at_ms DESC);
 ```
 
 The corresponding `event.dedup_key` is the same tuple rendered as a string:
-`ci/<provider>/<repo_id>/<pr_number>/<head_sha>/<check_scope>/<scope_id>/<attempt>`. So the
+`ci/<provider>/<repo_id>/<pr_number>/<head_sha>/<check_scope>/<scope_id>/<attempt>/<verdict>`. So the
 event-spine uniqueness and the side-table uniqueness are the same constraint expressed twice, and a
 re-poll is an idempotent no-op at step 1 of the append transaction (§5.4) before anything else in it
 runs.
@@ -570,7 +581,10 @@ ours:
    eligible evidence" rather than as a passing verdict. `indeterminate` outranking `passed` is
    `D-0006` again: an unobservable check is not a green one.
 
-The projection is a view, not a column, so it cannot drift from the rows it summarises:
+The projection is a view, not a column, so it cannot drift from the rows it summarises. Rule 3 —
+the rollup's subordinate eligibility — is **in the view**, not only in the prose above it: a view
+that returned the rollup alongside the fine-grained scopes would let a stale coarse `failed`
+dominate the severity fold in rule 5 while every real check is green.
 
 ```sql
 CREATE VIEW ci_current_verdict AS
@@ -585,7 +599,15 @@ SELECT o.repo_id, o.pr_number, o.head_sha, o.check_scope, o.scope_id,
            AND o2.head_sha = o.head_sha AND o2.check_scope = o.check_scope
            AND o2.scope_id = o.scope_id
          ORDER BY o2.attempt DESC, o2.occurred_at_ms DESC, o2.event_seq DESC
-         LIMIT 1);
+         LIMIT 1)
+   -- rule 3: a rollup is the coarse fallback, never a peer of the fine-grained
+   -- scopes. It drops out of the projection the moment a real scope exists for
+   -- this head.
+   AND (o.check_scope <> 'rollup'
+        OR NOT EXISTS (SELECT 1 FROM ci_observation f
+                        WHERE f.repo_id = o.repo_id AND f.pr_number = o.pr_number
+                          AND f.head_sha = o.head_sha
+                          AND f.check_scope IN ('check_suite', 'workflow_run')));
 ```
 
 ---
@@ -809,8 +831,16 @@ CREATE TABLE watcher_liveness (
     CHECK (last_result IN ('observed_change', 'observed_no_change', 'error')),
     CHECK ((last_result = 'error') = (last_error IS NOT NULL)),
     CHECK (last_error IS NULL OR length(last_error) > 0),
-    CHECK ((last_result = 'error') = (last_error_at_ms IS NOT NULL)),
-    CHECK ((last_result <> 'error') = (last_success_at_ms IS NOT NULL)),
+    -- These are IMPLICATIONS, not biconditionals, and the difference is the
+    -- whole point of the row. last_success_at_ms and last_error_at_ms are
+    -- HISTORY: they survive the result that did not produce them, because a
+    -- watcher that has been failing for an hour still needs to say when it last
+    -- worked. Writing these as `(last_result = 'error') = (last_error_at_ms IS
+    -- NOT NULL)` would abort the first success-after-error and the first
+    -- error-after-success -- i.e. every recovery and every failure -- which is
+    -- exactly the alternation this table exists to record.
+    CHECK (last_result <> 'error' OR last_error_at_ms IS NOT NULL),
+    CHECK (last_result = 'error' OR last_success_at_ms IS NOT NULL),
     CHECK (consecutive_errors >= 0),
     CHECK (attempt_count >= 0)
 );
@@ -835,8 +865,28 @@ END;
 shape `docs/lease-fencing.md` establishes, for the same reason (`ACCEPTANCE.md` §2: expiry discovery
 alone is insufficient, because the lease can expire between the check and the write):
 
+It is an **upsert**, not an `UPDATE`, and that is not a convenience. A newly registered scope has no
+`watcher_liveness` row, so a bare `UPDATE` affects zero rows on the first heartbeat of every scope —
+and since zero rows is also how a stale writer is refused, the bootstrap case would be permanently
+indistinguishable from a rejection. The insert arm carries the same fence as the update arm, so
+neither is a way around it:
+
 ```sql
-UPDATE watcher_liveness
+INSERT INTO watcher_liveness (
+        scope_id, holder, holder_epoch, last_attempt_at_ms, last_result,
+        last_success_at_ms, last_change_at_ms, last_error_at_ms, last_error,
+        consecutive_errors, attempt_count)
+SELECT :scope_id, :holder, :epoch, :now_ms, :result,
+       CASE WHEN :result <> 'error'         THEN :now_ms END,
+       CASE WHEN :result =  'observed_change' THEN :now_ms END,
+       CASE WHEN :result =  'error'         THEN :now_ms END,
+       CASE WHEN :result =  'error'         THEN :error  END,
+       CASE WHEN :result =  'error' THEN 1 ELSE 0 END, 1
+ WHERE EXISTS (SELECT 1 FROM lease
+                WHERE resource = :scope_lease_resource
+                  AND holder = :holder AND epoch = :epoch
+                  AND expires_at_ms > :now_ms)
+    ON CONFLICT(scope_id) DO UPDATE
    SET holder = :holder, holder_epoch = :epoch,
        last_attempt_at_ms = :now_ms, last_result = :result,
        last_success_at_ms = CASE WHEN :result <> 'error'
@@ -849,18 +899,20 @@ UPDATE watcher_liveness
        consecutive_errors = CASE WHEN :result = 'error'
                                  THEN consecutive_errors + 1 ELSE 0 END,
        attempt_count      = attempt_count + 1
- WHERE scope_id = :scope_id
-   AND holder_epoch <= :epoch
+ WHERE watcher_liveness.holder_epoch <= :epoch
    AND EXISTS (SELECT 1 FROM lease
                 WHERE resource = :scope_lease_resource
                   AND holder = :holder AND epoch = :epoch
                   AND expires_at_ms > :now_ms);
 ```
 
-A replaced watcher returning with its old epoch matches nothing and its heartbeat is refused — which
-is distinction (2). A refused heartbeat is not silently dropped: the watcher observes zero rows
-affected and records an `action` row in `status='refused'`, per `ACCEPTANCE.md` §2's requirement that
-the rejection of a stale writer be itself durable.
+A replaced watcher returning with its old epoch matches neither arm and its heartbeat is refused —
+which is distinction (2). **Zero rows affected now has exactly two causes**, and the watcher
+distinguishes them by one follow-up read rather than by assuming: either the lease is no longer
+ours (the `EXISTS` failed) or a higher epoch holds the row. Both are stale-writer refusals, and a
+refused heartbeat is not silently dropped — the watcher records an `action` row in
+`status='refused'` carrying which of the two it was, per `ACCEPTANCE.md` §2's requirement that the
+rejection of a stale writer be itself durable.
 
 ### 8.4 The two liveness queries
 
@@ -913,7 +965,7 @@ CREATE TABLE gate (
     options           TEXT    NOT NULL DEFAULT '[]',
     deadline_at_ms    INTEGER,
     stage             TEXT    NOT NULL,
-    stage_seq         INTEGER NOT NULL,
+    stage_seq         INTEGER,
     stage_entered_at_ms INTEGER NOT NULL,
     outcome           TEXT,
     superseded_by     TEXT             REFERENCES gate(gate_id),
@@ -962,9 +1014,25 @@ END;
 
 CREATE TRIGGER gate_stage_seq_is_monotonic
 BEFORE UPDATE OF stage_seq ON gate
-WHEN NEW.stage_seq < OLD.stage_seq
+WHEN NEW.stage_seq < OLD.stage_seq OR NEW.stage_seq IS NULL
 BEGIN
     SELECT RAISE(ABORT, 'a gate stage projection never walks backwards');
+END;
+
+-- Creation is the one moment the projection cannot be validated, because
+-- gate_transition has a foreign key back to gate: the row must exist before its
+-- opening transition can. So creation is forbidden from ASSERTING a projection
+-- at all -- it opens at 'received' with a null stage_seq, and the opening
+-- transition, inserted in the same transaction, sets it through the UPDATE path
+-- where gate_stage_matches_its_transition governs. A gate may therefore never be
+-- created already claiming to be presented, answered, or pointed at somebody
+-- else's transition.
+CREATE TRIGGER gate_opens_without_a_projection
+BEFORE INSERT ON gate
+WHEN NEW.stage_seq IS NOT NULL OR NEW.stage <> 'received' OR NEW.outcome IS NOT NULL
+BEGIN
+    SELECT RAISE(ABORT,
+        'a gate opens at stage received with a null stage_seq; its opening transition sets the projection');
 END;
 
 CREATE TRIGGER gate_closure_is_terminal
@@ -1151,15 +1219,32 @@ One query per aged stage, over open gates only, with the tolerance read from pol
 than compiled in:
 
 ```sql
+WITH effective AS (
+    -- Policy rows are versioned and never updated in place (section 10), so a
+    -- join that omits revision_id matches EVERY historical tolerance for the
+    -- stage: one incident per revision ever recorded, some of them alarming on
+    -- a tolerance that was retired months ago. The effective revision is picked
+    -- first, once, and the detector joins only its rows.
+    SELECT revision_id FROM policy_revision
+     WHERE effective_at_ms <= :now_ms
+     ORDER BY effective_at_ms DESC, revision_id DESC
+     LIMIT 1)
 SELECT g.gate_id, g.gate_type, g.stage, g.stage_entered_at_ms,
        :now_ms - g.stage_entered_at_ms AS age_ms
   FROM gate g
   JOIN policy_gate_stage_tolerance p
     ON p.gate_type = g.gate_type AND p.stage = g.stage
+   AND p.revision_id = (SELECT revision_id FROM effective)
  WHERE g.closed_at_ms IS NULL
    AND p.tolerance_ms IS NOT NULL
    AND :now_ms - g.stage_entered_at_ms > p.tolerance_ms;
 ```
+
+Every query that reads a `policy_*` table takes the same shape — the detector binds the revision
+effective **now**, a report binds the revision effective over its period
+([`measurement-harness.md`](./measurement-harness.md) §6). A `policy_*` join without a
+`revision_id` predicate is a defect, and the implementation Issue carries a test that inserts a
+second revision and asserts the detector still emits one row per gate.
 
 `p.tolerance_ms IS NULL` is how `presented` opts out — the "slow human is not a gap" case is data,
 not a special case in the query. A separate query covers the relay that was enqueued and never
@@ -1262,6 +1347,12 @@ prepared, and the load-bearing constraints were exercised directly:
 | A closed gate keeps its outcome | Trigger fires |
 | A second relay for the same `(gate, stage)` is refused, so the enqueue is idempotent (§9.5) | `UNIQUE constraint failed: gate_relay.gate_id, gate_relay.to_stage` |
 | A migration record is written once and never deleted (§3.1) | Both triggers fire |
+| A watcher bootstraps on a scope with no row, then alternates success → error → success, keeping both histories (§8.3) | The upsert affects 1 row every time; `last_success_at_ms` and `last_error_at_ms` are both non-null at the end |
+| A stale watcher is still refused after the upsert change | The same statement at epoch 3 against epoch 7 affects **0** rows |
+| An `indeterminate` observation is superseded by the recovered verdict, while a repeat of the same verdict is still refused (§6.2) | The recovery appends; the repeat raises `UNIQUE constraint failed`; the projection reads `failed` |
+| A rollup drops out of the projection once a fine-grained scope exists (§6.3 rule 3) | `ci_current_verdict` returns only the `check_suite` row |
+| A gate cannot be created already claiming a projection (§9.2) | Opening at `presented`, naming a `stage_seq`, or opening already closed all abort |
+| The relay-gap detector emits one row per gate with two policy revisions on record (§9.6) | 1 row, not 2 |
 
 Two things this does **not** establish, and they are the reasons it is not a substitute for the
 implementation Issue's tests. It does not exercise the `T + P ≤ L` timing behaviour, which needs the

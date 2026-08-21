@@ -103,6 +103,10 @@ CREATE TABLE ai_invocation (
     output_tokens     INTEGER,
     input_tokens      INTEGER,
     cache_read_tokens INTEGER,
+    -- The output cap the CALLER sent with the request. Recorded at request
+    -- time, so it is present even when no usage record ever comes back -- which
+    -- is the only reason a missing invocation can be bounded at all (2.4).
+    max_output_tokens INTEGER,
     attempt_count     INTEGER NOT NULL DEFAULT 1,
     started_at_ms     INTEGER NOT NULL,
     finished_at_ms    INTEGER,
@@ -115,6 +119,9 @@ CREATE TABLE ai_invocation (
     CHECK (usage_status IN ('reported', 'partial', 'unavailable')),
     CHECK ((usage_status = 'reported') = (output_tokens IS NOT NULL)),
     CHECK (output_tokens IS NULL OR output_tokens >= 0),
+    CHECK (max_output_tokens IS NULL OR max_output_tokens > 0),
+    CHECK (output_tokens IS NULL OR max_output_tokens IS NULL
+           OR output_tokens <= max_output_tokens),
     CHECK (attempt_count >= 1),
     CHECK (finished_at_ms IS NULL OR finished_at_ms >= started_at_ms)
 );
@@ -133,18 +140,38 @@ absence. That is the whole point of the next section.
 
 Treating a missing `output_tokens` as `0` understates Interlock's token use and therefore
 *overstates* the reduction — a bias that always flatters the target, in the criterion the target is
-being judged by. The harness therefore reports three numbers where a naive one reports one:
+being judged by. The harness therefore reports four numbers where a naive one reports one, and
+labels each with what kind of number it is:
 
-| Figure | Definition |
-|---|---|
-| **Coverage** | `count(usage_status='reported') / count(*)` over the cohort's invocations, printed as a percentage with both counts |
-| **Observed reduction** | Computed over covered invocations only, explicitly labelled "over N of M invocations" |
-| **Conservative reduction** | Missing invocations imputed at the **p95 of the covered distribution**, so the reported reduction is a lower bound |
+| Figure | Definition | Status of the number |
+|---|---|---|
+| **Coverage** | `count(usage_status='reported') / count(*)` over the cohort's invocations, printed as a percentage with both counts | Fact |
+| **Observed reduction** | Computed over covered invocations only, explicitly labelled "over N of M invocations" | Fact about the covered subset |
+| **Bounded reduction** | Missing invocations imputed at each one's **`max_tokens` ceiling** — the per-invocation output cap the caller sent to the provider | **A genuine lower bound on the reduction** |
+| **Sensitivity reduction** | Missing invocations imputed at the **p95 of the covered distribution** | **An assumption, not a bound** |
 
-If coverage is 100%, the two reduction figures are identical and the harness says so. If coverage is
-below 100%, both are printed and the conservative figure is the one the acceptance judgement uses.
-The p95 imputation is a choice, not a law — it is recorded in the report header (§6) so a reader can
-recompute under a different one.
+The distinction between the last two rows is load-bearing and was got wrong on the first pass, so it
+is stated explicitly. **A percentile of the observed sample does not bound the unobserved values.**
+A missing invocation may exceed the covered p95, and it is more likely to if telemetry loss
+correlates with large responses — a truncated or aborted response is exactly the kind that both
+loses its usage record and runs long. Calling a p95 imputation "conservative" and then judging AC-9
+by it can pass a target that the real numbers fail.
+
+What *is* a bound is the request's own `max_tokens`: the provider cannot return more output tokens
+than the caller allowed, so imputing a missing invocation at its recorded ceiling cannot understate
+it. That is the figure the acceptance judgement uses. It is loose — usually far above the real
+value — and being loose in the safe direction is the property being bought. Where an invocation has
+no recorded `max_output_tokens`, it is not imputed at all: it is reported as `unbounded_missing`,
+and a report with a non-zero `unbounded_missing` count **cannot support an AC-9 acceptance claim**
+and says so. That is why the ceiling is a column on `ai_invocation` written at request time rather
+than something read back from a usage record that, by hypothesis, never arrived.
+
+The p95 figure is still printed, as a sensitivity estimate, because the bounded figure alone is too
+loose to be informative about the likely truth. It is labelled an assumption everywhere it appears,
+and the imputation rule is recorded in the report header (§6) so a reader can recompute under a
+different one.
+
+If coverage is 100% all four figures coincide and the harness says so.
 
 **The harness does not decide pass or fail.** It prints the cohort size alongside every rate, and it
 prints AC-9's targets (≥95% prompts, ≥90% output tokens) as targets. Whether a given cohort size is
@@ -342,13 +369,13 @@ the Markdown and JSON renderings, with:
 | `generated_at_ms`, `tool_version` | Which build produced it |
 | `db_path`, `application_id`, `user_version` | Which database, and that it was a production one |
 | `schema_migration_head` | Version *and* name of the newest applied migration |
-| `db_fingerprint` | A content hash over the tables read, so two reports over "the same" database are provably over the same bytes |
+| `db_fingerprint`, `fingerprint_mode` | A sha256 over the ordered rows of every table read, so two reports over "the same" database are provably over the same content. The weaker aggregate mode is available and is labelled as weaker |
 | `policy_revision_id` | The tolerances and owners in force (`time-base-policy.md` §1). A report is meaningless without it, since every latency judgement is against those numbers |
 | `detector_versions` | The **set** of `detector_version` values observed in the period, not a single value — a period spanning a detector change contains both, and collapsing them hides it (`Q-0009` governs the compatibility rule and is open; the report's obligation is to expose the set, not to resolve it) |
 | `adapter_versions` | The set of `ai_invocation.adapter_version` values, same reasoning, for the AC-9 token seam |
 | `query_definitions` | Every query the report ran, as text, plus a sha256 over the set. The queries are data, in the same spirit as the spike's `RECONSTRUCTION_QUERIES`, so a reader can run them by hand |
 | `fixture_suite_ref` | Commit and case count of the labelled corpus, split positive/negative |
-| `imputation_rule` | The AC-9 conservative-figure rule in force (§2.4) |
+| `imputation_rule` | The AC-9 bounded- and sensitivity-figure rules in force, and the `unbounded_missing` count (§2.4) |
 | `coverage` | AC-9 coverage and the excluded-reason breakdown |
 | `censored`, `censored_left` | §3.5 |
 | `unmatched_*` | §3.3 |
@@ -358,10 +385,19 @@ the period, makes the period **non-homogeneous**. The report says so at the top 
 averaging across the change, because a latency comparison across a detector change is comparing two
 detectors and calling it a trend.
 
-`db_fingerprint` is the one field that costs something to compute. It is a hash over the row counts
-and `MAX(seq)` / `MAX(rowid)` of each table read, not over the full contents — enough to prove two
-reports read the same state, cheap enough to run on every report. A full content hash is available
-behind a flag for the canary's final report, where the cost is paid once.
+`db_fingerprint` is a **content** hash: a sha256 over the ordered rows of each table the report
+read. The cheaper thing — row counts plus `MAX(seq)`/`MAX(rowid)` — was considered and rejected,
+because it does not do the job the field exists for. Most of the state a report reads is *updated in
+place*: a verdict projection, an `outbox` status, a `gate` outcome, a `usage_status` backfilled by a
+late adapter. Every one of those changes the answer and none of them changes a count or a maximum,
+so an aggregate fingerprint would certify two materially different reads as identical — the exact
+claim the provenance header is making.
+
+The cost is linear in the rows read, which the measured baseline puts in the low thousands per
+week-long period, so it is affordable on every report. The aggregate form remains available as
+`--fingerprint=aggregate` for an interactive spot-check, and a report generated that way is stamped
+`fingerprint_mode: aggregate` and states in the header that its fingerprint **does not** establish
+identity of content.
 
 ---
 
