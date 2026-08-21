@@ -56,6 +56,7 @@ from ..control_plane.outbox import (
     HandlerRegistry,
     Outbox,
     OutboxMessage,
+    StaleWriterRefused,
 )
 
 __all__ = [
@@ -177,9 +178,22 @@ class MessageBus:
         for message in self._outbox.due(now_ms):
             if message.recipient != recipient:
                 continue
-            outcome = self._outbox.attempt(
-                message.message_id, now_ms=now_ms, epoch=epoch
-            )
+            try:
+                outcome = self._outbox.attempt(
+                    message.message_id, now_ms=now_ms, epoch=epoch
+                )
+            except (ValueError, StaleWriterRefused):
+                # A row can be settled between the due() snapshot and this
+                # attempt -- a late ack from an earlier delivery landing
+                # concurrently. The outbox surfaces that as "already acked"
+                # (ValueError) or, one instant later, as the fenced
+                # attempt-count update finding no row to move. A settled
+                # message is a poll's success case, not its error: skip it and
+                # keep presenting the rest. Anything else re-raises -- a fence
+                # refusal on a genuinely unsettled row must stay loud.
+                if self._outbox.load(message.message_id).status == "acked":
+                    continue
+                raise
             envelopes.append(
                 DeliveredEnvelope(
                     message_id=message.message_id,

@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import pytest
 
-from claude_org_runtime.control_plane.outbox import HandlerRejected, StaleWriterRefused
+from claude_org_runtime.control_plane.outbox import (
+    CHECKPOINT_BEFORE_DURABLE_WRITE,
+    HandlerRejected,
+    StaleWriterRefused,
+)
 
 from ._env import (
     EPOCH,
@@ -25,6 +29,7 @@ from ._env import (
     T0,
     drop_then_resend_transcript,
     expected_transcript,
+    make_bus_env,
 )
 
 
@@ -110,6 +115,37 @@ def test_a_stale_writer_cannot_poll_a_delivery_out(bus_env):
     send(bus_env, message_id="task-1")
     with pytest.raises(StaleWriterRefused):
         bus_env.bus.poll(RECIPIENT, now_ms=T0 + 1_000, epoch=EPOCH + 1)
+
+
+def test_a_message_settled_mid_poll_is_skipped_not_an_error(tmp_path):
+    """A late ack landing between the due() snapshot and the attempt.
+
+    An earlier delivery's ack can settle a row after a poll has read its due
+    set but before it attempts that row. A settled message is the poll's
+    success case: it is skipped, and the rest of the batch is still presented
+    -- the race must not turn a whole poll into an error. Reproduced
+    deterministically by acking task-2 from inside task-1's first checkpoint.
+    """
+
+    state = {"armed": False, "done": False}
+
+    def settle_task2_mid_poll(name: str) -> None:
+        if state["armed"] and not state["done"] and name == CHECKPOINT_BEFORE_DURABLE_WRITE:
+            state["done"] = True
+            env.bus.ack("task-2", now_ms=T0 + 1_500, recipient=RECIPIENT)
+
+    env = make_bus_env(tmp_path, "mid-poll", checkpoint=settle_task2_mid_poll)
+    try:
+        send(env, message_id="task-1")
+        send(env, message_id="task-2")
+        first = env.bus.poll(RECIPIENT, now_ms=T0 + 1_000, epoch=EPOCH)
+        assert [e.message_id for e in first] == ["task-1", "task-2"]
+        state["armed"] = True
+        second = env.bus.poll(RECIPIENT, now_ms=T0 + 2_000, epoch=EPOCH)
+        assert [e.message_id for e in second] == ["task-1"]
+        assert env.acked_row_count() == 1
+    finally:
+        env.close()
 
 
 def test_two_tasks_settle_independently(bus_env):

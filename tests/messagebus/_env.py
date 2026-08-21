@@ -60,7 +60,7 @@ class BusEnv:
 
 
 def make_bus_env(
-    root: Path, tag: str, *, now_ms: int = T0, ttl_ms: int = TTL_MS
+    root: Path, tag: str, *, now_ms: int = T0, ttl_ms: int = TTL_MS, checkpoint=None
 ) -> BusEnv:
     """One fresh world. *now_ms* anchors the run and lease rows: the suite's
     fixed instant by default, real wall-clock time for the endpoint tests,
@@ -85,6 +85,7 @@ def make_bus_env(
         resource=RESOURCE,
         holder=HOLDER,
         registry=spike_registry(dropbox),
+        **({"checkpoint": checkpoint} if checkpoint is not None else {}),
     )
     return BusEnv(bus=bus, dropbox=dropbox, connection=connection, db_path=db_path)
 

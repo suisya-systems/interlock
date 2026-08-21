@@ -127,6 +127,21 @@ def test_the_drop_first_poll_fault_loses_the_response_not_the_message(rt_env):
     assert rt_env.effect_count("dk-task-1") == 1
 
 
+def test_a_notification_never_gets_a_response(rt_env):
+    """JSON-RPC framing: a message without an id must produce no output line.
+
+    Answering a notification -- even with ``"id": null`` -- puts a stray line
+    on stdout that the client matches against its next request, and the stream
+    is desynchronised from then on.
+    """
+
+    endpoint = Endpoint(rt_env.bus, _config())
+    for method in ("notifications/initialized", "ping", "tools/list", "nonsense"):
+        assert endpoint.handle({"jsonrpc": "2.0", "method": method}) is None
+    ponged = endpoint.handle({"jsonrpc": "2.0", "id": 7, "method": "ping"})
+    assert ponged == {"jsonrpc": "2.0", "id": 7, "result": {}}
+
+
 def test_a_refusal_surfaces_as_a_tool_error_not_a_crash(rt_env):
     endpoint = Endpoint(rt_env.bus, _config())
     send(rt_env)

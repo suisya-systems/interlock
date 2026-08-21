@@ -173,7 +173,14 @@ class Endpoint:
     # ---------------------------------------------------------- JSON-RPC
     def handle(self, msg: dict) -> dict | None:
         method = msg.get("method")
-        mid = msg.get("id")
+        if "id" not in msg:
+            # A JSON-RPC notification never receives a response; answering one
+            # (even with "id": null) desynchronises the stdio stream, because
+            # the client matches the stray line against its next request. The
+            # only notification this server cares about, initialized, needs no
+            # action here; every other one is ignored.
+            return None
+        mid = msg["id"]
 
         if method == "initialize":
             want = (msg.get("params") or {}).get("protocolVersion", _DEFAULT_PROTO)
@@ -191,8 +198,6 @@ class Endpoint:
                     ),
                 },
             }
-        if method == "notifications/initialized":
-            return None
         if method == "ping":
             return {"jsonrpc": "2.0", "id": mid, "result": {}}
         if method == "tools/list":
@@ -235,11 +240,9 @@ class Endpoint:
                     }],
                 },
             }
-        if mid is not None:
-            return {"jsonrpc": "2.0", "id": mid,
-                    "error": {"code": -32601,
-                              "message": f"method not found: {method}"}}
-        return None
+        return {"jsonrpc": "2.0", "id": mid,
+                "error": {"code": -32601,
+                          "message": f"method not found: {method}"}}
 
 
 def _serve(endpoint: Endpoint, stdin, stdout) -> None:
