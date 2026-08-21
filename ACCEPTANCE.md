@@ -81,8 +81,8 @@ that asserts exactly-once for an external effect using only our own rows does no
 | **Lease** | Kill the lease holder without release; expire a lease while its holder is paused (SIGSTOP) and let a second claimant take it; return the paused holder; skew the clock forward and backward across the expiry boundary. | At most one live holder per leased resource at any instant. Expiry discovery alone is insufficient — check-then-write leaves a race in which the lease expires between the check and the write. Every protected write must carry a fencing token (lease epoch) validated **atomically as part of the write**, and external destinations must reject a stale token where they can enforce it. | Lease rows in SQLite show a single active holder per resource across the whole timeline; the returning holder's write attempt is refused and that refusal is recorded, not silently dropped. |
 | **Outbox resend** | Drop the delivery, kill the sender after the outbox row is written but before delivery, kill after delivery but before the ack is recorded, and hold the recipient unavailable across several retry attempts. | Every enqueued message is eventually delivered at least once; nothing is lost by a kill at any of those points; retry count is durable across restarts. | Outbox row transitions to delivered/acked with a monotonically increasing, restart-surviving retry count; no outbox row remains in a state with no owner after recovery. |
 | **Ack** | Lose the ack in flight; duplicate the ack; deliver the ack after the sender has restarted; ack an already-acked message. | Ack is idempotent. A lost ack causes a resend (safe), never a lost message. A duplicate or late ack changes nothing. | Message identity in SQLite shows exactly one acked state regardless of ack multiplicity; the recipient's effect count is one. |
-| **Dedup** | Deliver the same message twice; raise the same incident condition repeatedly within a window; replay a persisted incident packet; restart between the duplicate arrivals. | Duplicate delivery causes exactly one effect. A repeated incident condition is collapsed under its dedup key rather than producing an unbounded stream of incidents; `dedup key` and `retry count` are required incident fields (D-0007). | One effect record per delivery dedup key. For incidents, the observable follows from whatever collapse rule Q-0002 settles on — **the Issue fixes the fields, not the semantics: whether a repeat increments `retry count` on the existing incident or opens a linked one is unresolved, as is the re-notification window in absolute time — both are Q-0002** (Q-0003 covers the reconcile interval and tolerable detection latency that Q-0002 depends on). Tests must parameterise both rather than hard-code either. |
-| **Single-writer** | Two writers race for the same state item; a partitioned/stale writer returns after its lease expired; a write is attempted concurrently from a resumed process and its replacement. | Exactly one writer may write a given state item at a time; a stale writer is rejected, not merged. | The state item's history in SQLite is a linear sequence with no interleaving from the rejected writer; the rejection is itself recorded. **The per-item writer assignment table is unresolved — see Q-0001 in `DECISIONS.md`**; until it exists, tests assert the property per item exercised, not against a global table. |
+| **Dedup** | Deliver the same message twice; raise the same incident condition repeatedly within a window; replay a persisted incident packet; restart between the duplicate arrivals. | Duplicate delivery causes exactly one effect. A repeated incident condition is collapsed under its dedup key rather than producing an unbounded stream of incidents; `dedup key` and `retry count` are required incident fields (D-0007). | One effect record per delivery dedup key. For incidents, the observable follows from whatever collapse rule Q-0002 settles on — **the Issue fixes the fields, not the semantics: whether a repeat increments `retry count` on the existing incident or opens a linked one is unresolved, as is the re-notification window in absolute time — both are Q-0002** (Q-0003 covered the reconcile interval and tolerable detection latency that Q-0002 depends on, and is resolved by D-0031: the reconcile period is 120 s and the per-class budgets are policy data). Tests must parameterise both rather than hard-code either. |
+| **Single-writer** | Two writers race for the same state item; a partitioned/stale writer returns after its lease expired; a write is attempted concurrently from a resumed process and its replacement. | Exactly one writer may write a given state item at a time; a stale writer is rejected, not merged. | The state item's history in SQLite is a linear sequence with no interleaving from the rejected writer; the rejection is itself recorded. **The per-item writer assignment table is `docs/production-schema.md` §4.2 (Q-0001, resolved by D-0029)**; tests assert against it, noting its one distinction — single-writer discipline governs items updated in place, while append-only tables are governed by identity uniqueness instead. |
 | **Observation outage** *(supporting D-0006)* | Make the observation path fail or return nothing while the worker is genuinely healthy. | Observation failure is classified `OBSERVATION_UNAVAILABLE`, never as an anomaly, and `NO_ACTIVITY_EVIDENCE` is not treated as an anomaly either. | Incident/fact-state rows show the outage classified as observation-unavailable; no termination or restart recommendation is produced from it. (See D-0005, D-0006 and inherited criteria AC-3/AC-4.) |
 
 **Mid-flight kill (cross-cutting).** Killing the daemon, the Dispatcher AI, or the Secretary
@@ -162,8 +162,9 @@ qualitative conditions (a shadow-period divergence report must exist; rollback c
 exist; detection latency, false termination, and misses must not regress) and reduction *targets*
 (≥95% AI prompts, ≥90% output tokens per 100 worker runs — see inherited criteria AC-9/AC-10). Those
 targets are not the same thing as canary go/no-go thresholds, and this document does not convert
-one into the other. Related unfixed values: tolerable detection latency and the reconcile period
-(Q-0003), and the dedup/re-notification window in absolute time (Q-0002).
+one into the other. Tolerable detection latency and the reconcile period are no longer unfixed — Q-0003 is resolved by
+D-0031 (`docs/time-base-policy.md`). The dedup/re-notification window in absolute time (Q-0002)
+remains open, and D-0031 is the basis it was waiting on.
 
 For sizing the comparison, the **measured baseline** available is: 195 completed runs within under
 7 days, mean 1.09 h, median 0.66 h, p90 2.55 h, 212.2 worker-hours total, 153.7 h union uptime,
@@ -243,12 +244,13 @@ design** and apply *during and after implementation* — unlike the **Agent View
       *(D-0006, D-0007 — `confidence` and `missing_evidence`)*
 - [ ] **AC-5 — Auditable and resumable from SQLite.** Incident, assessment, approval, action, and
       result can be audited and resumed by query against SQLite. *(D-0001, D-0007; schema and
-      single-writer assignment unresolved — Q-0001)*
+      single-writer assignment settled by D-0029 — `docs/production-schema.md`)*
 - [ ] **AC-6 — Direct approve / restart / close / reassign excluded from the AI's tools and
       permissions.** *(D-0004, D-0007, D-0008; the AI's auth identity and tier unresolved —
       Q-0007)*
 - [ ] **AC-7 — Shadow-period divergence report and rollback conditions exist.** *(D-0013; the
-      numeric criteria are unresolved — Q-0005. See **Canary and rollback**.)*
+      numeric criteria are unresolved — Q-0005. The report's contents and provenance are D-0040;
+      see **Canary and rollback** and `docs/measurement-harness.md`.)*
 - [ ] **AC-8 — Resume from unresolved incidents without double execution after a mid-flight kill**
       of daemon, AI, or Secretary. *(D-0001, D-0007. See **Fault injection targets**.)*
 - [ ] **AC-9 — Measured reduction: ≥95% AI prompts and ≥90% output tokens per 100 worker runs.**
@@ -258,11 +260,14 @@ design** and apply *during and after implementation* — unlike the **Agent View
       tokens, 1,399,565,488 cache-read tokens, median iteration interval 180.0 s; 195 completed runs
       normalising to roughly 1,576 three-minute dispatcher ticks per 100 worker runs — an
       Issue-stated derivation). Cache-read is a bandwidth indicator for repeatedly referenced long
-      context, not new input tokens and not a billing figure. *(D-0002, D-0003)*
+      context, not new input tokens and not a billing figure. The cohort, the prompt unit and the
+      required coverage output are settled by D-0038 — see `docs/measurement-harness.md` §2.
+      *(D-0002, D-0003)*
 - [ ] **AC-10 — No regression in detection latency, false termination, or misses**, confirmed
       against known incident fixtures and dogfood shadow. *(D-0005, D-0006, D-0013; tolerable
-      detection latency itself is unresolved — Q-0003, which AC-10 depends on to be stated
-      numerically.)*
+      detection latency is settled by D-0031 — per-class budgets in `docs/time-base-policy.md` §3.
+      The ground truth AC-10 is measured against is D-0039: a labelled fixture suite plus shadow
+      reconciliation, with false termination counted at the applied `action`.)*
 
 **Note on scope.** AC-9's reduction figures and the Issue's per-100-run projections (AI monitoring
 prompts ≈1,576 → 5–20; program monitoring ticks ≈470–1,576 after migration) are **estimates and
