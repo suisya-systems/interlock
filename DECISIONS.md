@@ -69,6 +69,7 @@ figures are **measured baseline**.
 | D-0025 | If the gate fails: local execution is mandatory, C2 is the designated second spike, and D-0014 does not reach the `SessionProvider` role | accepted |
 | D-0026 | The spike's durable output is the interface and the tests; implementations are throwaway by default | accepted |
 | D-0027 | Gate item 2 fails on Agent View; C2 becomes the spike's `SessionProvider` | accepted |
+| D-0028 | Carried end-to-end tests land as failing specifications; pane-liveness lease release is discarded with the pane | accepted |
 | Q-0001 | SQLite schema/DDL and migration policy for the SoT tables | proposed |
 | Q-0002 | Incident dedup key composition and re-notification rate in absolute time | proposed |
 | Q-0003 | Reconcile interval and the tolerable detection latency that justifies it | proposed |
@@ -91,7 +92,7 @@ figures are **measured baseline**.
 | Q-0020 | What an incompatible CLI capability probe implies for already-running sessions | proposed |
 | Q-0021 | What scaffold makes each Agent View gate item checkable before implementation | resolved by D-0020 |
 | Q-0022 | Whether a carried artifact may keep enumerating v1 pane vocabulary as a normative list | proposed |
-| Q-0023 | Whether a carried test may drive a `discard`-classed module to reach the contract it pins | proposed |
+| Q-0023 | Whether a carried test may drive a `discard`-classed module to reach the contract it pins | resolved by D-0028 |
 
 ---
 
@@ -1131,6 +1132,75 @@ proposed reading). Enacts D-0024's negative-result tail and applies D-0025's des
 
 ---
 
+## D-0028 — Carried end-to-end tests land as failing specifications; pane-liveness lease release is discarded with the pane
+
+**Context.** Q-0023 asked what "carried" means for a test that can reach its pinned contract only
+through a `discard`-classed module: the five quarantined suites
+(`tests/broker/test_delivery.py`, `test_store.py`, `test_control_plane.py`, `test_notify.py`,
+`tests/attention/test_broker_journal_contract.py`) keep their assertions verbatim but drive the
+deleted `broker/server.py`, so none of them run. The question was deliberately deferred to be
+taken *with* the `MessageBus` contract; S8 (Issue `#19`) builds that contract, and the operator
+directed the sequencing on 2026-08-21 (recorded on Issue `#19`). Q-0023 also demanded, either way,
+an explicit statement of where the delivery/session boundary inside `broker/server.py` falls.
+
+**Decision.**
+
+1. **Failing-specification sequencing.** A carried end-to-end assertion lands as a specification
+   against the **new** contract — passing where the contract already satisfies it, failing
+   (`xfail(strict=True)`) where it does not yet — never by keeping a `discard`-classed module in
+   the drive path. Keeping `broker/server.py` alive to run carried tests would prolong exactly the
+   dependency shape the S8 static no-edge assertion exists to forbid, and the failing-spec form
+   fixes the new contract first, consistent with Q-0015's sequencing question for this case. There
+   is **no bulk retarget**: the disposition is per assertion, recorded in
+   `docs/messagebus-carry-drop.md` (all 201 test functions across the five files), consistent with
+   this ledger's partial-carry prose (e.g. `test_store.py` 3/6, the `test_control_plane.py`
+   five-plus-three carve). The quarantined files stay verbatim at their ledgered paths — the table
+   supersedes their *disposition*, not their text — and the "self-heals the day a `broker.server`
+   replacement lands" note in the purge record is narrowed accordingly: nothing may revive them by
+   resurrecting `broker/server.py`.
+
+2. **The delivery/session boundary in `broker/server.py`, stated.** The boundary ran *through* the
+   module, not around it, in two places: the `register_delivery_instance` override that released a
+   stale lease when a pane-liveness probe said the owner's pane died out of band
+   (server.py:817, `_probe_dead_pane_for_stale_lease` at :845-851), and the store-side adoption
+   rollback conditioned on pane survival (`_detach_owner_panes_locked` /
+   `_reattach_owner_panes_locked`). Both are **discarded with the pane, and deliberately have no
+   transport-neutral successor on the delivery path.** Their transport-neutral *duties* are met
+   elsewhere and pane-blind: writer exclusivity and release are the lease's own expiry plus fenced
+   epochs (S6), and orphaned unfinished work is re-owned by fenced recovery adoption
+   (`Outbox.recover`, S7) — time- and epoch-based, never probe-based. The stale-readout path *is*
+   the natural C2 counterpart of the pane probe — a session id whose child is gone, a `read_state`
+   answering "could not observe" — and the decision is that it informs **session management only**
+   (`SessionProvider` verbs, D-0009's other half). Connecting it to delivery decisions is the
+   exact edge item 6 forbids: `tests/messagebus/test_import_graph.py` makes the absence of that
+   edge a build failure, and `tests/messagebus/test_stale_readout.py` demonstrates the consequence
+   — delivery outcomes identical, `==` over the whole transcript, with the readout healthy, stale,
+   or absent.
+
+**Consequences.**
+
+- Q-0023 is resolved by this entry. `tests/broker/test_delivery.py::test_stale_lease_is_released_when_the_pane_died_out_of_band`
+  — the one assertion that made pane liveness *cause* lease release — is dropped with the pane,
+  and its duty is named above rather than ported.
+- The carried-but-not-MessageBus rows (`carried-deferred` in the table: the journal
+  producer-consumer discipline toward D-0007's incident surface, the `sidecar.py`
+  discovery/liveness carve) stay quarantined until their own successor surfaces exist; landing
+  them as MessageBus specs would misattribute the invariant.
+- One failing specification exists at this writing (recipient aliasing,
+  `tests/messagebus/test_carried_specifications.py`); an XPASS there is the signal to remove the
+  mark, per the file's own docstring.
+- Cost: the quarantined text and the new specifications overlap in intent while the quarantine
+  persists. Accepted — deleting quarantined assertions would overwrite ledger history, and D-0014
+  keeps accident-derived fixtures readable in place.
+
+**Status.** accepted
+
+**Source.** Operator direction on Q-0023, 2026-08-21, recorded on Issue `#19`
+(https://github.com/suisya-systems/interlock/issues/19); enacted by the S8 PR this entry ships
+with. Not drawn from Issue #740.
+
+---
+
 ## Open questions
 
 These are gaps where implementation needs an answer and Issue #740 provides no basis. They are
@@ -1555,7 +1625,7 @@ quarry lessons become decisions).
 
 ### Q-0023 — May a carried test drive a `discard`-classed module to reach the contract it pins?
 
-**Status.** proposed
+**Status.** resolved by D-0028
 
 **Question.** Several hybrid test rows reach their subject only through a module this ledger
 classifies `discard`. `tests/attention/test_broker_journal_contract.py` — carried specifically
