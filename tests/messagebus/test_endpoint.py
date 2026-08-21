@@ -214,6 +214,28 @@ class _Client:
         self._process.stdin.flush()
 
 
+def test_an_unregistered_recipient_refuses_to_start(rt_env, tmp_path):
+    """A typo'd recipient must die at startup, not poll an empty queue forever."""
+
+    repo_src = Path(__file__).resolve().parents[2] / "src"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(repo_src) + os.pathsep + env.get("PYTHONPATH", "")
+    env.update({
+        "INTERLOCK_MESSAGEBUS_DB": str(rt_env.db_path),
+        "INTERLOCK_MESSAGEBUS_RESOURCE": RESOURCE,
+        "INTERLOCK_MESSAGEBUS_HOLDER": HOLDER,
+        "INTERLOCK_MESSAGEBUS_EPOCH": str(EPOCH),
+        "INTERLOCK_MESSAGEBUS_RECIPIENT": "typo-nobody",
+        "INTERLOCK_MESSAGEBUS_DESTINATION_DIR": str(tmp_path / "dest-typo"),
+    })
+    done = subprocess.run(
+        [sys.executable, "-m", "claude_org_runtime.messagebus.endpoint"],
+        stdin=subprocess.DEVNULL, capture_output=True, env=env, timeout=30,
+    )
+    assert done.returncode == 2
+    assert b"no registered handler" in done.stderr
+
+
 def test_the_acceptance_sequence_end_to_end_over_stdio(rt_env, tmp_path):
     """Item 6's headline case with a real child process on the wire."""
 

@@ -174,6 +174,16 @@ class MessageBus:
         nothing: the rows stay due (delivered-but-unacked) and the next poll
         presents them again. What is due is read from SQLite and nowhere else.
 
+        Presentation is at-least-once all the way to the wire: an ack that
+        lands concurrently with a poll already carrying the same message --
+        after its attempt completed, or while the response is in flight --
+        can put one more presentation of a just-settled message in front of
+        the worker. That race has no server-side fix (the response cannot be
+        recalled), which is why every envelope carries the sender's
+        ``dedup_key``: the recipient deduplicates, exactly as it must for the
+        resend path. Settlement stops *future* polls from presenting the
+        message; it cannot retract one already leaving.
+
         *clock*, when given, is read again for **every** attempt; *now_ms*
         then only anchors the due() snapshot. A poll that outlives its lease
         must not keep delivering on the timestamp it started with -- the fence

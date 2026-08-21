@@ -316,6 +316,19 @@ def main() -> int:
     connection = open_control_plane(config.db_path)
     dropbox = KeyedDropbox(config.destination_dir, name="messagebus-endpoint")
     registry = spike_registry(dropbox)
+    try:
+        registry.for_recipient(config.recipient)
+    except Exception:
+        # A recipient no handler serves would poll an eternally empty queue
+        # while the real one stays due -- a misconfiguration that must fail at
+        # startup, loudly, not at the gate.
+        print(
+            "FATAL: INTERLOCK_MESSAGEBUS_RECIPIENT="
+            f"{config.recipient!r} has no registered handler",
+            file=sys.stderr, flush=True,
+        )
+        connection.close()
+        return 2
     bus = MessageBus(
         connection,
         resource=config.resource,
