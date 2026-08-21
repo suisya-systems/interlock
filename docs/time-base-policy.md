@@ -155,11 +155,13 @@ not the objective.** The objectives are AI workload, determinism, reproducibilit
 recoverability, and a program pass takes no model turn (AC-1). Trading program ticks for detection
 latency is trading the thing that is not the goal for the thing AC-10 measures.
 
-**A class may run on a coarser multiple.** The pass is one loop, but a predicate whose `L - T` is
-large does not need evaluating every 120 s. `policy_detection_latency` therefore also carries the
-evaluation multiple implicitly: a class is evaluated every `floor((L - T) / P)` passes, minimum 1.
-This is an optimisation, not a semantic — with everything evaluated every pass the budgets still
-hold, so the implementation may start simple and add the multiple when the pass cost justifies it.
+**A class may run on a coarser period.** The pass is one loop, but a predicate whose `L - T` is
+large does not need evaluating every 120 s. `policy_detection_latency` therefore carries
+`reconcile_period_ms` **explicitly, per class** — a multiple of the base period, defaulting to it —
+and the `T + P ≤ L` constraint is checked against that column rather than against a global constant.
+Making it a column rather than an implicit `floor((L - T) / P)` is what lets the invariant be a
+`CHECK` instead of a convention; the implementation may still set every row to 120 000 and add
+coarser values only when the pass cost justifies it.
 
 ### 3.4 Boundary conditions
 

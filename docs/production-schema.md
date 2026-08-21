@@ -986,13 +986,22 @@ rejection of a stale writer be itself durable.
 ### 8.4 The two liveness queries
 
 ```sql
--- Silence: a scope whose watcher has stopped attempting. Tolerance comes from
--- time-base-policy.md; expected_interval_ms is per scope.
-SELECT s.scope_id
+-- Silence: a scope whose watcher has stopped attempting. The multiple comes from
+-- policy data, bound to the EFFECTIVE revision like every other policy read
+-- (section 9.6), and it is multiplied by THAT SCOPE's own expected_interval_ms
+-- -- which is why the threshold is stored as a multiple and not as milliseconds.
+SELECT s.scope_id,
+       :now_ms - l.last_attempt_at_ms AS silent_for_ms
   FROM watcher_scope s
   JOIN watcher_liveness l ON l.scope_id = s.scope_id
+  JOIN policy_detection_latency p
+    ON p.incident_class = 'watcher_silence'
+   AND p.revision_id = (SELECT revision_id FROM policy_revision
+                         WHERE effective_at_ms <= :now_ms
+                         ORDER BY effective_at_ms DESC, revision_id DESC LIMIT 1)
  WHERE s.enabled = 1 AND s.retired_at_ms IS NULL
-   AND :now_ms - l.last_attempt_at_ms > s.expected_interval_ms * :silence_factor;
+   AND p.threshold_kind = 'scope_interval_multiple'
+   AND :now_ms - l.last_attempt_at_ms > s.expected_interval_ms * p.threshold_value;
 
 -- Coverage: a scope that should be watched and has no liveness row at all.
 -- The query a heartbeat table alone cannot express.
@@ -1476,6 +1485,7 @@ prepared, and the load-bearing constraints were exercised directly:
 | A late, older head observation cannot revive superseded CI evidence (§7.2) | The newer head advances; the older one aborts, and the projection still reads the newer head |
 | A `delivery` subscription without a recipient — and a `compute` subscription with one — are both refused at registration (§5.3) | Both abort; the two well-formed rows land |
 | The budget `CHECK` includes the reconcile period (§10) | `T=180s + P=120s = L=300s` accepted; `T = L` and `T + P > L` both abort |
+| The silence query reads its multiple from the effective policy revision and scales it by the scope's own interval (§8.4) | Quiet for 2 intervals returns nothing; quiet for 3.3 intervals returns the scope |
 
 Two things this does **not** establish, and they are the reasons it is not a substitute for the
 implementation Issue's tests. It does not exercise the `T + P ≤ L` timing behaviour, which needs the
