@@ -251,6 +251,19 @@ def test_the_acceptance_sequence_end_to_end_over_stdio(rt_env, tmp_path):
         assert initialized["result"]["serverInfo"]["name"] == "interlock-messagebus"
         client.notify("notifications/initialized")
 
+        # A mangled line is answered (id null) rather than ignored, so a
+        # client waiting on it fails fast -- and the transport stays up.
+        process.stdin.write(b"not-json\n")
+        process.stdin.flush()
+        parse_error = json.loads(process.stdout.readline())
+        assert parse_error["id"] is None
+        assert parse_error["error"]["code"] == -32700
+        process.stdin.write(b"[1, 2]\n")
+        process.stdin.flush()
+        invalid = json.loads(process.stdout.readline())
+        assert invalid["id"] is None
+        assert invalid["error"]["code"] == -32600
+
         dropped = client.call_tool("poll")
         assert dropped == {"messages": [], "fault": "drop-first-poll"}
 

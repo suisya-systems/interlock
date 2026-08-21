@@ -273,20 +273,33 @@ class Endpoint:
 
 
 def _serve(endpoint: Endpoint, stdin, stdout) -> None:
+    def reply_error(code: int, message: str) -> None:
+        # A malformed line still gets an answer (id null, per JSON-RPC), so a
+        # client waiting on the request it mangled fails fast instead of
+        # hanging -- and the transport stays alive either way.
+        stdout.write(
+            (json.dumps({
+                "jsonrpc": "2.0", "id": None,
+                "error": {"code": code, "message": message},
+            }, ensure_ascii=True) + "\n").encode("utf-8")
+        )
+        stdout.flush()
+
     for raw in stdin:
         try:
             line = raw.decode("utf-8").strip()
         except UnicodeDecodeError:
+            reply_error(-32700, "parse error: line is not UTF-8")
             continue
         if not line:
             continue
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
+            reply_error(-32700, "parse error: line is not JSON")
             continue
         if not isinstance(msg, dict):
-            # Valid JSON that is not a message object gets the same silence as
-            # malformed JSON: one bad line must not take the transport down.
+            reply_error(-32600, "invalid request: message is not an object")
             continue
         resp = endpoint.handle(msg)
         if resp is not None:

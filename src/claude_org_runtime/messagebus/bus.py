@@ -196,6 +196,14 @@ class MessageBus:
                 # of attempt() entirely, so no refusal is durably recorded for
                 # what is simply a settled message.
                 continue
+            # One instant per attempt, by the outbox's own contract:
+            # Outbox.attempt takes a single now_ms, and S7 already decided how
+            # the window inside one attempt is handled -- the in-attempt lease
+            # re-read narrows it, and a writer paused past its lease inside
+            # the attempt is refused by the *destination's* fencing token
+            # (StaleTokenRefused), the only party still running. Re-sampling
+            # the clock inside the attempt is the outbox's business, not this
+            # facade's.
             attempt_now = clock() if clock is not None else now_ms
             try:
                 outcome = self._outbox.attempt(
