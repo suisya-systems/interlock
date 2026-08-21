@@ -161,6 +161,15 @@ def test_a_reported_identity_that_disagrees_is_never_confirmed(
     assert (phase, observation) == ("spawned", "unobserved")
 
 
+@pytest.mark.skipif(
+    not Path("/proc").is_dir(),
+    reason=(
+        "adoption requires confirming the surviving pid's command line via "
+        "/proc; where /proc does not exist (macOS, Windows) the provider "
+        "fails closed and refuses to adopt -- by design (#17), so the "
+        "adoption shape is provable only where the proof surface exists"
+    ),
+)
 def test_supervisor_only_kill_the_surviving_child_is_adopted_not_respawned(
     cp, clock, spawn_log, state_root, make_provider, make_real_orchestrator, monkeypatch
 ):

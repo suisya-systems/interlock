@@ -172,7 +172,9 @@ def test_the_translation_is_confined_to_this_fixture_package():
         if _knows_a_session_backend(imported) and any(
             name.startswith(CONTROL_PLANE) for name in imported
         ):
-            relative = str(path.relative_to(REPO_ROOT))
+            # as_posix, so the allowlist compares equal under Windows's
+            # backslash separator too.
+            relative = path.relative_to(REPO_ROOT).as_posix()
             if relative not in allowed_beyond_fixture:
                 outside.append(relative)
     assert outside == [], f"{outside} knows both vocabularies and is outside the fixture"
