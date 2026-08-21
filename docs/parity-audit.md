@@ -119,7 +119,7 @@ an undesigned item.
 | # | Capability | Provided by (operating org) | Class | Interlock counterpart / rationale |
 |---|---|---|---|---|
 | D1 | Deterministic delegation planning: split-target selection, name/cwd validation, instruction-file rendering, capacity ceilings, overflow reservations | `docs/contracts/role-contract.md:130-134`; runtime `dispatcher delegate-plan` | **C** (mechanism) + **U** (C2-era input path, →G2) | The planning mechanism is carried and shipped: `src/claude_org_runtime/dispatcher/runner.py:1-13`, `docs/cli.md:19-26,57-84`. But its renga-shaped pane-JSON input has no producer left in this tree after the purge (`docs/cli.md`), so end-to-end delegation planning under C2 does not exist yet — what feeds the planner once panes are gone is part of G2's delegation-flow scope. |
-| D2 | Atomic delegation reservation: `runs.status='queued'` plus a `delegate_sent` event committed in one transaction; idempotent re-apply; identity-drift refusal | `tools/gen_delegate_payload.py:1162-1265,1094-1144`; `.claude/skills/org-delegate/SKILL.md:214-219` | **C** | The durable-reservation *need* is D-0001's (run/task/outbox rows in SQLite; resume by query) and the refusal discipline matches Interlock's recorded-refusal pattern (`docs/lease-fencing.md`). Concrete run DDL is open (Q-0001); the spike schema is throwaway (D-0026). |
+| D2 | Atomic delegation reservation: `runs.status='queued'` plus a `delegate_sent` event committed in one transaction; idempotent re-apply; identity-drift refusal | `tools/gen_delegate_payload.py:1162-1265,1094-1144`; `.claude/skills/org-delegate/SKILL.md:214-219` | **U** →G2 | Only the *principle* is covered: D-0001 requires durable SQLite state with resume-by-query, and the refusal discipline matches Interlock's recorded-refusal pattern (`docs/lease-fencing.md`). The reservation *design* — the atomic queued-plus-event transaction, replay idempotency, identity-drift refusal — exists nowhere: Q-0001 leaves the run schema and writer assignment open and the spike schema is throwaway (D-0026). A crash or retry during delegation is an uncovered window until G2's state machine (with its core Q-0001 touchpoint) designs it. |
 | D3 | Per-worker brief generation: TOML-config → `CLAUDE.md`/`CLAUDE.local.md` rendering with optional blocks, verification-depth variants, knowledge injection, src-layout detection, report-target addressing | `tools/gen_worker_brief.py:315-349,411,271-306,55-63`; `tools/templates/worker_brief_normal.md:1-25`; `.claude/skills/org-delegate/SKILL.md:148-161` | **U** →G2 | No counterpart. The Discard bucket covers handover/resume *prompt prose* for the resident roles, not task briefs (`PORTING_LEDGER.md`, Discard bucket; D-0014) — worker briefs were never classified because they live in claude-org-ja. |
 | D4 | Worker-directory Pattern A/B/C resolution and worktree orchestration (active-run collision avoidance, base-clone unification, gitignored-target routing, self-edit pinning) | `tools/resolve_worker_layout.py:1-45,218-230,778-786,189-209,669-702`; `.claude/skills/org-delegate/references/delegate-flow-details.md:41-51` | **DR** (mechanism) + **U** (successor conventions, →G2) | "The A / B / C worker layout and bespoke worktree orchestration" is named in the Discard bucket (`PORTING_LEDGER.md`; D-0014), and the `sandbox_by_pattern` axis is discarded with it (row for `src/claude_org_runtime/settings/generator.py`). Substitute: under C2 Interlock owns the worker's working tree outright (O8, D-0025), and session↔run identity is a SQLite binding (gate item 2). What workspace layout the *successor operating repo* uses is a new operating-layer convention, carried in G2. |
 | D5 | base_branch two-track dispatch: worktrees cut from a per-project registered branch, fail-loud when it does not exist on origin | `registry/projects.md:24-30`; `tools/gen_delegate_payload.py:1376-1435` | **U** →G1 | Registry content; travels with the registry concept. |
@@ -199,7 +199,7 @@ an undesigned item.
 | # | Capability | Provided by (operating org) | Class | Interlock counterpart / rationale |
 |---|---|---|---|---|
 | C1 | SQLite as canonical state: single narrow write API (StateWriter transactions), events append-only via helper with in-band corrections, derived projections regenerated and drift-checked, cwd-independent DB discovery | `docs/contracts/state-schema-contract.md:30-68`; `tools/state_db/writer.py:1-16`; `tools/state_db/discover.py:9-15`; `tools/state_db/snapshotter.py:1-21` | **C** | This is Interlock's founding decision, made stronger: SQLite SoT with resume-by-query (D-0001), fail-closed open that refuses a corrupt DB rather than recovering it as empty (`src/claude_org_runtime/control_plane/schema.py:21-29` — a deliberate inversion of v1's recover-as-empty, per the `attention/dedup.py` ledger row), lease-fenced single-writer protected writes (`docs/lease-fencing.md:17-21`), and recorded refusals. Human-readable projections: see M9/G9. |
-| C2 | Run-status closed vocabulary with transition ownership allow-list and orthogonal predicates | `docs/contracts/state-semantics-contract.md:67-197` | **C** (discipline) | The closed-vocabulary discipline is D-0005's (facts are a closed set; a new state needs a decision, not a code change); the concrete run DDL and writer assignment are open by design (Q-0001) and the spike schema is throwaway (D-0026). |
+| C2 | Run-status closed vocabulary with transition ownership allow-list and orthogonal predicates (active/reserved/visible/terminal) | `docs/contracts/state-semantics-contract.md:67-197` | **U** →G2 | Not covered by analogy: D-0005 closes only the *watcher's* six-value observation vocabulary, not run lifecycle semantics. The run-status vocabulary, per-transition ownership allow-list, and orthogonal predicates have no Interlock counterpart — Q-0001 deliberately leaves the run schema open and the spike schema accepts arbitrary status text (throwaway, D-0026). Lands in G2's state machine, whose durable schema half is settled with Q-0001 in core. |
 | C3 | Message delivery: three-state claim lifecycle with lease reaping, push-first channel sidecar that can wake idle sessions, pull fallback, message identity/ack/dedup | `CLAUDE.md:24-32`; `docs/contracts/backend-interface-contract.md:300-397` | **C** | The invariants are the Carry bucket verbatim ("message identity, ack, and dedup invariants"; `PORTING_LEDGER.md` rows for `broker/store.py`, `tests/broker/test_delivery.py`); shipped as the outbox (S7) and the broker store (`src/claude_org_runtime/broker/store.py:11-12`, `channel_sidecar.py:2-6`). The worker-facing `MessageBus` endpoint (S8) is in flight as PR #58 at audit time — its no-dependency-edge-to-`SessionProvider` assertion is the D-0009 separation. |
 | C4 | Backend abstraction: pane control + messaging + events + identity + error vocabulary behind a contract, two swappable transports (renga/broker) with mechanical name substitution | `docs/contracts/backend-interface-contract.md:1-9,32-118,241-280`; `CLAUDE.md:24-32` | **DR** | The pane-shaped backend contract is the Discard bucket's core subject (D-0009, D-0014; `src/claude_org_runtime/transport/descriptor.py` row). Substitute: two *separate* contracts — `SessionProvider` and `MessageBus` (D-0009) — with substitutability proven, not asserted: the 184-case control-plane suite runs unchanged against two providers with CI leak tripwires (gate item 11, `docs/gate-record.md`). The replacement transport contract is deliberately unauthored until needed (`src/claude_org_runtime/transport/__init__.py:2-11`). |
 | C5 | Machine-readable error-code vocabulary with tolerant unknown-code handling | `docs/contracts/backend-interface-contract.md:241-280` | **DR** | Discard bucket (backend contracts assuming panes; D-0009, D-0014), as C4. Substitute: typed Ok/Failure results in S1 where "could not observe" is distinct from "observed nothing" (R4; `src/claude_org_runtime/session/provider.py`), and typed refusals in the control plane. |
@@ -260,7 +260,7 @@ project concept.
 
 ### G2 — Delegation contract: brief generation, workspace conventions, worker roles
 
-**Gap rows:** D3, D4 (successor half), D7, D14, D17, P6, X2 (workspace half), T6.
+**Gap rows:** D2, D3, D4 (successor half), D7, D14, D17, P6, X2 (workspace half), T6, C2.
 **Draft title:** `Operating-layer delegation contract: neutral brief, workspace conventions, worker role content, completion-report schema`
 
 The single largest undesigned surface. v1 renders a per-worker brief from config
@@ -274,9 +274,13 @@ completion-report contract with human-understanding summary,
 — the successor needs *new, simpler* workspace conventions on top of C2's
 Interlock-owned working trees, not a port.
 
-- **Placement:** operating-layer — briefs, roles, and workspace conventions are
-  business-workflow material; Interlock contributes the fence renderer (D6), the spawn
-  precondition, and session↔run identity, and should stay unaware of brief content.
+- **Placement:** operating-layer, with one named core touchpoint — briefs, roles,
+  workspace conventions, and lifecycle policy are business-workflow material; Interlock
+  contributes the fence renderer (D6), the spawn precondition, and session↔run identity,
+  and should stay unaware of brief content. The durable half of the lifecycle — the run
+  schema, status vocabulary, transition allow-list, and the atomic reservation
+  transaction (D2, C2) — is settled with core's Q-0001, not invented by the operating
+  layer.
 - **Priority:** needed-before-canary — the canary's one real run must be delegated with a
   real brief, a real workspace, and a real completion contract, or it measures nothing
   about operating parity.
@@ -320,10 +324,16 @@ Interlock's outbox covers delivery (S7); nothing observes CI or links runs to PR
   human-facing session.
 - **Shape (third direction):** single event spine — CI outcomes are written once to the
   events table and every consumer (secretary AI, delivery, completion transition) reads
-  from it, assuming the S8 `MessageBus`; this replaces v1's three repair layers
-  (best-effort push + relay scan + staleness audit, P2) by construction rather than by
-  backstop. The merge-approval halt is a first-class `Gate` entity (see §1.2), not a
-  journal event plus prose.
+  from it, assuming the S8 `MessageBus`; this removes v1's *push-vs-poll duplication*
+  (best-effort push + relay scan as separate delivery paths, P2) by construction. It does
+  **not** remove the need for liveness: a dead `gh` watcher or a stalled consumer produces
+  no row that proves it stopped — the exact silent-no-op failure `tools/relay_scan.py:41-55`
+  documents (a broken cron accumulating undelivered events for weeks). G3 therefore keeps
+  a deterministic backstop as a design requirement: a watcher/consumer heartbeat written
+  unconditionally, plus a reconcile pass over undrained events — D-0002's program-side
+  reconcile loop shape, not a repair layer bolted on after. AC-10 (no regression in misses
+  or detection latency) is the acceptance hook. The merge-approval halt is a first-class
+  `Gate` entity (see §1.2), not a journal event plus prose.
 
 ### G4 — Worker escalation ledger and relay-gap detection
 
@@ -349,10 +359,15 @@ settled together with Q-0019, not by this draft.
   edge is the `MessageBus`/Secretary boundary, already provider-neutral by D-0009.
 - **Shape (third direction):** the escalation ledger is the `Gate` entity in its
   escalation form — owner, rationale, options, deadline, outcome — driven off the events
-  table rather than off message observation; relay-gap detection becomes a deterministic
-  query over open gates (a gate past deadline with no outcome), machine-evaluated, with AI
-  nowhere in the detection path. This subsumes v1's four-step register choreography as
-  state-machine transitions.
+  table rather than off message observation. The gate carries explicit **stages**
+  (received → presented-to-human → answered → forwarded-to-worker), preserving v1's
+  four-step register semantics (`tools/pending_decisions.py:1-20`): relay-gap detection is
+  a deterministic query over *incomplete transitions*, each aged with its own tolerance —
+  a request received but not presented is a Secretary-side gap within minutes, while
+  presented-but-unanswered is a slow human, not a gap, and answered-but-not-forwarded is a
+  gap again. A single open-past-deadline predicate would both false-alarm on slow humans
+  and miss a dropped forward; the staged form does neither, machine-evaluated, with AI
+  nowhere in the detection path.
 
 ### G5 — Human attention channel: awaiting-user signalling and notification backend
 
@@ -496,13 +511,13 @@ escalation-only expansion (`CLAUDE.md:92-100`), ultracode arming for heavy tasks
 
 Ledger totals (69 rows in §2; split rows count once under their first-listed class):
 
-- **covered:** 20 rows — the control-plane core (state, delivery, fencing, identity,
+- **covered:** 18 rows — the control-plane core (state, delivery, fencing, identity,
   curation gate, role boundaries) is not where migration loses capability; in several rows
   (C1, C6, K3) Interlock is strictly stronger than the operating org's mechanism.
 - **deliberately-reduced:** 13 rows — each traces to a recorded Discard bucket (pane
   transport, screen scraping as contract, resident loops, handover prose, A/B/C layout) or
   a retiring decision entry, with the substitute named; none reopens a D-0015 non-goal.
-- **undesigned:** 32 rows, consolidated into 10 drafts (G1–G10) — 6 needed before the
+- **undesigned:** 34 rows, consolidated into 10 drafts (G1–G10) — 6 needed before the
   canary (registry, delegation contract, PR/CI ingestion, escalation ledger, attention
   channel, measurement), 4 can follow it (work discovery, learning loop, dashboard,
   policy pack). Two rows (P8, C10) are dispositioned without a draft; T6 and D17 are
