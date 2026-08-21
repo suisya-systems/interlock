@@ -46,11 +46,16 @@ Three things follow, and every row below is read in their light:
 control-plane property — item 6 with the F1 caveat its §3 row states). **Item 3 is
 discharged on C2**, on the weakened observable D-0023 defines — and its residual is stated in §3 in
 D-0023's own terms rather than folded into the verdict. Item 2 carries a **failed** verdict on C1
-and is **discharged on C2** (2026-08-21, `#18`) — the C1 failure stays on the record beside it. **Item 8 is rehearsed on C2 — explicitly not discharged** (D-0022): its
+and is **discharged on C2** (2026-08-21, `#18`) — the C1 failure stays on the record beside it.
+**Items 1 and 7 are discharged on C2** (verdicts recorded 2026-08-21, on the S4 probe records of
+`#6` and `#7`, both landed 2026-08-18). **Items 4 and 5 are discharged** as control-plane
+properties (verdicts recorded 2026-08-21, on the S9 harness and the `ACCEPTANCE.md` §2 matrix
+suite — `#15` and `#16`, landed 2026-08-20). **Item 8 is rehearsed on C2 — explicitly not discharged** (D-0022): its
 discharge point remains before the canary starts, against the real Secretary. **Item 10 is
 rehearsed against a synthetic counterparty — explicitly not discharged** (D-0022): its discharge
-point remains at the canary itself, with live v1 as the counterparty. Every other item is
-**pending** — the spike is under way on C2 and its evidence has not landed yet.
+point remains at the canary itself, with live v1 as the counterparty. No item is `pending` any
+longer: every row carries a verdict, and what stands between this record and the gate's close is
+the two D-0022 deferrals, whose discharge points have not been reached.
 
 ---
 
@@ -63,13 +68,13 @@ real implementation`**, **`n/a — failed`**, **`pending`**. Provider is one of 
 
 | # | Item (short) | Verdict | D-0022 label | Provider | Evidence | Discharge point |
 |---|---|---|---|---|---|---|
-| 1 | Public CLI alone can start / read state / stop / resume | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#6`, `#7` — not yet landed | The spike (phases 1a/1b) |
+| 1 | Public CLI alone can start / read state / stop / resume | `discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#6` (PR `#31`) — `investigation/i01-supervisor-probe.md`; `#7` (PR `#33`) — `investigation/i02-conversation-probe.md`: the full cycle on one real multi-turn worker, three successive resumes, the internals-free negative executed on both halves. Landed 2026-08-18; verdict recorded 2026-08-21 | The spike (phases 1a/1b) — reached 2026-08-18 |
 | 2 | Unique session↔run re-match across the crash window; no duplicate writer | `failed` on C1; `discharged` on C2 | `n/a — failed` (C1); `proven on the spike slice` (C2) | `C1 (Agent View)` → `C2 (claude -p subprocesses)` | D-0027; `investigation/u1-session-id-bg-experiment.md`; `investigation/pre-spawn-fence-search.md`. C2 proof: `#18` landed 2026-08-21 — `docs/crash-window-orchestration.md`, `tests/gate_item2/`, the `session-start` fault cases, `investigation/i18-crash-window-characterisation.md`; its provider (`#17`, S2) landed 2026-08-21 | The spike (phase 6), on C2 — reached 2026-08-21 |
 | 3 | Per-role permission / sandbox / hooks survive restart and fail closed | `discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#9`; `docs/per-role-fencing.md`; `src/claude_org_runtime/fencing/`; `tests/fencing/`; `investigation/i04-pretooluse-fence-probe.md` (U15, U35, U42). `#8` closed as **moot** under C2, not passed | The spike (phase 2b) |
-| 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `pending` | `pending` | `pending` | `#12` (S5), `#13` (S6, the lease and fencing token) and `#14` (S7 outbox + one declared handler) landed 2026-08-19; `#16` — not yet landed | The spike (phases 4–5) |
-| 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `pending` | `pending` | `pending` | `#12` (S5), `#13` (S6) and `#14` (S7) landed 2026-08-19; `#15`, `#16` — not yet landed | The spike (phases 4–5) |
+| 4 | Supervisor / Dispatcher Core / Secretary resume from SQLite, no double execution | `discharged` | `proven on the spike slice` | `provider-independent` | `#12` (S5), `#13` (S6) and `#14` (S7) landed 2026-08-19; `#15` (PRs `#50`, `#51` — the S9 harness) and `#16` (PR `#52` — the §2 matrix) landed 2026-08-20 — `tests/fault_injection/`, `docs/s9-fault-injection-harness.md`: three role processes killed separately and in combination at points straddling the durable write, recovery by query from SQLite alone. Verdict recorded 2026-08-21 | The spike (phases 4–5) — reached 2026-08-20 |
+| 5 | Lease, outbox resend, ack, dedup, single-writer under fault injection | `discharged` | `proven on the spike slice` | `provider-independent` | `#13` (S6) and `#14` (S7) landed 2026-08-19; `#15` (PRs `#50`, `#51`) and `#16` (PR `#52`) landed 2026-08-20 — all six `ACCEPTANCE.md` §2 targets automated in `tests/fault_injection/` (55 cases at `#16`'s landing, 59 with `#18`'s `session-start` cases), external effects proven against the destination's own record. Verdict recorded 2026-08-21 | The spike (phases 4–5) — reached 2026-08-20 |
 | 6 | `MessageBus` delivers and resends independently of the UI | `discharged` | `proven on the spike slice` | `provider-independent` | `#19` — `src/claude_org_runtime/messagebus/`; `tests/messagebus/`; `docs/messagebus-carry-drop.md`; D-0028 | The spike (phase 7) |
-| 7 | Unsaved artifacts protected from the managed worktree lifecycle | `pending` | `pending` | `C2 (claude -p subprocesses)` | `#7` — not yet landed | The spike (phase 1b) |
+| 7 | Unsaved artifacts protected from the managed worktree lifecycle | `discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#7` (PR `#33`) — `investigation/i02-conversation-probe.md` §3.5: a fixture carrying uncommitted, untracked and unpushed work byte-identical by recorded hash across every lifecycle transition, the A6 edit-forcing negative executed. Landed 2026-08-18; verdict recorded 2026-08-21 | The spike (phase 1b) — reached 2026-08-18 |
 | 8 | Secretary window responsiveness under worker load | `rehearsed — not discharged` | `proven on the spike slice` | `C2 (claude -p subprocesses)` | `#21` — `tests/secretary/`; `docs/secretary-intake-boundary.md`; `investigation/i16-item8-rehearsal.md` | **Before the canary starts** (D-0022) |
 | 9 | Curator output cannot reach a skill without human approval | `discharged` | `proven on the spike slice` | `provider-independent` | `#22`, PR `#27`; `docs/curator-promotion-gate.md`; `tests/curator/`; `investigation/u8-skill-hot-reload-probe.md` (U8) | **Discharged 2026-08-18**, independently of the spike |
 | 10 | One-worker canary and run-boundary rollback | `rehearsed — not discharged` | `proven on the spike slice` | `provider-independent` | `#23` — `tests/canary/`; `docs/canary-routing-rehearsal.md`; `src/claude_org_runtime/canary/` (synthetic counterparty rehearsal) | **At the canary itself** (D-0022) |
@@ -87,15 +92,42 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 ### Item 1 — the public CLI alone can start, read structured state of, stop, and resume a worker
 
-- **Verdict:** `pending`
-- **D-0022 label:** `pending`
-- **Provider:** `C2 (claude -p subprocesses)` — `ACCEPTANCE.md` §4 requires this item in full
-  against whatever provider ships. Nothing proven on C1 carries over.
-- **Evidence:** `#6` (the `claude -p` supervisor surface Interlock will own) and `#7` (multi-turn
-  resume on real workers). Neither has landed.
-- **Residual:** none recorded yet.
-- **Notes:** `#6` is a phase-1a early exit. If the supervisor surface does not work through
-  documented flags, the sequence ends here and this file is still due.
+- **Verdict:** `discharged` — recorded 2026-08-21, on evidence landed 2026-08-18. The two probe
+  records propose this reading (each is scoped propose-only); entering the verdict is this
+  record's call, made here.
+- **D-0022 label:** `proven on the spike slice` — the probe harnesses are S4 throwaways (D-0026);
+  the durable half is the two investigation records with their verbatim argv, output and exit
+  codes. Re-proof on the real implementation is still owed, and `ACCEPTANCE.md` §4 keeps item 1
+  on the re-run-in-full list for any provider change.
+- **Provider:** `C2 (claude -p subprocesses)` — CLI 2.1.234, one machine, one load (U34). Nothing
+  proven on C1 carries over, and nothing from C1 was used.
+- **Evidence:** `#6` (PR `#31`) — `investigation/i01-supervisor-probe.md`, the supervisor half:
+  spawn, machine-parseable state read from published output (the `system/init` event under
+  `--output-format stream-json --verbose` — the default `text` format is not a supervisor
+  surface), signal-terminate and reap through documented flags only, the exit-code table with
+  exit 0 recorded as evidence of nothing, the capability/version probe recorded verbatim, and the
+  internals-free negative executed against the harness with the child unrestricted. `#7` (PR
+  `#33`) — `investigation/i02-conversation-probe.md`, the conversation half: the whole cycle on
+  one real four-turn worker (start → structured read → stop, a mid-turn SIGTERM at rc 143 →
+  resume, the stopped turn persisted and recalled), continuity across three successive resumes in
+  fresh processes with one `session_id` and one transcript growing in place (no fork-like
+  behaviour of the U33 class), resume across a supervisor kill-and-restart from persisted state
+  only with the child resolved before the resume — both the died-with-parent and the live-orphan
+  case — and the internals-free negative re-run on this half the right way round: the restriction
+  on the harness, never the child.
+- **Residual:** three, each a provider fact recorded rather than absorbed. **(1) H5/U38** — the
+  `--session-id` refusal is a file-existence check, not a lock: removing the transcript releases
+  the claim and the id is then re-claimable as if new, so a session id is **not durable
+  identity** (i02 §3.6). U40 (whether the CLI itself ever removes transcripts) and U41 (whether a
+  re-claimed-empty id is distinguishable from a fresh one) stay open. **(2)** "Stop and reap"
+  means the **process group**: a pid-only stop satisfies the letter of the item while leaving the
+  child's children running (i01 §3.5). **(3)** Resume is not idempotent with respect to live
+  writers (U32): resolve-then-resume is a supervisor obligation, not a provider guarantee — the
+  exclusion stays with the lease, and item 2's residual is where it is carried.
+- **Notes:** `#6` was a phase-1a early exit, and it did not fire — the supervisor surface works
+  through documented flags. The cycle's verbs are C2-shaped: under C2 "resume" is continuity
+  across invocations (a fresh `-p` process with `--resume`), not reattachment to a running
+  process, and that is the shape the evidence demonstrates.
 
 ### Item 2 — unique session↔run re-matching across the crash window, no duplicate active writer
 
@@ -299,73 +331,94 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 ### Item 4 — Supervisor / Dispatcher Core / Secretary resume from SQLite with no double execution
 
-- **Verdict:** `pending`
-- **D-0022 label:** `pending`
-- **Provider:** `pending` — a control-plane property; re-run for regression against a new provider,
-  not redesigned (`ACCEPTANCE.md` §4).
-- **Evidence:** `#13` (lease/fencing token) and `#16` (the `ACCEPTANCE.md` §2 matrix as an
-  automated suite) have not landed. `#14` (S7 — outbox, one handler) landed 2026-08-19:
-  `src/claude_org_runtime/control_plane/{outbox,handlers,destination}.py`, tests
-  `tests/control_plane/test_outbox.py`. It supplies the *no double execution* half of this item at
-  the message level: one effect per dedup key, with the effect record deduplicated by
-  `action_one_effect_per_key` on our side **and** by the destination's own idempotency ledger on the
-  other. Landing it proves nothing about the item as a whole — the three-component kill matrix is
-  `#15`'s and `#16`'s. `#12` (S5) landed 2026-08-19:
-  `src/claude_org_runtime/control_plane/`, tests `tests/control_plane/`. It is the store this item
-  resumes *from* — the five recovery reads are `RECONSTRUCTION_QUERIES`, and the suite proves the
-  reconstruction is answerable by query alone by dropping the interpreter and re-reading it from a
-  fresh subprocess. Corrupt state is refused rather than recovered as empty (R3), so a damaged
-  database cannot present itself as "nothing was in flight".
-- **Residual:** none recorded yet. The known structural limit is stated in `ACCEPTANCE.md` §2:
-  SQLite alone cannot distinguish a completed side effect from one that never started, so each
-  action handler must **name** its exactly-once mechanism (destination idempotency key, or effect
-  transactional with its record) or route to a human gate (D-0004). `#14` discharges the naming
-  obligation *mechanically* rather than by convention: `HandlerRegistry` refuses a handler that does
-  not declare a mechanism from the enumeration `action.exactly_once_mechanism` already carries, and
-  the suite re-checks every shipped handler class so that one bypassing the registry still fails.
-  The limit itself is unchanged and is not claimed to be closed.
+- **Verdict:** `discharged` — recorded 2026-08-21, on evidence landed 2026-08-20 (`#16`, closing
+  the matrix its own issue names as discharging items 4 and 5).
+- **D-0022 label:** `proven on the spike slice` — and the slice caveat is the load-bearing one on
+  this item: the three role processes the matrix kills are harness adapters running distinct,
+  role-asymmetric operation scripts over the S6/S7 surface, **not** the real Supervisor /
+  Dispatcher Core / Secretary — `docs/s9-fault-injection-harness.md` §2.2 states this honestly,
+  and this record repeats it rather than reading past it. What is proven now is that three
+  independently-crashing role processes with disjoint write-sets recover from SQLite alone with
+  no double execution under real kills; *re-proven on the real implementation* will mean the same
+  manifest and cases run through adapters over the real components' entrypoints, and the
+  conformance battery every adapter must pass is what keeps the harness valid across that
+  transition.
+- **Provider:** `provider-independent` — a control-plane property: the item 4/5 cases bind no
+  session provider, and `tests/fault_injection/test_import_graph.py` holds every harness module
+  but the two adapters free of any `claude_org_runtime` import, on the syntax tree. Re-run for
+  regression against a new provider, not redesigned (`ACCEPTANCE.md` §4).
+- **Evidence:** `#15` (PR `#50` — `docs/s9-fault-injection-harness.md`, the design; PR `#51` —
+  the harness) and `#16` (PR `#52` — the matrix), both landed 2026-08-20, on top of `#12` (S5),
+  `#13` (S6) and `#14` (S7), landed 2026-08-19. What the suite demonstrates for this item: each
+  of the three roles is SIGKILLed **separately** at all four deterministic points straddling the
+  durable write (before the write; after the record, before the effect; after the effect, before
+  its record; delivered, before the ack), and **in combination** — all three pairs and the
+  triple, staggered kill orders included — at two of them, *before the durable write* and *after
+  the effect, before its record*; the other two windows are exercised by single-role cases only,
+  and that narrower combined coverage is stated here rather than implied away. On restart each
+  role entrypoint **recovers before it proceeds** —
+  reconstructing its view by query from SQLite alone, with no warm state across the restart (the
+  command line and the database file are the whole input), re-establishing its lease and driving
+  unfinished work to resolution; and exactly-once is evidenced by the dedup record on our side
+  **and** the destination's own effect record, never by the absence of a visible duplicate. The
+  store side stands as recorded when it landed: `#12`'s `RECONSTRUCTION_QUERIES` prove the
+  reconstruction answerable by query alone from a fresh subprocess, and corrupt state is refused
+  rather than recovered as empty (R3); `#14`'s `HandlerRegistry` refuses a handler that does not
+  declare its exactly-once mechanism.
+- **Residual:** three. **(1)** The role-process caveat above: item 4 *of the final components* is
+  owed when the real processes exist — that debt is exactly what the D-0022 label carries, and it
+  is stated here so the label cannot be read as a formality. **(2)** The `ACCEPTANCE.md` §2
+  structural limit is unchanged and not claimed closed: SQLite alone cannot distinguish a
+  completed side effect from one that never started, so each handler names its exactly-once
+  mechanism (enforced mechanically since `#14`) or routes to a human gate (D-0004). **(3)**
+  `Q-0001` and `Q-0002` are **parameterised, not answered**: resource names and collapse rules
+  are per-case data, and manifest validation rejects at collection time any matrix that settles
+  either question.
 
 ### Item 5 — lease, outbox resend, ack, dedup, single-writer confirmed by fault injection
 
-- **Verdict:** `pending`
-- **D-0022 label:** `pending`
-- **Provider:** `pending` — control-plane property, as item 4.
-- **Evidence:** `#15` (deterministic kill points) and `#16` have not landed. `#13` (S6) and `#14`
-  (S7) both landed 2026-08-19 and carry one half of this item each.
-
-  `#13`: `src/claude_org_runtime/control_plane/lease.py`, tests `tests/control_plane/test_lease.py`,
-  written record `docs/lease-fencing.md`. The **exclusion** half — the fencing token is validated
-  **atomically as part of** each protected write, a stale-token write is refused and the refusal
-  recorded as an `action` row, and the single-writer property is read back by query from the epoch
-  every fenced write is stamped with.
-
-  `#14`: the **outbox resend, ack and dedup** rows of `ACCEPTANCE.md` §2 — a lost ack resends
-  without losing the message; a duplicate or late ack changes nothing and the row shows exactly one
-  acked state; `retry_count` counts *attempts* rather than successes and is proven monotonic across
-  a real process restart (a fresh interpreter, not a second connection); and no unfinished row is
-  left without a live owner after recovery, exported as `UNOWNED_OUTBOX_QUERY` so the criterion can
-  be run by hand against a recovered database.
-
-  **Landing the mechanisms discharges nothing here:** the injection matrix is `#16`'s and the
-  deterministic kill points are `#15`'s, and this item is a verdict about those cases rather than
-  about the mechanisms they exercise.
-- **Residual:** three, none of them assumed away. **(1)** The spike schema keeps one lease row per
-  resource and no history table (`Q-0001`), so a wall-clock timeline is reconstructed from observed
-  row states while the durable evidence is the epoch stamped on each fenced write
-  (`docs/lease-fencing.md` §5). **(2)** Under clock skew two holders can overlap in *true* time and
-  the rows cannot show it — each claimant stamps its acquisition in its own frame — which is
-  precisely why a protected write validates the epoch and not the expiry. **(3)** `#14`'s
-  destination is a **spike stand-in** (`KeyedDropbox`, an `O_EXCL` keyed dropbox) rather than a
-  production counterparty; it models the property the item turns on — that the *destination* refuses
-  the duplicate — and re-proving the item against a real destination is `#16`'s and the canary's.
-  Per `ACCEPTANCE.md` §2 a case certifying exactly-once for an **external** effect from our own rows
-  alone does not count, and every case must be automated and reproducible — no manual one-shot
-  demonstrations. `#14` is written to that rule: its exactly-once assertions read the
-  **destination's** effect count, and the strongest of them deletes the control-plane database
-  before asking, so no row of ours can be what makes it pass.
+- **Verdict:** `discharged` — recorded 2026-08-21, on evidence landed 2026-08-20.
+- **D-0022 label:** `proven on the spike slice` — the mechanisms under test (S6/S7) and the spike
+  adapter are throwaway; the durable half is the manifest, the barrier protocol, the invariant
+  queries and the cases themselves (D-0014's rescue list, D-0026). The role-process caveat item
+  4's row states applies here unchanged.
+- **Provider:** `provider-independent` — control-plane property, as item 4.
+- **Evidence:** `#15` (PRs `#50`, `#51`) and `#16` (PR `#52`), landed 2026-08-20, over `#13` (S6)
+  and `#14` (S7), landed 2026-08-19, which carry one half of this item each — the exclusion half
+  (the fencing token validated atomically as part of each protected write, refusals recorded as
+  `action` rows, single-writer read back by query from the stamped epoch) and the outbox resend /
+  ack / dedup half (lost ack resends without losing the message; duplicate and late acks change
+  nothing; `retry_count` monotonic across a real process restart; no unfinished row left without
+  a live owner, exported as `UNOWNED_OUTBOX_QUERY`). What `#16` adds is the verdict-bearing part:
+  **all six §2 targets — Lease, Outbox resend, Ack, Dedup, Single-writer, Observation outage —
+  automated** (55 cases at its landing, 59 with the `session-start` cases `#18` added), the §2
+  table enforced as an injection-phrase checklist with zero exemptions. Kill points are
+  deterministic and re-runnable in isolation; clock skew is driven both directions across the
+  lease-expiry boundary and SIGSTOP through lapse-and-resume; every assertion is against a
+  durable record — a SQLite query or a persisted incident field — and every external-effect case
+  is additionally proven against the **destination's own** effect record. The observation-outage
+  rows keep D-0006's two fact states distinct: an unreadable observation is classified
+  `OBSERVATION_UNAVAILABLE` and a silent-but-readable one `NO_ACTIVITY_EVIDENCE` — neither is
+  ever an anomaly, and neither produces a termination or restart recommendation. No manual one-shots
+  anywhere: the suite runs in CI (full, fast and portable profiles).
+- **Residual:** the three recorded before `#16` landed, one of them updated, plus one new pair.
+  **(1)** The spike schema keeps one lease row per resource and no history table (`Q-0001`), so a
+  wall-clock timeline is reconstructed from observed row states while the durable evidence is the
+  epoch stamped on each fenced write (`docs/lease-fencing.md` §5). **(2)** Under clock skew two
+  holders can overlap in *true* time and the rows cannot show it — each claimant stamps its
+  acquisition in its own frame — which is precisely why a protected write validates the epoch and
+  not the expiry. **(3) — updated with `#16`:** the destination is still the **spike stand-in**
+  (`KeyedDropbox` and the refusing / duplicate-delivering wrappers built over it), and `#16` ran
+  the whole matrix against that stand-in; re-proving the item against a **real** destination
+  therefore now rests on the canary alone, no longer partly on `#16`. **(4) — new with `#16`,
+  disclosed in its PR:** the incident-collapse "open-linked" reading (chain root = the row with
+  NULL `related_incident_id`) is a harness-local convention — the schema assigns that column no
+  semantics while `Q-0002` stays open — and `sigkill-expire` observes the returning holder
+  refused at *acquire*, with the stale-token *write* refusal carried by `sigstop-expire`.
 - **Notes:** D-0027 moves the fencing token and its tests from "belt and braces" to **the only
   exclusion in the system**. Item 5's single-writer cases are therefore where item 2's residual is
-  actually carried.
+  actually carried — and the same harness is what `#18` re-armed for item 2's `session-start`
+  cases, so the two verdicts share machinery, not evidence.
 
 ### Item 6 — `MessageBus` delivers and resends independently of the Agent View UI
 
@@ -417,14 +470,40 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
 
 ### Item 7 — unsaved artifacts protected from the managed worktree lifecycle
 
-- **Verdict:** `pending`
-- **D-0022 label:** `pending`
-- **Provider:** `C2 (claude -p subprocesses)` — required in full against the shipping provider.
-- **Evidence:** `#7` (working-tree ownership on real `claude -p` workers). Not yet landed.
-- **Residual:** none recorded yet.
-- **Notes:** `#7` is a phase-1b early exit and can fail item 1 or item 7. C2 was chosen partly on
-  O8 — under C2 nobody else owns the working tree — but that is a *reason to expect* the item to
-  pass, not evidence that it did.
+- **Verdict:** `discharged` — recorded 2026-08-21, on evidence landed 2026-08-18.
+- **D-0022 label:** `proven on the spike slice` — the probe is an S4 throwaway; the durable half
+  is `investigation/i02-conversation-probe.md` §3.5's recorded hashes and per-transition table.
+  Re-proof against the shipping provider's real lifecycle is still owed (`ACCEPTANCE.md` §4 keeps
+  item 7 on the re-run-in-full list).
+- **Provider:** `C2 (claude -p subprocesses)` — CLI 2.1.234, one machine, one load.
+- **Evidence:** `#7` (PR `#33`) — `investigation/i02-conversation-probe.md` §3.5. A git fixture
+  carrying all three states the item names — uncommitted, untracked and unpushed — was driven
+  through every lifecycle transition Interlock performs: thirteen foreground transitions (create,
+  the resumes, a mid-turn stop, both supervisor kill-and-restart cases, the internals-free
+  negative on both sides), each bracketed by a per-transition hash pair, plus four detached
+  spawn-and-kill cycles bracketed by the cumulative baseline-to-final comparison. The tree came
+  back **byte-identical by recorded hash** (`0b13bdcc…` at baseline and at the end), git state
+  unchanged, the child's `cwd` sampled every 50 ms recording exactly one value, and no worktree
+  created. The negative is **executed, not argued from "we did not pass `--worktree`"**: the A6
+  trigger — a task forcing a file write, with edits permitted — was reproduced on `-p` in a
+  second identical fixture, and the child edited the tree in place, relocating nothing and
+  creating no worktree.
+- **Residual:** two. **(1)** The negative covers the child acting **unasked**: a child instructed
+  to run `git worktree add`, or configured into a worktree workflow, is Interlock's own policy
+  surface, not the provider's — and item 7 is about the latter. **(2)** Under C2 the "cleanup"
+  transition is Interlock's own deletion of the transcript, which per H5 also releases the
+  session id — the cleanup/identity coupling is recorded under item 1's residual and binds the
+  real cleanup design; nothing about it threatens the working tree, but it is the one lifecycle
+  step this evidence could not exercise against a provider-owned implementation, because none
+  exists.
+- **Notes:** the item's tail clause — a provider able to reclaim a worktree without an interlock
+  the control plane can observe or veto is a gate failure — is **not engaged on this surface**:
+  under C2 there is no provider-managed worktree lifecycle at all, and A6's unasked relocation is
+  an Agent View behaviour that does not reproduce on `-p`. Like item 3's D-0023 hole, that clause
+  would re-engage the moment a provider that manages worktrees is adopted. `#7` was a phase-1b
+  early exit that could have failed item 1 or item 7; it fired for neither. C2 was chosen partly
+  on O8 — under C2 nobody else owns the working tree — and what was a *reason to expect* the item
+  to pass is now backed by the executed negative rather than standing in for it.
 
 ### Item 8 — Secretary window responsiveness while workers are loaded
 
@@ -598,10 +677,10 @@ anything.
 | Artifact | Class (D-0026) | Where |
 |---|---|---|
 | S1 — the provisional `SessionProvider` interface | **durable (contract)** | `#10` — marked provisional in the file itself (D-0021); promoted to a settled contract only by a later `D-` entry. Landed 2026-08-19: `src/claude_org_runtime/session/provider.py`, tests `tests/session/`. Being written does not promote it |
-| Tests — fault injection, recovery, accident-derived fixtures, the control-plane suite | **durable (tests)** | `#15`, `#16`, `#18`, `#19`, `#20`, `tests/curator/`, `tests/fencing/`. `#20` landed 2026-08-20: `tests/gate_item11/` is durable test material — the provider registry, the substitution adapter and the two plugins are the fixture half a second provider re-uses, not an implementation to throw away with S3 |
+| Tests — fault injection, recovery, accident-derived fixtures, the control-plane suite | **durable (tests)** | `#15`, `#16`, `#18`, `#19`, `#20`, `tests/curator/`, `tests/fencing/`. `#15` and `#16` landed 2026-08-20: `tests/fault_injection/` — the controller, barrier protocol, manifest, conformance battery and the §2 matrix cases are the durable half; the spike driver is the throwaway adapter its design names. `#20` landed 2026-08-20: `tests/gate_item11/` is durable test material — the provider registry, the substitution adapter and the two plugins are the fixture half a second provider re-uses, not an implementation to throw away with S3 |
 | S2 — the C2 `SessionProvider` | throwaway | `#17` — landed 2026-08-21: `src/claude_org_runtime/session/claude_cli_provider.py`, tests `tests/session/test_claude_cli_provider.py` (hermetic, against a fake CLI — the failure shapes a live healthy CLI will not produce on demand), plus the S2 registry row in `tests/gate_item11/`. Identity read-back and refusal only: the `already in use` refusal is never a lock (U27/U38), `--resume` is unguarded (U32), and exclusion stays with the lease — orchestration and the crash-window proof are `#18`'s |
 | S3 — the stub provider | throwaway | `#11` — landed 2026-08-19: `src/claude_org_runtime/session/stub_provider.py`, tests `tests/session/test_stub_provider.py`. Local child processes only: no Claude CLI, no network. Throwaway under D-0026, but it survives a C2 switch untouched |
-| S4 — the probe harnesses | throwaway | `#6`, `#7` |
+| S4 — the probe harnesses | throwaway | `#6`, `#7` — landed 2026-08-18: `investigation/i01_supervisor_probe.py`, `investigation/i02_conversation_probe.py` and the two `*_internals_free_negative.sh` drivers are throwaway; their records `investigation/i01-supervisor-probe.md` and `investigation/i02-conversation-probe.md` are evidence, kept as the basis of the item 1 and item 7 verdicts |
 | **S5 — the spike SQLite schema** | **throwaway — named explicitly by D-0026** | `#12` — landed 2026-08-19: `src/claude_org_runtime/control_plane/spike_schema.sql`, tests `tests/control_plane/`. The file carries its own note, at the top, that it is a spike schema and that **no migration path is promised from it**, and the loader refuses DDL whose marking has been removed. A database at another revision is **refused, never migrated**. `Q-0001` stays open and is not answered by inertia: no column, CHECK or index names a component or a role, and `Q-0002` stays open too — `dedup_key` is indexed but not unique, so neither collapse rule is forced |
 | S6 / S7 — lease and outbox implementations | throwaway (their tests are durable) | `#13` — landed 2026-08-19: `src/claude_org_runtime/control_plane/lease.py`, tests `tests/control_plane/test_lease.py`, written record `docs/lease-fencing.md`. Throwaway under D-0026 and it survives a C2 switch untouched — it is Interlock's own obligation regardless of provider (D-0024), and after the fence search it is the only exclusion there is. `Q-0001` stays open: `holder` is an opaque claimant identity and never a role. `#14` — landed 2026-08-19: `src/claude_org_runtime/control_plane/{outbox,handlers,destination}.py` is throwaway, `tests/control_plane/test_outbox.py` is the durable half |
 | S8 — `MessageBus` MCP endpoint | throwaway (the no-edge assertion is durable) | `#19` |
