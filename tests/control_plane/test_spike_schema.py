@@ -452,6 +452,16 @@ def test_the_binding_phase_only_moves_forward(cp):
     add_session(cp, "sess-1", binding_phase="prepared", observation="unobserved",
                 provider_state=None, observation_reason="spawn not yet attempted")
 
+    # Skipping a step is refused too: a row that jumped straight to
+    # 'identity_confirmed' would claim a read-back without ever recording
+    # that a spawn was requested -- evidence recovery must be able to trust.
+    with pytest.raises(sqlite3.IntegrityError):
+        cp.execute(
+            "UPDATE session SET binding_phase = 'identity_confirmed',"
+            " observation = 'observed', provider_state = 'running',"
+            " observation_reason = NULL WHERE session_id = 'sess-1'"
+        )
+
     # The forward walk is the legal one: prepared -> spawned -> confirmed.
     cp.execute("UPDATE session SET binding_phase = 'spawned' WHERE session_id = 'sess-1'")
     with pytest.raises(sqlite3.IntegrityError):

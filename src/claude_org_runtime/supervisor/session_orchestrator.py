@@ -348,7 +348,14 @@ class SessionOrchestrator:
 
         self._gate_sequence += 1
         now = self._now_ms()
-        key = f"post_spawn_gate:{self._run_id}:{moment}:{now}:{self._gate_sequence}"
+        # The holder is part of the key: two orchestrator lives can cross the
+        # same gate moment at the same injected-clock instant with the same
+        # local sequence, and a collision here would surface as an
+        # IntegrityError instead of the fenced validation it exists to run.
+        key = (
+            f"post_spawn_gate:{self._run_id}:{self._holder}:{moment}:"
+            f"{now}:{self._gate_sequence}"
+        )
         statement = fenced_insert(
             "action",
             values={

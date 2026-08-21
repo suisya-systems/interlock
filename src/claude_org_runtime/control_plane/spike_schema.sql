@@ -156,11 +156,14 @@ CREATE INDEX session_by_run ON session(run_id);
 -- is read out of.
 CREATE TRIGGER session_binding_phase_is_forward_only
 BEFORE UPDATE OF binding_phase ON session
-WHEN (OLD.binding_phase = 'spawned' AND NEW.binding_phase = 'prepared')
-  OR (OLD.binding_phase = 'identity_confirmed'
-      AND NEW.binding_phase <> 'identity_confirmed')
+WHEN NOT (
+       (OLD.binding_phase = NEW.binding_phase)
+    OR (OLD.binding_phase = 'prepared' AND NEW.binding_phase = 'spawned')
+    OR (OLD.binding_phase = 'spawned'  AND NEW.binding_phase = 'identity_confirmed')
+)
 BEGIN
-    SELECT RAISE(ABORT, 'session.binding_phase may only move forward');
+    SELECT RAISE(ABORT,
+        'session.binding_phase moves prepared -> spawned -> identity_confirmed, one step at a time');
 END;
 
 -- --------------------------------------------------------------------------
