@@ -454,6 +454,51 @@ def test_a_claimant_that_stalls_in_the_readback_never_returns_success(
     ]
 
 
+def test_a_provider_failure_does_not_bypass_the_fence(
+    cp, clock, provider, make_orchestrator
+):
+    """A verb Failure proves nothing about process creation; fence first.
+
+    The claimant loses its lease inside the provider verb *and* the verb
+    reports failure. The stale token must still be refused durably (with the
+    maybe-created child handled), never a quiet ProviderStartFailed that
+    walks away from a possible duplicate writer.
+    """
+
+    from claude_org_runtime.session.provider import Failure, FailureKind
+
+    def fail_and_lose(request):
+        take_over(cp, clock, "sup-b")
+        return Failure(
+            FailureKind.UNINTERPRETABLE_RESPONSE,
+            "the readout failed after Popen; a process may exist",
+        )
+
+    provider.on_start = fail_and_lose
+    with pytest.raises(LoserTerminated):
+        make_orchestrator("sup-a").start()
+    assert any("post_spawn_gate" in row["kind"] for row in refusals(cp))
+
+
+def test_a_fruitless_readback_still_ends_in_a_fenced_write(
+    cp, clock, provider, make_orchestrator
+):
+    """Exhausting the poll while stale is a refusal, not a quiet timeout."""
+
+    def lose_while_polling():
+        take_over(cp, clock, "sup-b")
+
+    provider.next_readouts = [unconfirmed("never")] * 10
+    with pytest.raises(LoserTerminated) as caught:
+        make_orchestrator(
+            "sup-a", wait=lose_while_polling, readback_attempts=2
+        ).start()
+    # No takeover writer had confirmed anything, so the loser's own child was
+    # stopped rather than left as a hazard.
+    assert caught.value.stop_attempted is True
+    assert caught.value.session_id in provider.stop_calls
+
+
 def test_an_unconfirmed_stop_is_reported_as_unconfirmed(
     cp, clock, provider, make_orchestrator
 ):

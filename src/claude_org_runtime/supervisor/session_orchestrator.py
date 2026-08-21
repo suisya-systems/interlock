@@ -484,11 +484,14 @@ class SessionOrchestrator:
             ),
         )
 
-    def _await_identity(self, session_id: str) -> SessionReadout:
+    def _await_identity(self, lease: Lease, session_id: str) -> SessionReadout:
         """Poll ``read_state`` until the committed identity reads back.
 
         Never confirms on trust: exhausting the attempts raises, the binding
-        stays ``spawned``, and the last answer rides on the exception.
+        stays ``spawned``, and the last answer rides on the exception. The
+        exhaustion path still ends in a fenced write first -- a claimant whose
+        lease was taken over during a fruitless poll must leave as a refused
+        stale writer (with its child handled), not as a quiet timeout.
         """
 
         last_answer: object = None
@@ -506,6 +509,10 @@ class SessionOrchestrator:
                 return answer.value
             if attempt + 1 < self._readback_attempts and self._wait is not None:
                 self._wait()
+        try:
+            self._post_spawn_gate(lease, moment="readback-exhausted")
+        except StaleWriterRefused as refusal:
+            raise self._refuse_and_terminate(refusal, session_id) from refusal
         raise IdentityUnconfirmed(
             f"the identity committed for session {session_id!r} did not read "
             f"back within {self._readback_attempts} attempts; the binding is "
@@ -569,10 +576,15 @@ class SessionOrchestrator:
                 settings=self._settings,
             )
         )
-        self._unwrap("start", answer)
         self._cross(SEAM_AFTER_SPAWN_BEFORE_READBACK_COMMIT)
+        # The fenced validation runs before the provider's answer is even
+        # interpreted: a Failure does not prove no process was created (the
+        # C2 provider can fail the *readout* after a successful Popen), so a
+        # claimant that lost its lease during the verb must be refused --
+        # and its possible child handled -- whatever the verb said.
         self._validate_after_spawn(lease, session_id, moment="after-start")
-        readout = self._await_identity(session_id)
+        self._unwrap("start", answer)
+        readout = self._await_identity(lease, session_id)
         self._commit_readback(lease, session_id, readout)
         return self._outcome(session_id, path, readout)
 
@@ -635,9 +647,11 @@ class SessionOrchestrator:
         # gate write brackets the verb exactly as it brackets a spawn.
         self._post_spawn_gate(lease, moment="before-resume")
         answer = self._provider.resume(session_id)
-        self._unwrap("resume", answer)
+        # Fence first, interpret second -- same reasoning as the start walk: a
+        # resume Failure does not prove no process was created.
         self._validate_after_spawn(lease, session_id, moment="after-resume")
-        readout = self._await_identity(session_id)
+        self._unwrap("resume", answer)
+        readout = self._await_identity(lease, session_id)
         self._commit_readback(lease, session_id, readout)
         return self._outcome(session_id, "resumed", readout)
 

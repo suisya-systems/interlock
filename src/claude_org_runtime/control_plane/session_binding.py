@@ -206,6 +206,7 @@ def mark_spawned(
         },
         where=and_(
             eq("session_id", param("session_id")),
+            eq("run_id", param("run_id")),
             eq("binding_phase", value(PHASE_PREPARED)),
             is_null("released_at_ms"),
         ),
@@ -216,7 +217,7 @@ def mark_spawned(
         idempotency_key=f"mark_spawned:{session_id}",
         statement=statement,
         exactly_once_mechanism="transactional_with_record",
-        params={"session_id": session_id},
+        params={"session_id": session_id, "run_id": run_id},
         run_id=run_id,
     )
     return protected_write(
@@ -256,6 +257,7 @@ def confirm_identity(
         },
         where=and_(
             eq("session_id", param("session_id")),
+            eq("run_id", param("run_id")),
             eq("binding_phase", value(PHASE_SPAWNED)),
             is_null("released_at_ms"),
         ),
@@ -266,7 +268,11 @@ def confirm_identity(
         idempotency_key=f"confirm_identity:{session_id}",
         statement=statement,
         exactly_once_mechanism="transactional_with_record",
-        params={"session_id": session_id, "provider_state": provider_state},
+        params={
+            "session_id": session_id,
+            "run_id": run_id,
+            "provider_state": provider_state,
+        },
         run_id=run_id,
     )
     return protected_write(
@@ -294,6 +300,7 @@ def release_binding(
         set={"released_at_ms": param("now_ms")},
         where=and_(
             eq("session_id", param("session_id")),
+            eq("run_id", param("run_id")),
             is_null("released_at_ms"),
         ),
         stamps_writer_epoch=False,
@@ -303,7 +310,7 @@ def release_binding(
         idempotency_key=f"release_binding:{session_id}",
         statement=statement,
         exactly_once_mechanism="transactional_with_record",
-        params={"session_id": session_id, "now_ms": now_ms},
+        params={"session_id": session_id, "run_id": run_id, "now_ms": now_ms},
         run_id=run_id,
     )
     return protected_write(
