@@ -82,6 +82,7 @@ figures are **measured baseline**.
 | D-0038 | AC-9's cohort is terminal-in-period Interlock-owned runs, its unit is the AI invocation, and coverage is required output | accepted |
 | D-0039 | AC-10's ground truth is external: a labelled fixture suite and shadow reconciliation, with false termination counted at the applied action | accepted |
 | D-0040 | A measurement report records its own provenance, and the harness is read-only by capability | accepted |
+| D-0041 | The run status vocabulary is closed and forward-only, and a detection budget carries its own kind | accepted |
 | Q-0001 | SQLite schema/DDL and migration policy for the SoT tables | resolved by D-0029 |
 | Q-0002 | Incident dedup key composition and re-notification rate in absolute time | proposed |
 | Q-0003 | Reconcile interval and the tolerable detection latency that justifies it | resolved by D-0031 |
@@ -130,7 +131,8 @@ resumes from SQLite — from unresolved incidents — without double execution.
 - Auditability follows: incident → assessment → approval → action → result must be reconstructible
   by query alone.
 - Costs: single-writer discipline per state item, explicit schema/migration handling
-  (unresolved — see Q-0001), and retention policy for evidence references (unresolved — see Q-0006).
+  (unresolved at the time — see Q-0001, resolved by D-0029), and retention policy for evidence
+  references (unresolved — see Q-0006).
 
 **Status.** accepted
 
@@ -1834,6 +1836,77 @@ the report says so at the top rather than averaging across the change.
 **Source.** `docs/measurement-harness.md` §§1, 5, 6; `ACCEPTANCE.md` AC-7, §3; Issue `#67`; design
 review 2026-08-21 (Minor: "report は read-only に加え、期間、schema/detector version、adapter version、
 query definition、入力 DB identity/hash を記録しないと後日再現できない"). Not drawn from Issue #740.
+
+---
+
+## D-0041 — The run status vocabulary is closed and forward-only, and a detection budget carries its own kind
+
+**Context.** `D-0029`'s DDL was authored ahead of the implementation, deliberately, so that the
+implementation Issues would start against a settled schema. Writing `0001_initial.sql` for Issues
+`#64`/`#65`/`#67` found two places where it could not be applied as written, and both were found the
+same way — by there being nothing to type.
+
+The first is `run.status`. `docs/production-schema.md` §2 records `run` as **re-derived** and promises
+the production table "a `CHECK` on a closed status set and a forward-only trigger", but no section of
+the document enumerates the set or says which of its members are terminal. A promise of a closed set
+with no members is unconstrained text, which is what the spike had.
+
+The second is `policy_detection_latency`. `threshold_kind` exists because three of
+`docs/time-base-policy.md` §3.2's classes have a `T` that is not a duration. The same table's §3.2 row
+for `lease_orphan` gives its `L` as **"2 × lease TTL"**, and `budget_ms` is a plain absolute
+millisecond column with a `CHECK` — `threshold_value + reconcile_period_ms <= budget_ms` — that
+compares it against `T`. The seed migration therefore had no way to write the row: a TTL multiple does
+not fit an absolute column, and a lease's TTL is a per-acquire parameter with no default anywhere in
+the code, so there is no number to convert it to.
+
+**Decision.** Two changes, adjudicated together because they are the same shape — a design authored in
+advance meeting the first thing that has to be typed against it.
+
+1. **`run.status` is the closed set `('created', 'running', 'suspended', 'completed', 'failed',
+   'cancelled')`,** with `{completed, failed, cancelled}` terminal. A `CHECK` enforces the set and a
+   trigger enforces the walk: leaving a terminal status is refused (including `completed → failed`,
+   which no rank ordering catches because the ranks are equal), and `running ↔ suspended` moves in both
+   directions because a suspend is a pause rather than a step, while every other reversal is refused.
+   Recorded as `docs/production-schema.md` §4.3.
+2. **`policy_detection_latency` gains `budget_kind`** (`'absolute_ms' | 'lease_ttl_multiple'`,
+   defaulting to `'absolute_ms'`), the symmetric partner of `threshold_kind`, and the `T + P ≤ L`
+   `CHECK` is narrowed to apply only when `threshold_kind` **and** `budget_kind` are both
+   `'absolute_ms'`. Rows relative on either side are asserted per subject by the
+   `policy_budget_violation` reconcile pass, which already exists for the relative-`T` case.
+
+**Consequences.**
+- `suspended` is what makes `docs/time-base-policy.md` §3.4's suspension rule implementable: a
+  deliberately paused run suspends its session-class predicates by **moving to a status the predicates
+  exclude**, never by suppressing a tolerance, because exclusion by status is auditable and suppression
+  is not. That is also why `suspended` is not terminal.
+- The terminal set is now a thing three readers can select on rather than a phrase: `production-schema.md`
+  §9.4's `subject_gone` sweep, `D-0038`'s "terminal before period end" cohort, and the harness's
+  `terminal_status_unknown` excluded-reason bucket — which, with the set closed, should stay empty, so a
+  non-zero count reads as a schema-integrity signal instead of routine noise.
+- **Rejected for the status set: leaving it unconstrained text.** That is what the spike did, and
+  `production-schema.md` §2 records *why* — the writer assignment was open, so a `CHECK` enumerating the
+  statuses would have answered `Q-0001` in DDL before `Q-0001` was decided. `Q-0001` is resolved by
+  `D-0029` and §4.2 assigns `run.status` exclusively to the Secretary, so the reason for the restraint
+  is gone and keeping the restraint would be inheriting a workaround for a question that has an answer.
+- **Rejected for the budget: seeding no `lease_orphan` row at all.** It is the cheapest way to make the
+  migration apply, and it silently drops a class `docs/time-base-policy.md` §3.2 lists as policy data —
+  a detector class that exists in the design and nowhere in the database, which is the failure the
+  versioned-policy shape exists to prevent.
+- **Also rejected: precomputing the TTL multiple into milliseconds.** It is the identical mistake
+  `threshold_kind` was introduced to prevent, one column to the right — baking one lease's TTL into a
+  row every other lease also reads.
+- The narrowed `CHECK` is weaker in DDL than the original: an absolute `T` against a relative `L` is no
+  longer refused at insert. That is the trade, and the `policy_budget_violation` pass is where the
+  inequality is asserted for those rows instead. The costs are one more column and one more thing the
+  pass must cover.
+- No `D-` entry is superseded. `D-0029` and `D-0031` stand; this entry fills two gaps their documents
+  left rather than reversing anything either decided.
+
+**Status.** accepted
+
+**Source.** `docs/production-schema.md` §§2, 4.2, 4.3, 10, 11; `docs/time-base-policy.md` §§3.2, 3.4;
+`docs/measurement-harness.md` §2.1; `D-0029`, `D-0031`, `D-0038`; the implementation of Issues `#64`,
+`#65` and `#67`. Not drawn from Issue #740.
 
 ---
 

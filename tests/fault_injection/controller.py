@@ -401,8 +401,10 @@ class Controller:
         ``key`` names the process slot. It defaults to the role, and differs
         only for a second process of the same role -- the claimant a lease
         takeover needs, which is the same script under a different holder
-        identity. Which component may hold which resource is ``Q-0001`` and
-        stays open, so holder identities are per-case data here too.
+        identity. Which component may hold which resource was ``Q-0001`` and
+        open on the spike schema this harness drives (D-0029 has since
+        answered it in the production schema, docs/production-schema.md
+        section 4.2), so holder identities stay per-case data here too.
         """
 
         self._check_deadline()

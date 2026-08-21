@@ -188,7 +188,7 @@ event spine unusable — `#64`'s whole point is that several producers write CI 
 
 | State item | Mutability | Single writer | Fence |
 |---|---|---|---|
-| `run.status` | in-place | **Secretary** | run lease epoch |
+| `run.status` | in-place, forward-only over the §4.3 vocabulary | **Secretary** | run lease epoch |
 | `run` (creation) | append | Secretary | — |
 | `session` binding phase | in-place, forward-only | **Supervisor** | session lease epoch |
 | `lease` | in-place (CAS) | the acquiring claimant | epoch monotonicity trigger |
@@ -214,7 +214,8 @@ event spine unusable — `#64`'s whole point is that several producers write CI 
 
 Two rows deserve a sentence each.
 
-**`run.status` stays exclusively the Secretary's.** `Q-0001` records that v1's 2026-07-20 review
+**`run.status` stays exclusively the Secretary's**, and §4.3 says which words it may write. `Q-0001`
+records that v1's 2026-07-20 review
 required exactly this and that neither 2026-08-17 comment restated it, leaving it unstated for
 Interlock. It is restated here. Concretely it means the CI watcher does **not** move a run to
 `completed` when it sees a merge: it appends a `pr_merged` event, and the Secretary — as a consumer
@@ -226,6 +227,48 @@ repo-resolution mistake write a foreign PR's metadata onto a run row (§7.1).
 is recorded (`actor_kind`, `actor_id`); the *writer* is Core, because the transition's admissibility
 is a deterministic check against the transition table (§9.3) and `D-0008` puts deterministic
 evaluation in Core's row. A human answering a question is an actor, not a writer to SQLite.
+
+### 4.3 The run status vocabulary
+
+§2's disposition table promises that the production `run` table carries "a `CHECK` on a closed status
+set and a forward-only trigger", and then never says what the set is. A closed set nobody enumerated
+is unconstrained text with a promise stapled to it — which is the exact state the spike was in, and
+the state §2 exists to leave. The implementation found the gap by having nothing to implement, so the
+set is recorded here:
+
+```
+'created', 'running', 'suspended', 'completed', 'failed', 'cancelled'
+```
+
+**The terminal set is `{completed, failed, cancelled}`, and it is terminal in the strong sense.** The
+trigger refuses any update that *leaves* a terminal status, and it has to check that separately from
+the ordering: `completed → failed` is a reversal no rank comparison catches, because the two ranks are
+equal. Which terminal status a run reached is a fact. A wrong fact is corrected by opening a new run,
+not by an `UPDATE` that erases the completion the Secretary already published and that a report may
+already have counted.
+
+**`running ↔ suspended` moves in both directions; no other reversal does.** A suspend is a pause, not
+a step forward, so the trigger ranks `running` and `suspended` at the same level and resuming is
+therefore not a reversal. Everything else moves up or stands still. `running → created` is refused in
+particular: it rewrites the run's start, and a run whose start moves has no measurable lifetime.
+
+Four things already read this vocabulary, which is why it is a constraint rather than a convention.
+
+- **§9.4's `subject_gone` sweep** closes a gate whose subject run "reached a terminal state". Without
+  a schema-level terminal set that sentence names nothing the sweep can select on, and the outcome
+  stays an enumeration value that never gets used — the permanent-open-row problem with extra
+  vocabulary, which is what §9.4 was written to avoid.
+- **`D-0038`'s AC-9 cohort** is runs "terminal before period end". A denominator computed from an open
+  vocabulary silently changes whenever a writer invents a status word.
+- **[`time-base-policy.md`](./time-base-policy.md) §3.4's suspension rule** says a deliberately paused
+  run suspends its session-class predicates **by moving to a status the predicates exclude**, never by
+  adjusting or suppressing a tolerance, because excluding by status is auditable and a suppressed
+  tolerance is not. `suspended` is the status that rule needs to exist, and it is why `suspended` must
+  *not* be terminal: a pause that could not be resumed would make the auditable form unusable and push
+  the implementation back to suppressing tolerances.
+- **[`measurement-harness.md`](./measurement-harness.md) §2.1's `terminal_status_unknown`
+  excluded-reason bucket** is the honest disposal of a run the cohort cannot classify. With a closed set the bucket
+  should stay empty, and a non-zero count is then a schema-integrity signal rather than routine noise.
 
 ---
 
@@ -528,7 +571,17 @@ CREATE TABLE ci_observation (
     occurred_at_ms  INTEGER NOT NULL,
     ingested_at_ms  INTEGER NOT NULL,
 
-    CHECK (length(provider) > 0),
+    -- provider is CHECKed to 'github' alone, exactly as it is on repository:
+    -- D-0033 says "a second provider widens the CHECK in a migration step and
+    -- brings its substitution test then". Mere non-emptiness would not be a
+    -- weaker version of that rule, it would defeat the projection. provider is
+    -- part of ci_observation_identity, so an unnarrowed column admits the SAME
+    -- fact a second time under a spelling variant ('GITHUB'); the
+    -- ci_current_verdict per-scope subquery does not discriminate on provider,
+    -- so the duplicate competes on (attempt, occurred_at_ms, event_seq) and a
+    -- later-timestamped bogus row wins -- a red PR projected GREEN, which is
+    -- the section 6.1 verdict-honesty failure in its most direct form.
+    CHECK (provider IN ('github')),
     CHECK (typeof(pr_number) = 'integer' AND pr_number > 0),
     -- a full commit SHA, lowercased at the adapter edge. An abbreviated SHA is
     -- not an identity: two heads can share a prefix, and the observation would
@@ -854,6 +907,13 @@ CREATE TABLE watcher_scope (
     CHECK (typeof(expected_interval_ms) = 'integer' AND expected_interval_ms > 0),
     CHECK (enabled IN (0, 1)),
     CHECK ((scope_kind = 'ci_pull_request') = (pr_id IS NOT NULL)),
+    -- Every scope names a subject. The pr_id biconditional above only binds the
+    -- ci_pull_request kind, so without this a 'ci_repository' row could carry
+    -- repo_id AND pr_id both NULL: a roster entry for nothing at all. Such a row
+    -- can never be covered, and the 8.4 coverage query would name it as
+    -- uncovered forever -- a roster that permanently alarms is a roster nobody
+    -- reads.
+    CHECK (repo_id IS NOT NULL),
     CHECK (retired_at_ms IS NULL OR retired_at_ms >= registered_at_ms)
 );
 
@@ -1378,6 +1438,19 @@ CREATE TABLE policy_detection_latency (
     -- since a CHECK cannot reach another table for the period.
     reconcile_period_ms INTEGER NOT NULL,
     budget_ms           INTEGER NOT NULL,   -- L: onset-to-alarm ceiling; T + P <= L
+    -- L is not always an absolute duration either, and this column is the
+    -- symmetric partner of threshold_kind one column to the left. Section 3.2 of
+    -- time-base-policy.md gives lease_orphan the budget "2 x lease TTL", which no
+    -- absolute millisecond value can hold: a lease's TTL is a per-acquire
+    -- parameter with no default anywhere in the code, so folding it into
+    -- milliseconds would bake one lease's TTL into a row every other lease also
+    -- reads -- the identical mistake threshold_kind already exists to prevent on
+    -- the T side. Defaulted to 'absolute_ms' so every class whose budget IS a
+    -- duration reads exactly as it did before this column existed.
+    --
+    --   'absolute_ms'        -- L = budget_ms, in milliseconds
+    --   'lease_ttl_multiple' -- L = budget_ms * (expires_at_ms - acquired_at_ms)
+    budget_kind      TEXT    NOT NULL DEFAULT 'absolute_ms',
 
     PRIMARY KEY (revision_id, incident_class),
     -- T is not always a duration, and a single tolerance_ms column cannot say
@@ -1395,17 +1468,23 @@ CREATE TABLE policy_detection_latency (
     --                                from the threshold_value-th consecutive failure
     CHECK (threshold_kind IN ('absolute_ms', 'scope_interval_multiple',
                               'lease_ttl_multiple', 'consecutive_count')),
+    CHECK (budget_kind IN ('absolute_ms', 'lease_ttl_multiple')),
     CHECK (threshold_value >= 0),
     CHECK (reconcile_period_ms > 0),
     CHECK (budget_ms > 0),
-    -- The T + P <= L invariant is only checkable in DDL for absolute rows. For
-    -- the relative kinds it is a PER-SUBJECT obligation evaluated at reconcile
-    -- time, because T depends on the subject's own interval or TTL -- see the
-    -- policy_budget_violation pass below.
+    -- The T + P <= L invariant is only checkable in DDL when BOTH sides are
+    -- absolute. For every other combination it is a PER-SUBJECT obligation
+    -- evaluated at reconcile time, because T or L depends on the subject's own
+    -- interval or TTL -- see the policy_budget_violation pass below. Without the
+    -- budget_kind conjunct this CHECK would compare an absolute T in
+    -- milliseconds against a TTL MULTIPLE sitting in budget_ms and refuse the
+    -- lease_orphan row outright, or admit it only by mangling the multiple into
+    -- some assumed TTL.
     -- The FULL inequality, not `T <= L`. A row with T = L passes the weaker
     -- form and still lets the detector alarm a whole pass after its own declared
     -- ceiling, which is the ceiling being meaningless.
     CHECK (threshold_kind <> 'absolute_ms'
+           OR budget_kind <> 'absolute_ms'
            OR threshold_value + reconcile_period_ms <= budget_ms)
 );
 
@@ -1436,10 +1515,11 @@ CREATE TABLE policy_gate_stage_owner (
 The detector joins the **currently effective** revision; a report joins the revision that was
 effective over its period. Rows are never updated or deleted — a change is a new `revision_id`.
 
-Because a relative threshold's `T` is only known per subject, the reconcile pass carries one more
-deterministic check — **`policy_budget_violation`**: for every live subject of a relative class,
-assert `T(subject) + reconcile_period_ms <= budget_ms` — the same inequality the `CHECK` above
-enforces for absolute rows. A watcher scope registered with an `expected_interval_ms` so large
+Because a relative `T` — and, for `lease_orphan`, a relative `L` as well — is only known per subject,
+the reconcile pass carries one more deterministic check — **`policy_budget_violation`**: for every
+live subject of a row whose `threshold_kind` or `budget_kind` is not `'absolute_ms'`, assert
+`T(subject) + reconcile_period_ms <= L(subject)` — the same inequality the `CHECK` above enforces for
+the rows where both sides are absolute. A watcher scope registered with an `expected_interval_ms` so large
 that three missed polls exceed the `watcher_silence` budget is a misconfiguration that would
 otherwise present as a detector that is quietly slower than its stated ceiling for that one scope.
 Reporting it as its own incident class keeps the budget an assertion rather than an aspiration.
@@ -1464,7 +1544,7 @@ prepared, and the load-bearing constraints were exercised directly:
 | A second **live** primary PR per run is refused; a re-point after unlinking is accepted and both links survive (§7.3) | `UNIQUE constraint failed: run_pr_link.run_id`, then the re-point succeeds with `p1` retained as unlinked history |
 | `resolution` cannot say "we guessed from the working directory" (§7.4) | `CHECK constraint failed: resolution IN ('project_registry', …)` |
 | A stale watcher's heartbeat is refused by the fence (§8.3) | The current holder's fenced `UPDATE` affects 1 row; the same statement at epoch 3 against epoch 7 affects **0** |
-| `gate.stage` may only name an `advance` transition of its own gate (§9.2) | Trigger fires when pointed at the `open` transition |
+| `gate.stage` may only name an `open` or `advance` transition **of its own gate**, landing on the stage it claims (§9.2) | Trigger fires when pointed at another gate's transition, at a `seq` that does not exist, or at a transition whose `to_stage` differs from the claimed stage — and admits the `open` transition, which it must, because a gate is created with a null `stage_seq` and only its opening transition can establish the projection |
 | A gate stage projection never walks backwards | Trigger fires |
 | Gate transitions are immutable and undeletable (§9.3) | Both triggers fire |
 | An outcome outside the terminal taxonomy is refused (§9.4) | `CHECK constraint failed: outcome IS NULL OR outcome IN (…)` |
@@ -1480,11 +1560,12 @@ prepared, and the load-bearing constraints were exercised directly:
 | A gate can be opened end to end: create with a null projection, append the `open` transition, then point the projection at it (§9.2) | Accepted — and the projection still cannot claim a stage no transition reached, nor be asserted at creation |
 | A closed, unmerged PR reopens; a merged one does not (§7.2) | `closed → open` accepted with `closed_at_ms` cleared; `merged → open` aborts |
 | A scope-relative multiple, a consecutive-failure count and a TTL multiple all store losslessly, and an absolute `T` above its own budget is refused (§10) | All four rows land; the over-budget row and an unknown `threshold_kind` both raise |
+| A `lease_ttl_multiple` budget stores as a multiple rather than as milliseconds, and the `T + P ≤ L` `CHECK` stands down for it (§10) | `lease_orphan` with `budget_kind='lease_ttl_multiple'` and `budget_ms=2` lands; an unknown `budget_kind` raises; the same numbers with `budget_kind='absolute_ms'` are refused by the inequality |
 | An invocation's output-token ceiling scales with its response count ([`measurement-harness.md`](./measurement-harness.md) §2.3) | 3000 tokens over 4 responses at a 1024 cap is accepted; the same 3000 over 1 response aborts |
 | A watcher holding scope B's lease cannot heartbeat scope A (§8.3) | The upsert affects 1 row for B and **0** for A; A keeps no liveness row and stays `watcher_scope_uncovered` |
 | A late, older head observation cannot revive superseded CI evidence (§7.2) | The newer head advances; the older one aborts, and the projection still reads the newer head |
 | A `delivery` subscription without a recipient — and a `compute` subscription with one — are both refused at registration (§5.3) | Both abort; the two well-formed rows land |
-| The budget `CHECK` includes the reconcile period (§10) | `T=180s + P=120s = L=300s` accepted; `T = L` and `T + P > L` both abort |
+| The budget `CHECK` includes the reconcile period, and applies only where `threshold_kind` **and** `budget_kind` are both absolute (§10) | `T=180s + P=120s = L=300s` accepted; `T = L` and `T + P > L` both abort; a row relative on either side is admitted for the `policy_budget_violation` pass to assert per subject |
 | The silence query reads its multiple from the effective policy revision and scales it by the scope's own interval (§8.4) | Quiet for 2 intervals returns nothing; quiet for 3.3 intervals returns the scope |
 
 Two things this does **not** establish, and they are the reasons it is not a substitute for the
@@ -1511,6 +1592,18 @@ implementation carries.
   enforced by permission rather than by discipline for the AI's rows. Until then, AC-6's exclusion
   of `approve`/`restart`/`close`/`reassign` from the AI's tools is the enforcement, and the writer
   table records the intent.
+- **The gate policy seed is deliberately partial, and the gaps are data rather than special cases.**
+  `policy_gate_stage_tolerance` carries no `forwarded` row: the stage is terminal, the gate is closed,
+  and there is nothing left to be late for — so §9.6's detector simply never names it, exactly as its
+  `p.tolerance_ms IS NULL` opt-out never names `presented`. `policy_gate_stage_owner` *does* carry a
+  `forwarded` row, because its `ball_holder` is `NOT NULL` and the honest value is the Secretary, the
+  actor that performed the forward; a report attributing the closing leg then attributes it to the
+  component that did it rather than to `NULL`. Neither table is seeded for `gate_type` `'plan_approval'`
+  or `'risk_approval'`: [`time-base-policy.md`](./time-base-policy.md) decides no numbers for them, and
+  inserting one anyway would be a policy decision taken in a migration file, which is the thing
+  `D-0031` puts values in versioned data to avoid. A relay-gap detector that never names a gate type is
+  the correct behaviour for a type nobody has set a tolerance for; a later revision adds the rows once a
+  `D-` entry decides them.
 - **Multi-provider CI.** `repository.provider` and `ci_observation.provider` are `CHECK`ed to
   `'github'` alone. That is deliberate: `#64` says `gh` is the interface to GitHub, and gate item
   11's target shape is a thin seam plus one substitution test, not everything abstracted. A second

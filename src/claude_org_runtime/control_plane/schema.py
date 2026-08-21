@@ -9,9 +9,12 @@
    arm of the same sentence: a database written at one
    :data:`SCHEMA_REVISION` is **refused** by the next one rather than migrated
    (:func:`open_control_plane`). Refusing is deliberate. A migration path would
-   be the first half of a promotion nobody decided on, and ``Q-0001`` -- the
-   real DDL, keys, indices, per-item single-writer table and migration policy
-   -- stays open until it is decided on its own terms.
+   be the first half of a promotion nobody decided on. ``Q-0001`` -- the real
+   DDL, keys, indices, per-item single-writer table and migration policy --
+   was open until D-0029 decided it on its own terms in the production schema
+   (docs/production-schema.md section 4.2,
+   ``control_plane/migrations/0001_initial.sql``); this module still opens the
+   spike schema that predates that decision.
 
 Two behaviours here are load-bearing rather than convenient:
 
@@ -94,8 +97,9 @@ RECONSTRUCTION_QUERIES: Mapping[str, str] = {
     # session, outbox row or incident does -- so a reconstruction that reached
     # runs only through their children would lose exactly the run that was killed
     # at its riskiest moment. Every run is returned, unfiltered: which statuses
-    # count as finished is part of the vocabulary Q-0001 leaves open, and a WHERE
-    # clause here would pick one.
+    # count as finished was part of the vocabulary Q-0001 left open on this spike
+    # schema (D-0029 has since answered it in the production schema, section
+    # 4.3), and a WHERE clause here would pick one.
     "runs": """
         SELECT run_id, status, created_at_ms, updated_at_ms
           FROM run

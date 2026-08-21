@@ -6,8 +6,11 @@
    spike schema, which carries the marking in ``spike_schema.sql`` itself: no
    migration path is promised from it, and being depended on by S7 promotes
    nothing. ``Q-0001`` (the real DDL, keys, indices and the per-item
-   single-writer table) stays open, and nothing below answers it. The durable
-   half of Issue ``#14`` is the test suite.
+   single-writer table) was open when this module was written, and nothing
+   below answers it; D-0029 has since resolved it in the production schema
+   (docs/production-schema.md section 4.2, ``migrations/0001_initial.sql``),
+   but this module was never migrated onto it. The durable half of Issue
+   ``#14`` is the test suite.
 
 What this module is responsible for, in the words of ``ACCEPTANCE.md`` section
 2's outbox rows:
@@ -50,9 +53,12 @@ dependency of it -- I-09 depends on I-07 alone. This module therefore never
 acquires or renews anything. It takes the resource and holder it writes under as
 constructor arguments and validates the epoch inside its own writes, which is
 the coupling S5's DDL comment already specifies. Naming the resource is the
-caller's job precisely because *which component may hold which resource* is the
-per-item writer assignment ``Q-0001`` leaves open; a default here would answer
-it.
+caller's job precisely because *which component may hold which resource* was
+the per-item writer assignment ``Q-0001`` left open on this spike schema (the
+question is answered in the production schema by D-0029, section 4.2, but this
+module still runs against the S5 spike table that does not carry the answer);
+a default here would still be wrong, because the caller -- not this module --
+is who states its own identity as resource holder.
 
 **No retry interval appears in this file.** Not a backoff, not a visibility
 timeout, not a re-notification window. ``Q-0003`` has to settle tolerable
@@ -548,9 +554,13 @@ class Outbox:
     """Resend, ack and dedup over the S5 ``outbox`` and ``action`` tables.
 
     *resource* and *holder* are the lease this writer's protected statements are
-    fenced against. They are required arguments with no defaults: which
-    component may write which state item is ``Q-0001``, and a default would be
-    an answer to it.
+    fenced against. They are required arguments with no defaults: on this spike
+    schema, which component may write which state item was ``Q-0001`` and open,
+    so a default would have been an answer to it. D-0029 has since resolved
+    ``Q-0001`` in the production schema (docs/production-schema.md section 4.2),
+    but the arguments stay required regardless -- the schema now *records* the
+    assignment, it does not make the caller's own statement of who it is
+    unnecessary.
 
     *checkpoint* is called at each of :data:`CHECKPOINTS`. It exists so S9 can
     stop a delivery inside a window; raising from it is how a test kills a

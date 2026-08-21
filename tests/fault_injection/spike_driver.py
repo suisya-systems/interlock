@@ -600,8 +600,10 @@ class Context:
     # this module chose: the observation mode and the escalation policy are the
     # case's, and the three incident parameters are the case's precisely
     # because Q-0002 and Q-0003 are open and a driver-side default would settle
-    # them by inertia (compare ``resource``/``holder``, which keep Q-0001 open
-    # the same way).
+    # them by inertia (compare ``resource``/``holder``, which kept Q-0001 open
+    # on this spike schema the same way; D-0029 has since answered Q-0001 in
+    # the production schema, docs/production-schema.md section 4.2, but this
+    # driver still runs the spike schema that predates that answer).
     observation_mode: str = contract.OBSERVATION_HEALTHY
     escalate_on: tuple[str, ...] = ()
     incident_dedup_key: str | None = None
@@ -2009,9 +2011,11 @@ class SpikeAdapter:
 
 
 #: Resource names are **per-case data, not a role table** -- ``Q-0001`` (which
-#: component may hold which resource) stays open and this harness does not
-#: answer it by inertia. These are the spike adapter's defaults for its own
-#: three scripts and nothing more.
+#: component may hold which resource) was open on this spike schema and this
+#: harness did not answer it by inertia. D-0029 has since answered Q-0001 in
+#: the production schema (docs/production-schema.md section 4.2), but this
+#: harness still drives the spike schema that predates that answer. These are
+#: the spike adapter's defaults for its own three scripts and nothing more.
 def resource_of(role: str) -> str:
     return f"harness-{role}"
 

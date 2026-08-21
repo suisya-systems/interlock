@@ -31,7 +31,11 @@ What this module deliberately is not:
   liveness before writing -- expiry discovery alone is insufficient, per S6.
 
 Spike status: built against the S5 spike schema, throwaway by default
-(D-0026); the durable half is the tests. Q-0001 stays open.
+(D-0026); the durable half is the tests. ``Q-0001`` was open when this module
+was written; D-0029 has since resolved it (docs/production-schema.md section
+4.2, ``control_plane/migrations/0001_initial.sql``), but this module still
+sits on the throwaway S5 schema and was never migrated onto the production
+one.
 """
 
 from __future__ import annotations
