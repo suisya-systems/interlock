@@ -525,6 +525,55 @@ def test_an_unconfirmed_stop_is_reported_as_unconfirmed(
     provider.stop = real_stop
 
 
+def test_a_loser_stands_down_while_a_newer_writer_is_mid_walk(
+    cp, clock, provider, make_orchestrator
+):
+    """The winner has gated (reached the provider) but not yet confirmed.
+
+    The binding still reads 'spawned', so the phase alone would let the loser
+    fire -- and kill the worker the winner just adopted. The winner's gate row
+    (applied, higher epoch) is the durable trace the loser must stand down on.
+    """
+
+    from claude_org_runtime.control_plane.lease import acquire
+
+    def takeover_and_gate(request):
+        clock.advance_past_expiry()
+        lease_b = acquire(
+            cp, resource=RESOURCE, holder="sup-b", now_ms=clock.now_ms(), ttl_ms=TTL_MS
+        )
+        # B is mid-walk: it has crossed its gate (reached the provider) but
+        # has not confirmed. Driving B's real gate write is the point.
+        make_orchestrator("sup-b")._post_spawn_gate(lease_b, moment="before-resume")
+        return None
+
+    provider.on_start = takeover_and_gate
+    with pytest.raises(LoserTerminated) as caught:
+        make_orchestrator("sup-a").start()
+    assert caught.value.stop_attempted is False
+    assert caught.value.session_id not in provider.stop_calls
+
+
+def test_recovery_through_a_different_provider_is_refused(
+    cp, clock, provider, make_orchestrator, uuids
+):
+    """A binding naming another backend fails closed before any verb."""
+
+    from claude_org_runtime.control_plane.lease import acquire
+    from claude_org_runtime.supervisor import OrchestrationRefused
+
+    lease = acquire(cp, resource=RESOURCE, holder="sup-0", now_ms=clock.now_ms(), ttl_ms=TTL_MS)
+    session_binding.prepare_binding(
+        cp, lease, session_id=uuids(), run_id=RUN_ID, provider="some-other-backend",
+        now_ms=clock.now_ms(),
+    )
+    clock.advance_past_expiry()
+    with pytest.raises(OrchestrationRefused, match="different provider"):
+        make_orchestrator("sup-1", provider_name="scripted").recover()
+    assert provider.start_calls == []
+    assert provider.resume_calls == []
+
+
 def test_refusals_are_rows_not_log_lines(cp, clock, provider, make_orchestrator):
     """Every refusal in these shapes is a durable action row (D-0001)."""
 

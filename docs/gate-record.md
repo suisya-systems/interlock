@@ -179,10 +179,12 @@ this file usable at the *start* of the spike rather than only at its end. §6 st
     admission commit and its `exec` can bring a process into existence. What is guaranteed — and
     tested — is that the very next fenced write detects the stale token, and that the loser then
     acts coordinated with the holder rather than blind: while no takeover writer has confirmed the
-    binding, the loser's child is ordered stopped at once; once one has, a session-level stop
-    could kill the winner's adopted worker, so the loser stands down and its possibly-rogue
-    process is surfaced as an unresolved hazard on the refusal (`stop_attempted=False`) for the
-    holder to reconcile. The refusal carries the measured detection→stop latency **and the
+    binding nor left an epoch-stamped gate row (the gate fires before the provider verb, so a
+    winner that has reached the provider always has a durable trace even before its confirm), the
+    loser's child is ordered stopped at once — serialised against the winner's writes by the
+    database write lock; otherwise a session-level stop could kill the winner's adopted worker, so
+    the loser stands down and its possibly-rogue process is surfaced as an unresolved hazard on
+    the refusal (`stop_attempted=False`) for the holder to reconcile. The refusal carries the measured detection→stop latency **and the
     provider's own stop verdict** (`LoserTerminated.stop_confirmed`) — a stop the provider could
     not confirm is surfaced as unconfirmed, never dressed up as a termination that happened. Two scope
     caveats, stated: the stopped-claimant shapes are exercised deterministically — the pause is

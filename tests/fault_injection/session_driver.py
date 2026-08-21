@@ -143,6 +143,17 @@ def emit(payload):
     sys.stdout.flush()
 
 emit({"type": "system", "subtype": "init", "session_id": claimed})
+
+# Stay alive across the supervisor's kill-and-recovery: the child announces
+# its identity, then holds before finishing. This is what makes the P3 case
+# exercise the surviving-child window for real -- recovery must find a LIVE
+# process and adopt it (a second spawn would show in the ledger and in the
+# live-process report), not merely resume a corpse. The hold is bounded and
+# the child exits on its own; an implementation under test never waits on it.
+hold = float(os.environ.get("SESSION_DRIVER_HOLD_S", "0"))
+if hold:
+    time.sleep(hold)
+
 emit({"type": "result", "subtype": "success", "terminal_reason": "completed",
       "session_id": claimed})
 ledger("exit")
@@ -217,6 +228,11 @@ def _run_walk(
     emit: Callable[[Mapping[str, Any]], None],
 ) -> None:
     os.environ["SESSION_DRIVER_SPAWN_LOG"] = str(spawn_log_path(workdir))
+    # Children announce their identity and then hold, so a kill leaves a live
+    # child for the restarted generation to find and adopt (the shape U32's
+    # mediation is about); they exit on their own afterwards. Nothing under
+    # test waits on this figure and no timestamp derives from it.
+    os.environ["SESSION_DRIVER_HOLD_S"] = "10"
     provider = ClaudeCliSessionProvider(
         state_root_path(workdir),
         claude_command=(sys.executable, str(fake_cli_path(workdir))),

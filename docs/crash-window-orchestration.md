@@ -77,8 +77,11 @@ post-spawn validation, both fenced. Two shapes follow:
   claimant whose binding was moved by the takeover is refused rather than
   returned as success) — detects the stale token, and the loser then acts
   **coordinated with the holder, never blind**: while no takeover writer has
-  confirmed the run's binding, the loser stops its just-created child at once;
-  once one has, a session-level stop could kill the *winner's* adopted worker
+  confirmed the run's binding *nor left a gate row at a newer epoch* (the
+  gate write is an epoch-stamped `action` row, fired before the provider
+  verb, so a winner that has reached the provider always has a durable trace
+  even before its confirm), the loser stops its just-created child at once;
+  otherwise a session-level stop could kill the *winner's* adopted worker
   (a stop cannot name a process generation), so the loser stands down and
   surfaces its possibly-rogue process as an unresolved hazard. The
   check-and-stop is serialised against the winner's confirm — the database

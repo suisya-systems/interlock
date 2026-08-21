@@ -14,8 +14,8 @@ verb that creates or resumes a process only between two fenced writes:
 
 1. the **admission write** -- for a fresh spawn, ``prepare_binding`` followed
    by ``mark_spawned`` (both fenced; the binding row is the durable record
-   the write-ahead leaves); for a recovery, the ``post_spawn_gate`` write on
-   the ``run`` row. A claimant whose token is stale is refused *here*,
+   the write-ahead leaves); for a recovery, the ``post_spawn_gate`` write (an
+   epoch-stamped ``action`` row). A claimant whose token is stale is refused *here*,
    durably, and never becomes a process. This is what makes "the losing
    claimant is never spawned" hold for F3's crash window: the retry that
    lands inside the provider's admission window acquires the lease (raising
@@ -83,10 +83,11 @@ from claude_org_runtime.control_plane.lease import (
     ProtectedWrite,
     StaleWriterRefused,
     effect_kind,
-    eq,
-    fenced_update,
+    fence_epoch,
+    fenced_insert,
     param,
     protected_write,
+    value,
 )
 from claude_org_runtime.control_plane.session_binding import (
     PHASE_IDENTITY_CONFIRMED,
@@ -333,28 +334,47 @@ class SessionOrchestrator:
     def _post_spawn_gate(self, lease: Lease, *, moment: str) -> None:
         """The fenced authority validation around the provider verb.
 
-        Touches the ``run`` row (``updated_at_ms``): a real write, so the
-        fence is evaluated atomically as part of it and a refusal lands as a
-        durable ``action`` row -- never a read-then-decide (S6's rule that
-        expiry discovery alone is insufficient).
+        An epoch-stamped ``action`` row: the fence is evaluated atomically as
+        part of the insert -- never a read-then-decide (S6's rule that expiry
+        discovery alone is insufficient) -- and, deliberately, the *applied*
+        row is itself durable evidence that a claimant at this epoch was
+        actively driving the session. That trace is what lets a refused stale
+        claimant tell "the takeover writer merely holds the lease" apart from
+        "the takeover writer has reached the provider" before deciding whether
+        a session-level stop is safe (see :meth:`_refuse_and_terminate`);
+        neither the lease row nor the binding row can say that, because a
+        protected write to another table records no applied action row.
         """
 
         self._gate_sequence += 1
         now = self._now_ms()
-        statement = fenced_update(
-            "run",
-            set={"updated_at_ms": param("now_ms")},
-            where=eq("run_id", param("run_id")),
-            stamps_writer_epoch=False,
+        key = f"post_spawn_gate:{self._run_id}:{moment}:{now}:{self._gate_sequence}"
+        statement = fenced_insert(
+            "action",
+            values={
+                "action_id": param("action_id"),
+                "run_id": param("run_id"),
+                "kind": param("kind"),
+                "idempotency_key": param("idempotency_key"),
+                "exactly_once_mechanism": value("transactional_with_record"),
+                "status": value("applied"),
+                "applied_at_ms": param("now_ms"),
+                "writer_epoch": fence_epoch,
+                "created_at_ms": param("now_ms"),
+            },
         )
         write = ProtectedWrite(
             kind=effect_kind(lease.resource, "post_spawn_gate"),
-            idempotency_key=(
-                f"post_spawn_gate:{self._run_id}:{moment}:{now}:{self._gate_sequence}"
-            ),
+            idempotency_key=key,
             statement=statement,
             exactly_once_mechanism="transactional_with_record",
-            params={"run_id": self._run_id, "now_ms": now},
+            params={
+                "action_id": f"gate:{key}",
+                "run_id": self._run_id,
+                "kind": effect_kind(lease.resource, "post_spawn_gate"),
+                "idempotency_key": key,
+                "now_ms": now,
+            },
             run_id=self._run_id,
         )
         protected_write(
@@ -362,7 +382,7 @@ class SessionOrchestrator:
         )
 
     def _refuse_and_terminate(
-        self, refusal: StaleWriterRefused, session_id: str
+        self, refusal: StaleWriterRefused, session_id: str, lease: Lease
     ) -> "LoserTerminated":
         detected = self._now_ms()
         # A session-level stop cannot name a process generation, so firing it
@@ -391,16 +411,35 @@ class SessionOrchestrator:
                 and binding.released_at_ms is None
                 and binding.binding_phase == PHASE_IDENTITY_CONFIRMED
             )
-            if winner_confirmed:
+            # A takeover writer that has reached the provider but not yet
+            # confirmed leaves exactly one durable trace: its own gate rows,
+            # applied under a higher epoch (the gate fires *before* resume,
+            # so by the time a winner can have adopted anything its trace is
+            # committed). Standing down on that trace is what keeps this from
+            # killing a worker the winner adopted between its gate and its
+            # confirm -- the one interleaving the phase alone cannot show.
+            newer_writer_active = bool(
+                self._connection.execute(
+                    "SELECT 1 FROM action"
+                    " WHERE status = 'applied' AND writer_epoch > :epoch"
+                    "   AND kind = :kind LIMIT 1",
+                    {
+                        "epoch": lease.epoch,
+                        "kind": effect_kind(lease.resource, "post_spawn_gate"),
+                    },
+                ).fetchone()
+            )
+            if winner_confirmed or newer_writer_active:
                 terminated = self._now_ms()
                 return LoserTerminated(
                     f"claimant {self._holder!r} lost the lease on "
                     f"{self._resource!r} inside the spawn-admission critical "
-                    f"section; the takeover writer has already confirmed the "
-                    f"binding for session {session_id!r}, so no session-level "
-                    "stop was fired (it could kill the winner's adopted "
-                    "worker). Any process this claimant created is an "
-                    "UNRESOLVED hazard the holder must reconcile",
+                    f"section; a takeover writer has already confirmed the "
+                    f"binding for session {session_id!r} or is actively "
+                    "driving it at a newer epoch, so no session-level stop "
+                    "was fired (it could kill the winner's adopted worker). "
+                    "Any process this claimant created is an UNRESOLVED "
+                    "hazard the holder must reconcile",
                     session_id=session_id,
                     refusal=refusal,
                     detected_at_ms=detected,
@@ -445,7 +484,7 @@ class SessionOrchestrator:
         try:
             self._post_spawn_gate(lease, moment=moment)
         except StaleWriterRefused as refusal:
-            raise self._refuse_and_terminate(refusal, session_id) from refusal
+            raise self._refuse_and_terminate(refusal, session_id, lease) from refusal
 
     def _commit_readback(
         self, lease: Lease, session_id: str, readout: SessionReadout
@@ -477,7 +516,7 @@ class SessionOrchestrator:
             else:
                 self._post_spawn_gate(lease, moment="readback-final")
         except StaleWriterRefused as refusal:
-            raise self._refuse_and_terminate(refusal, session_id) from refusal
+            raise self._refuse_and_terminate(refusal, session_id, lease) from refusal
         self._cross(SEAM_AFTER_READBACK_COMMIT)
 
     # -- provider answers ----------------------------------------------------
@@ -526,7 +565,7 @@ class SessionOrchestrator:
         try:
             self._post_spawn_gate(lease, moment="readback-exhausted")
         except StaleWriterRefused as refusal:
-            raise self._refuse_and_terminate(refusal, session_id) from refusal
+            raise self._refuse_and_terminate(refusal, session_id, lease) from refusal
         raise IdentityUnconfirmed(
             f"the identity committed for session {session_id!r} did not read "
             f"back within {self._readback_attempts} attempts; the binding is "
@@ -635,6 +674,19 @@ class SessionOrchestrator:
                 lease, session_id, path="started", marked=False
             )
 
+        if binding.provider != self._provider_name:
+            # Fail closed before any provider verb: recovering another
+            # backend's binding through this one could create a child here
+            # while the durable row still names the original backend -- a
+            # duplicate worker wearing a re-identification's clothes. The
+            # mismatch is the caller's wiring to fix, never something to
+            # paper over by adopting the row.
+            raise OrchestrationRefused(
+                f"the active binding for run {self._run_id!r} names provider "
+                f"{binding.provider!r}, but this orchestrator drives "
+                f"{self._provider_name!r}; recovery through a different "
+                "provider is refused rather than risked"
+            )
         session_id = binding.session_id
         if binding.binding_phase == PHASE_PREPARED:
             # The write-ahead mark never committed, so the provider verb was
