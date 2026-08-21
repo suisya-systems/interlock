@@ -126,14 +126,14 @@ an undesigned item.
 
 | # | Capability | Provided by (operating org) | Class | Interlock counterpart / rationale |
 |---|---|---|---|---|
-| D1 | Deterministic delegation planning: split-target selection, name/cwd validation, instruction-file rendering, capacity ceilings, overflow reservations | `docs/contracts/role-contract.md:130-134`; runtime `dispatcher delegate-plan` | **C** (mechanism) + **U** (C2-era input path, →G2) | The planning mechanism is carried and shipped: `src/claude_org_runtime/dispatcher/runner.py:1-13`, `docs/cli.md:19-26,57-84`. But its renga-shaped pane-JSON input has no producer left in this tree after the purge (`docs/cli.md`), so end-to-end delegation planning under C2 does not exist yet — what feeds the planner once panes are gone is part of G2's delegation-flow scope. |
+| D1 | Deterministic delegation planning: split-target selection, name/cwd validation, instruction-file rendering, capacity ceilings, overflow reservations | `docs/contracts/role-contract.md:130-134`; runtime `dispatcher delegate-plan` | **U** →G2 | Not covered by the shipped module: `PORTING_LEDGER.md`'s row for `src/claude_org_runtime/dispatcher/runner.py` is `rewrite` and says plainly that "essentially none of this file survives" — its computation is renga rect/pane/tab geometry, which has no referent under C2 (no panes, no split targets), and its pane-JSON input has no producer left after the purge (`docs/cli.md`). What that row carries is the *separation* (a deterministic component computes, a separate privileged component executes), which G2's provider-neutral delegation planner must re-derive; the planner itself is undesigned. |
 | D2 | Atomic delegation reservation: `runs.status='queued'` plus a `delegate_sent` event committed in one transaction; idempotent re-apply; identity-drift refusal | `tools/gen_delegate_payload.py:1162-1265,1094-1144`; `.claude/skills/org-delegate/SKILL.md:214-219` | **U** →G2 | Only the *principle* is covered: D-0001 requires durable SQLite state with resume-by-query, and the refusal discipline matches Interlock's recorded-refusal pattern (`docs/lease-fencing.md`). The reservation *design* — the atomic queued-plus-event transaction, replay idempotency, identity-drift refusal — exists nowhere: Q-0001 leaves the run schema and writer assignment open and the spike schema is throwaway (D-0026). A crash or retry during delegation is an uncovered window until G2's state machine (with its core Q-0001 touchpoint) designs it. |
 | D3 | Per-worker brief generation: TOML-config → `CLAUDE.md`/`CLAUDE.local.md` rendering with optional blocks, verification-depth variants, knowledge injection, src-layout detection, report-target addressing | `tools/gen_worker_brief.py:315-349,411,271-306,55-63`; `tools/templates/worker_brief_normal.md:1-25`; `.claude/skills/org-delegate/SKILL.md:148-161` | **U** →G2 | No counterpart. The Discard bucket covers handover/resume *prompt prose* for the resident roles, not task briefs (`PORTING_LEDGER.md`, Discard bucket; D-0014) — worker briefs were never classified because they live in claude-org-ja. |
 | D4 | Worker-directory Pattern A/B/C resolution and worktree orchestration (active-run collision avoidance, base-clone unification, gitignored-target routing, self-edit pinning) | `tools/resolve_worker_layout.py:1-45,218-230,778-786,189-209,669-702`; `.claude/skills/org-delegate/references/delegate-flow-details.md:41-51` | **DR** (mechanism) + **U** (successor conventions, →G2) | "The A / B / C worker layout and bespoke worktree orchestration" is named in the Discard bucket (`PORTING_LEDGER.md`; D-0014), and the `sandbox_by_pattern` axis is discarded with it (row for `src/claude_org_runtime/settings/generator.py`). Substitute: under C2 Interlock owns the worker's working tree outright (O8, D-0025), and session↔run identity is a SQLite binding (gate item 2). What workspace layout the *successor operating repo* uses is a new operating-layer convention, carried in G2. |
 | D5 | base_branch two-track dispatch: worktrees cut from a per-project registered branch, fail-loud when it does not exist on origin | `registry/projects.example.md:50-57`; `tools/gen_delegate_payload.py:1376-1435` | **U** →G1 | Registry content; travels with the registry concept. |
 | D6 | Per-role settings generation (permissions/sandbox/hooks) with schema SoT, deny-path symlink canonicalisation, and a sandbox preflight/canary | `tools/gen_delegate_payload.py:1986-2082` (shell-out); runtime `settings generate` / `sandbox doctor` | **C** | Carried: `PORTING_LEDGER.md` rows for `src/claude_org_runtime/settings/generator.py` (carry-invariant) and `settings/sandbox_doctor.py` (carry); shipped at `src/claude_org_runtime/settings/generator.py:1-6`, `settings/sandbox_doctor.py:23-30`, `docs/cli.md:147-150,274-282`. Extended beyond v1 by the fail-closed fence renderer and breach-probe battery (`docs/per-role-fencing.md:70-76`, gate item 3, D-0023). |
 | D7 | Role taxonomy content for workers (default / self-edit / doc-audit; per-role write surfaces) | `tools/resolve_worker_layout.py:483-495`; `docs/contracts/role-pattern-sandbox-contract.md:198-1063` | **U** →G2 | The *mechanism* (render a fence from a role document, refuse a broken one) is covered (D6); the successor's worker-role *content* — which roles exist and what each may touch — is operating-layer material nobody has authored. |
-| D8 | Spawn-ceremony verification: machine-check that spawn, peer registration and instruction delivery actually completed before `DELEGATE_COMPLETE` | `tools/spawn_gate.py:1-38,577-596` | **DR** | The ceremony verifies pane-transport delivery — the Discard bucket's backend contract (`PORTING_LEDGER.md`; D-0009, D-0014). Substitute: under C2 there is no ceremony to verify — Interlock spawns the child itself, the fail-closed spawn precondition covers every start (`docs/per-role-fencing.md:205-210`; D-0023, D-0027), and identity is read back rather than assumed (D-0027: never treat exit 0 or a pre-committed binding as acceptance). |
+| D8 | Spawn-ceremony verification: machine-check that spawn, peer registration and instruction delivery actually completed before `DELEGATE_COMPLETE` | `tools/spawn_gate.py:1-38,577-596` | **DR** (pane ceremony) + **U** (instruction-delivery verification, →G2) | The pane-transport ceremony half is discarded with the backend contract (`PORTING_LEDGER.md`, Discard bucket; D-0009, D-0014), and its spawn/identity halves are substituted: under C2 Interlock spawns the child itself, the fail-closed spawn precondition covers every start (`docs/per-role-fencing.md:205-210`; D-0023, D-0027), and identity is read back rather than assumed (D-0027). But those substitutes prove spawn, fencing and identity only — *did the worker receive its instructions* is not among them: a C2 child waits for instructions delivered separately, and verifying that delivery (an acked transition in G2's state machine, over the S8 `MessageBus`, PR #58 in flight) is undesigned and canary-relevant. |
 | D9 | Backend capability gates (renga `first_drive`, pane-control ladder rungs) with three-way recorded/not-recorded/undetermined lookup | `tools/capability_gate.py:15-22,36-49,78-86` | **DR** | renga compatibility machinery (Discard bucket: "renga / herdr compatibility layers"; D-0014). Substitute: the D-0010 capability/version probe with fail-closed spawn (`src/claude_org_runtime/session/provider.py`, S1), which serves the same "don't act on an unverified backend capability" invariant. |
 | D10 | Two-lane task routing (lightweight subagent lane vs full worker lane) with explicit activation conditions and mandatory review gate in both lanes | `CLAUDE.md:71-88`; `.claude/skills/org-delegate/SKILL.md:65-86` | **U** →G10 | Task-sizing policy of the operating layer; no counterpart and no discard record. |
 | D11 | Scope discipline: 1 worker = 1 task = 1 scope; scope expansion only via human escalation; Secretary never edits worker files | `CLAUDE.md:92-100` | **U** →G10 | Operating policy. The *human gate* it routes through is covered (D-0004, D-0016); the scope-boundary policy itself is not designed anywhere. |
@@ -269,7 +269,7 @@ project concept.
 
 ### G2 — Delegation contract: brief generation, workspace conventions, worker roles
 
-**Gap rows:** D2, D3, D4 (successor half), D7, D14, D17, P6, X2 (workspace half), T6, C2.
+**Gap rows:** D1, D2, D3, D4 (successor half), D7, D8 (instruction-delivery half), D14, D17, P6, X2 (workspace half), T6, C2.
 **Draft title:** `Operating-layer delegation contract: neutral brief, workspace conventions, worker role content, completion-report schema`
 
 The single largest undesigned surface. v1 renders a per-worker brief from config
@@ -281,7 +281,12 @@ The single largest undesigned surface. v1 renders a per-worker brief from config
 completion-report contract with human-understanding summary,
 `.claude/skills/org-delegate/SKILL.md:352`). The A/B/C layout itself is discarded (D-0014)
 — the successor needs *new, simpler* workspace conventions on top of C2's
-Interlock-owned working trees, not a port.
+Interlock-owned working trees, not a port. Two more pieces land here per the round-5
+review: the **provider-neutral delegation planner** (D1 — the carried `delegate-plan`
+module is pane geometry with no C2 referent; only its compute/execute separation
+survives as design guidance) and **instruction-delivery verification** (D8 — an acked
+"instructed" transition over the S8 `MessageBus`, so a spawned worker provably received
+its brief before the state machine calls it dispatched).
 
 - **Placement:** operating-layer, with one named core touchpoint — briefs, roles,
   workspace conventions, and lifecycle policy are business-workflow material; Interlock
@@ -530,14 +535,14 @@ escalation-only expansion (`CLAUDE.md:92-100`), ultracode arming for heavy tasks
 
 Ledger totals (69 rows in §2; split rows count once under their first-listed class):
 
-- **covered:** 16 rows — the control-plane core (state, delivery, fencing, identity,
+- **covered:** 15 rows — the control-plane core (state, delivery, fencing, identity,
   curation gate, role boundaries) is not where migration loses capability; in several rows
   (C1's covered half, C6, K3) Interlock is strictly stronger than the operating org's
   mechanism.
 - **deliberately-reduced:** 11 rows — each traces to a recorded Discard bucket (pane
   transport, screen scraping as contract, resident loops, handover prose, A/B/C layout) or
   a retiring decision entry, with the substitute named; none reopens a D-0015 non-goal.
-- **undesigned:** 37 rows, consolidated into 10 drafts (G1–G10) — 6 needed before the
+- **undesigned:** 38 rows, consolidated into 10 drafts (G1–G10) — 6 needed before the
   canary (registry, delegation contract, PR/CI ingestion, escalation ledger, the
   attention channel's signalling half, measurement), 4 can follow it (work discovery,
   learning loop, dashboard, policy pack). One row (P8) is dispositioned without a draft; C11's live-schema-migration
