@@ -69,6 +69,12 @@ __all__ = [
 
 MANIFEST_PATH = Path(__file__).with_name("manifest.json")
 
+#: The adapters a case may route to. Names only -- importing the adapter
+#: objects here would put the implementation under test into the durable half
+#: (``test_import_graph`` forbids exactly that); the objects are resolved in
+#: ``conftest``.
+ADAPTER_NAMES = frozenset({"spike", "session"})
+
 #: Bumped on any semantic change to the matrix. A failure report carries it
 #: alongside the contract version (design 4.2, 4.4).
 #:
@@ -78,7 +84,12 @@ MANIFEST_PATH = Path(__file__).with_name("manifest.json")
 #: re-rolls the payload bytes and schedule jitter of the 35 seed cases. That is
 #: the intended meaning of a semantic change to the matrix: the old evidence was
 #: recorded against manifest 1 and is not silently re-labelled as manifest 2.
-MANIFEST_VERSION = 2
+#: 2 -> 3 (#18, gate item 2): the ``session-start`` cases join the matrix,
+#: every entry now names its ``adapter`` (the spike driver for the S6/S7
+#: cases, the session driver for #18's), and the contract gains the
+#: ``session-start`` operation with its read-back sync point. Same rule as
+#: 1 -> 2: evidence recorded against manifest 2 is not re-labelled.
+MANIFEST_VERSION = 3
 
 #: A fixed constant, not a wall-clock reading: the injected clock's base
 #: (design 7). It is the same instant the S6/S7 suites use.
@@ -155,6 +166,7 @@ def _case(
     incident_params: Mapping[str, Any] | None = None,
     observation: Mapping[str, Any] | None = None,
     unavailable_attempts: int | None = None,
+    adapter: str = "spike",
 ) -> dict:
     """One manifest entry. Every field a case needs that the id does not carry.
 
@@ -219,6 +231,10 @@ def _case(
             else None
         ),
         "unavailable_attempts": unavailable_attempts,
+        # Which adapter's driver executes this case. The harness stays one
+        # durable half over N adapters (design 2.2); a case says which seam it
+        # runs through, so routing is manifest data rather than a global.
+        "adapter": adapter,
         "ttl_ms": TTL_MS,
         "clock_base_ms": CLOCK_BASE_MS,
         "manifest_version": MANIFEST_VERSION,
@@ -936,6 +952,47 @@ def build_cases() -> list[dict]:
                 )
             )
 
+    # -- #18: the session-start crash window, on the real components --------
+    #
+    # Gate item 2's four injection points, one case each, routed to the
+    # session adapter (the real orchestrator + C2 provider over a fake CLI,
+    # killed by a real SIGKILL at the armed anchor). Three are checkpoint
+    # windows; "after the read-back" is the sync point, because the read-back
+    # commit is the last write of the walk. The destination observables are
+    # the ones only a process count and a captured stream can supply --
+    # ``ACCEPTANCE.md`` section 2: a spawned process is an external effect
+    # SQLite alone cannot certify.
+    for anchor in (
+        CHECKPOINT_BEFORE_DURABLE_WRITE,
+        CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT,
+        CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD,
+        contract.SYNC_IDENTITY_READBACK_COMMITTED,
+    ):
+        cases.append(
+            _case(
+                targets=(ROLE_SUPERVISOR,),
+                operation=contract.OPERATION_SESSION_START,
+                checkpoint=anchor,
+                fault="sigkill",
+                lane=LANE_LINUX,
+                profiles=("full",),
+                arms={
+                    ROLE_SUPERVISOR: (
+                        f"{contract.OPERATION_SESSION_START}@{anchor}:1",
+                    )
+                },
+                expected={
+                    "queries": (contract.INVARIANT_ONE_BINDING_PER_RUN,),
+                    "destination": (
+                        contract.INVARIANT_LIVE_PROCESSES_PER_SESSION,
+                        contract.INVARIANT_TRANSCRIPT_SINGLE_WRITER,
+                    ),
+                    "recovery_owner": ROLE_SUPERVISOR,
+                },
+                adapter="session",
+            )
+        )
+
     return cases
 
 
@@ -994,6 +1051,12 @@ def validate_case(case: Mapping[str, Any]) -> None:
 
     if case["lane"] not in contract.LANES:
         raise ContractViolation(f"{case_id}: {case['lane']!r} is not a lane")
+    if case["adapter"] not in ADAPTER_NAMES:
+        raise ContractViolation(
+            f"{case_id}: {case['adapter']!r} is not a registered adapter "
+            f"({sorted(ADAPTER_NAMES)}); an unknown adapter must refuse at "
+            "collection, never surface as a spawn failure"
+        )
     if case["fault"] not in contract.FAULT_KINDS:
         raise ContractViolation(f"{case_id}: {case['fault']!r} is not a fault kind")
     if case["barrier"] not in contract.BARRIER_MODES:

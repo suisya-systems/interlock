@@ -1616,6 +1616,23 @@ def assert_invariants(
                         "outage. D-0006: observation-unavailable and "
                         "no-activity-evidence are not anomalies"
                     )
+            elif name == contract.INVARIANT_ONE_BINDING_PER_RUN:
+                # Gate item 2: at-most-one is the schema's partial unique
+                # index; the non-empty half of "exactly one" is asserted here,
+                # after recovery -- a restart that ends with no active binding
+                # re-identified nothing (the issue's Minor-1 point: the index
+                # alone cannot say that).
+                if len(rows) > 1:
+                    fail(
+                        f"{role}: {len(rows)} active bindings for one run: "
+                        f"{[row['session_id'] for row in rows]}"
+                    )
+                if case["restart_after"] and not rows:
+                    fail(
+                        f"{role}: no active session binding after recovery, so "
+                        "re-identification yielded nothing; exactly-one is "
+                        "at-most-one plus this non-empty read"
+                    )
             else:  # pragma: no cover - guarded by the vocabulary check below
                 raise ContractViolation(
                     f"{name!r} is a named invariant with no assertion behind it. "
@@ -1720,6 +1737,76 @@ def assert_invariants(
                         fail(f"{role}: {key!r} was never attempted at the destination")
                     if observer.effect_count(key) < 1:
                         fail(f"{role}: {key!r} is delivered in our rows but absent at the destination")
+            elif name == contract.INVARIANT_LIVE_PROCESSES_PER_SESSION:
+                # Gate item 2 (#18): a process is an external effect, so the
+                # count is the destination's own -- real processes, read out
+                # of process with the killed role, never inferred from rows.
+                report_source = getattr(observer, "live_process_report", None)
+                if report_source is None:
+                    fail(
+                        f"{role}: the case names "
+                        f"{contract.INVARIANT_LIVE_PROCESSES_PER_SESSION!r} but "
+                        "the adapter's observer exposes no live_process_report()"
+                    )
+                    continue
+                live = dict(report_source())
+                if not live:
+                    fail(
+                        f"{role}: the live-process report names no session at "
+                        "all, so 'no two live processes per id' asserts nothing"
+                    )
+                for session_uuid, count in sorted(live.items()):
+                    if int(count) > 1:
+                        fail(
+                            f"{role}: {count} provider processes live against "
+                            f"session {session_uuid!r}; two live processes on "
+                            "one id is the violation item 2 names, not a "
+                            "residual to be weighed"
+                        )
+            elif name == contract.INVARIANT_TRANSCRIPT_SINGLE_WRITER:
+                # The captured event streams are the C2 transcript stand-in:
+                # one identity per stream, no duplicated turn (U27's failure
+                # shape is 2+2 turns under one id; U32's is the same on
+                # resume). An interleaved transcript fails item 2 outright.
+                report_source = getattr(observer, "transcript_report", None)
+                if report_source is None:
+                    fail(
+                        f"{role}: the case names "
+                        f"{contract.INVARIANT_TRANSCRIPT_SINGLE_WRITER!r} but "
+                        "the adapter's observer exposes no transcript_report()"
+                    )
+                    continue
+                transcripts = dict(report_source())
+                if not transcripts:
+                    fail(
+                        f"{role}: the transcript report names no session, so "
+                        "'no interleaved transcript' asserts nothing"
+                    )
+                for session_uuid, shape in sorted(transcripts.items()):
+                    distinct = list(shape.get("distinct_ids", ()))
+                    duplicates = int(shape.get("duplicate_turn_ids", 0))
+                    if len(distinct) > 1:
+                        fail(
+                            f"{role}: session {session_uuid!r}'s stream names "
+                            f"{len(distinct)} identities: {distinct}"
+                        )
+                    if distinct and distinct != [session_uuid]:
+                        fail(
+                            f"{role}: session {session_uuid!r}'s stream names "
+                            f"{distinct[0]!r} instead of its own identity"
+                        )
+                    if duplicates:
+                        fail(
+                            f"{role}: session {session_uuid!r}'s stream carries "
+                            f"{duplicates} duplicated turn id(s) -- an "
+                            "interleaved transcript is a failed gate item, not "
+                            "an accepted weakening"
+                        )
+            else:  # pragma: no cover - guarded by manifest validation
+                raise ContractViolation(
+                    f"{name!r} is a named destination invariant with no "
+                    "assertion behind it; the chain has no silent default"
+                )
 
     # -- the window was the window ----------------------------------------
     #

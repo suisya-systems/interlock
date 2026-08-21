@@ -109,9 +109,31 @@ __all__ = [
     "OrchestrationOutcome",
     "OrchestrationRefused",
     "ProviderStartFailed",
+    "SEAM_AFTER_ADMISSION_BEFORE_SPAWN",
+    "SEAM_AFTER_READBACK_COMMIT",
+    "SEAM_AFTER_SPAWN_BEFORE_READBACK_COMMIT",
+    "SEAM_BEFORE_ADMISSION_COMMIT",
+    "SEAMS",
     "SessionOrchestrator",
     "default_identity_confirmation",
 ]
+
+#: The injection seams of the commit-before-spawn walk, named for the fault
+#: harness (issue #18's four points). A ``seam`` callback passed at
+#: construction is invoked with each name as the walk crosses it; the fault
+#: driver maps them onto its barrier anchors, and production wiring passes
+#: nothing. A seam is a place to *stop*, never a place to decide -- nothing in
+#: this module reads anything back from the callback.
+SEAM_BEFORE_ADMISSION_COMMIT = "before-admission-commit"
+SEAM_AFTER_ADMISSION_BEFORE_SPAWN = "after-admission-before-spawn"
+SEAM_AFTER_SPAWN_BEFORE_READBACK_COMMIT = "after-spawn-before-readback-commit"
+SEAM_AFTER_READBACK_COMMIT = "after-readback-commit"
+SEAMS = (
+    SEAM_BEFORE_ADMISSION_COMMIT,
+    SEAM_AFTER_ADMISSION_BEFORE_SPAWN,
+    SEAM_AFTER_SPAWN_BEFORE_READBACK_COMMIT,
+    SEAM_AFTER_READBACK_COMMIT,
+)
 
 
 class OrchestrationRefused(RuntimeError):
@@ -238,6 +260,7 @@ class SessionOrchestrator:
         readback_attempts: int = 50,
         wait: Optional[Callable[[], None]] = None,
         attempt_id_factory: Optional[Callable[[], str]] = None,
+        seam: Optional[Callable[[str], None]] = None,
     ) -> None:
         if readback_attempts < 1:
             raise ValueError("readback_attempts must be at least 1")
@@ -257,7 +280,12 @@ class SessionOrchestrator:
         self._readback_attempts = readback_attempts
         self._wait = wait
         self._attempt_id_factory = attempt_id_factory
+        self._seam = seam
         self._gate_sequence = 0
+
+    def _cross(self, seam_name: str) -> None:
+        if self._seam is not None:
+            self._seam(seam_name)
 
     # -- the fenced writes ---------------------------------------------------
 
@@ -381,6 +409,7 @@ class SessionOrchestrator:
         lease = self._acquire()
         session_id = self._uuid_factory()
         now = self._now_ms()
+        self._cross(SEAM_BEFORE_ADMISSION_COMMIT)
         session_binding.prepare_binding(
             self._connection,
             lease,
@@ -407,6 +436,7 @@ class SessionOrchestrator:
                 now_ms=self._now_ms(),
                 attempt_id=self._attempt_id(),
             )
+        self._cross(SEAM_AFTER_ADMISSION_BEFORE_SPAWN)
         answer = self._provider.start(
             StartRequest(
                 session_id=session_id,
@@ -416,6 +446,7 @@ class SessionOrchestrator:
             )
         )
         self._unwrap("start", answer)
+        self._cross(SEAM_AFTER_SPAWN_BEFORE_READBACK_COMMIT)
         self._validate_after_spawn(lease, session_id, moment="after-start")
         readout = self._await_identity(session_id)
         current = session_binding.binding_for_session(self._connection, session_id)
@@ -429,6 +460,7 @@ class SessionOrchestrator:
                 now_ms=self._now_ms(),
                 attempt_id=self._attempt_id(),
             )
+            self._cross(SEAM_AFTER_READBACK_COMMIT)
         return self._outcome(session_id, path, readout)
 
     def recover(self) -> OrchestrationOutcome:
@@ -450,6 +482,7 @@ class SessionOrchestrator:
             # other runs or to no run, and are deliberately not adopted here
             # (no orphan is adopted into a run its binding does not name).
             session_id = self._uuid_factory()
+            self._cross(SEAM_BEFORE_ADMISSION_COMMIT)
             session_binding.prepare_binding(
                 self._connection,
                 lease,

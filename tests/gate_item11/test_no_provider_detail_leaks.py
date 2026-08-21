@@ -33,6 +33,30 @@ FIXTURE_PACKAGE = REPO_ROOT / "tests" / "gate_item11"
 SESSION_PACKAGE = "claude_org_runtime.session"
 CONTROL_PLANE = "claude_org_runtime.control_plane"
 
+#: The S1 contract module: the one durable output of the spike (D-0026) and
+#: the exact surface item 11 promises stays put when the backend is swapped.
+#: A module bound to it is provider-agnostic by construction -- the next
+#: provider implements this interface rather than forcing an edit -- so the
+#: leak the tests below hunt is knowledge of a *backend* (the package itself,
+#: whose ``__init__`` re-exports implementations, or any other submodule),
+#: never of the contract. D-0009 names "an explicit join between session and
+#: run" as a cost it accepts; the join (``supervisor/``, issue #18) is written
+#: against this module alone, and widening the ban to it would outlaw the join
+#: D-0009 requires rather than the leak item 11 forbids.
+SESSION_CONTRACT = "claude_org_runtime.session.provider"
+
+
+def _knows_a_session_backend(imported: set[str]) -> bool:
+    # ``_imported_modules`` records ``from x import y`` as both ``x`` and
+    # ``x.y`` (an alias may itself name a module), so the contract's own
+    # symbols must be excused along with the contract.
+    return any(
+        name.startswith(SESSION_PACKAGE)
+        and name != SESSION_CONTRACT
+        and not name.startswith(SESSION_CONTRACT + ".")
+        for name in imported
+    )
+
 
 def _imported_modules(path: Path) -> set[str]:
     """Every module name *path* imports, absolute and relative alike.
@@ -111,7 +135,7 @@ def test_no_shipped_module_knows_both_a_provider_and_the_control_plane():
     both = []
     for path in _python_files(REPO_ROOT / "src"):
         imported = _imported_modules(path)
-        knows_provider = any(name.startswith(SESSION_PACKAGE) for name in imported)
+        knows_provider = _knows_a_session_backend(imported)
         knows_control_plane = any(name.startswith(CONTROL_PLANE) for name in imported)
         if knows_provider and knows_control_plane:
             both.append(str(path.relative_to(REPO_ROOT)))
@@ -127,15 +151,30 @@ def test_the_translation_is_confined_to_this_fixture_package():
     :mod:`tests.gate_item11.registry`.
     """
 
+    # The bound is a closed list, not a convention. Beyond this fixture, the
+    # only test files allowed to know a backend *and* the control plane are
+    # the crash-window proof's provider-facing halves (issue #18): the
+    # fault-injection adapter over the real components, and the mediated
+    # proof that drives the real C2 provider. ACCEPTANCE.md section 4 already
+    # prices these in -- item 2 is re-run in full against any new provider --
+    # so they are part of the swap's stated cost, not a leak that silently
+    # grows it. Anything else that turns up here is exactly the drift this
+    # test exists to refuse.
+    allowed_beyond_fixture = {
+        "tests/fault_injection/session_driver.py",
+        "tests/gate_item2/test_mediated_real_provider.py",
+    }
     outside = []
     for path in _python_files(REPO_ROOT / "tests"):
         if FIXTURE_PACKAGE in path.parents:
             continue
         imported = _imported_modules(path)
-        if any(name.startswith(SESSION_PACKAGE) for name in imported) and any(
+        if _knows_a_session_backend(imported) and any(
             name.startswith(CONTROL_PLANE) for name in imported
         ):
-            outside.append(str(path.relative_to(REPO_ROOT)))
+            relative = str(path.relative_to(REPO_ROOT))
+            if relative not in allowed_beyond_fixture:
+                outside.append(relative)
     assert outside == [], f"{outside} knows both vocabularies and is outside the fixture"
 
 

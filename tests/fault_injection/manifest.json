@@ -1,6 +1,7 @@
 {
   "cases": [
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "attempt@before_durable_write:1"
@@ -31,7 +32,7 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -53,6 +54,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "attempt@after_record_before_effect:1"
@@ -83,7 +85,7 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -105,6 +107,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "attempt@after_effect_before_record:1"
@@ -135,7 +138,7 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -157,6 +160,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "attempt@delivered_before_ack:1"
@@ -187,7 +191,7 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -209,6 +213,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@before_durable_write:1"
@@ -239,7 +244,7 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -262,6 +267,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@after_record_before_effect:1"
@@ -292,7 +298,7 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -315,6 +321,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@after_effect_before_record:1"
@@ -345,7 +352,7 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -368,6 +375,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@delivered_before_ack:1"
@@ -398,7 +406,7 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -421,6 +429,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "attempt@before_durable_write:1"
@@ -451,7 +460,7 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -473,6 +482,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "attempt@after_record_before_effect:1"
@@ -503,7 +513,7 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -525,6 +535,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "attempt@after_effect_before_record:1"
@@ -555,7 +566,7 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -577,6 +588,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "attempt@delivered_before_ack:1"
@@ -607,7 +619,7 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -629,6 +641,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "bind@before_durable_write:1"
@@ -658,7 +671,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "bind",
@@ -680,6 +693,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "enqueue@after_record_before_effect:1"
@@ -709,7 +723,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "enqueue",
@@ -731,6 +745,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "lease-acquire@before_durable_write:1"
@@ -760,7 +775,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -782,6 +797,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@before_durable_write:2"
@@ -812,7 +828,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 2,
       "observation": null,
       "operation": "attempt",
@@ -834,6 +850,7 @@
       "variant": "occ2"
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "lease-acquire@lease-acquired:1"
@@ -862,7 +879,7 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -889,6 +906,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "lease-acquire@lease-acquired:1"
@@ -922,7 +940,7 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -945,6 +963,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "lease-acquire@lease-acquired:1"
@@ -973,7 +992,7 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -999,6 +1018,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "lease-acquire@lease-acquired:1"
@@ -1032,7 +1052,7 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -1054,6 +1074,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "lease-acquire@lease-acquired:1"
@@ -1087,7 +1108,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -1110,6 +1131,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "lease-acquire@lease-acquired:1"
@@ -1143,7 +1165,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -1165,6 +1187,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@before_durable_write:1"
@@ -1199,7 +1222,7 @@
         "disp"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -1222,6 +1245,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "attempt@after_record_before_effect:1"
@@ -1256,7 +1280,7 @@
         "sec"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 2,
       "observation": null,
       "operation": "attempt",
@@ -1279,6 +1303,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "attempt@delivered_before_ack:1"
@@ -1313,7 +1338,7 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -1336,6 +1361,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@after_effect_before_record:1"
@@ -1370,7 +1396,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -1403,6 +1429,7 @@
       "variant": "killorder-ds"
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "enqueue@before_durable_write:1"
@@ -1436,7 +1463,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -1469,6 +1496,7 @@
       "variant": "killorder-sd"
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "lease-renew@before_durable_write:1"
@@ -1502,7 +1530,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-renew",
@@ -1525,6 +1553,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "lease-renew@before_durable_write:1"
@@ -1558,7 +1587,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-renew",
@@ -1580,6 +1609,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "lease-acquire@lease-acquired:1"
@@ -1616,7 +1646,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -1639,6 +1669,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "lease-acquire@lease-acquired:1"
@@ -1675,7 +1706,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "lease-acquire",
@@ -1697,6 +1728,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "enqueue@before_durable_write:1"
@@ -1735,7 +1767,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "enqueue",
@@ -1758,6 +1790,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@delivered_before_ack:1"
@@ -1790,7 +1823,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -1813,6 +1846,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "attempt@delivered_before_ack:1"
@@ -1845,7 +1879,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -1867,6 +1901,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "ack@before_durable_write:1"
@@ -1901,7 +1936,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "ack",
@@ -1924,6 +1959,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "ack@before_durable_write:1"
@@ -1958,7 +1994,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "ack",
@@ -1980,6 +2016,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "ack@before_durable_write:1"
@@ -2014,7 +2051,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "ack",
@@ -2037,6 +2074,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "ack@before_durable_write:1"
@@ -2071,7 +2109,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "ack",
@@ -2093,6 +2131,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@delivered_before_ack:1"
@@ -2123,7 +2162,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -2146,6 +2185,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "attempt@delivered_before_ack:1"
@@ -2176,7 +2216,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -2198,6 +2238,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "observe@observed:1"
@@ -2234,7 +2275,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": {
         "escalate_on": [],
@@ -2260,6 +2301,7 @@
       "variant": "increment-in-place-in"
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "observe@observed:1"
@@ -2296,7 +2338,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": {
         "escalate_on": [],
@@ -2321,6 +2363,7 @@
       "variant": "open-linked-in"
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "observe@observed:1"
@@ -2357,7 +2400,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": {
         "escalate_on": [],
@@ -2382,6 +2425,7 @@
       "variant": "open-linked-out"
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "observe@observed:1"
@@ -2420,7 +2464,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": {
         "escalate_on": [],
@@ -2446,6 +2490,7 @@
       "variant": "increment-in-place-in"
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "observe@observed:1"
@@ -2484,7 +2529,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": {
         "escalate_on": [],
@@ -2509,6 +2554,7 @@
       "variant": "open-linked-in"
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "observe@observed:1"
@@ -2538,7 +2584,7 @@
         "sup"
       ],
       "lane": "portable",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": {
         "escalate_on": [
@@ -2566,6 +2612,7 @@
       "variant": "unreadable"
     },
     {
+      "adapter": "spike",
       "arms": {
         "sup": [
           "observe@observed:1"
@@ -2595,7 +2642,7 @@
         "sup"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": {
         "escalate_on": [
@@ -2623,6 +2670,7 @@
       "variant": "silent"
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@before_durable_write:1"
@@ -2657,7 +2705,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -2681,6 +2729,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@after_effect_before_record:1"
@@ -2715,7 +2764,7 @@
         "disp"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -2739,6 +2788,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@before_durable_write:1"
@@ -2773,7 +2823,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -2797,6 +2847,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@after_effect_before_record:1"
@@ -2831,7 +2882,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -2855,6 +2906,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "attempt@before_durable_write:1"
@@ -2889,7 +2941,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -2913,6 +2965,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "sec": [
           "attempt@after_effect_before_record:1"
@@ -2947,7 +3000,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -2971,6 +3024,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@before_durable_write:1"
@@ -3009,7 +3063,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -3035,6 +3089,7 @@
       "variant": null
     },
     {
+      "adapter": "spike",
       "arms": {
         "disp": [
           "attempt@after_effect_before_record:1"
@@ -3073,7 +3128,7 @@
         "sec"
       ],
       "lane": "linux",
-      "manifest_version": 2,
+      "manifest_version": 3,
       "messages": 1,
       "observation": null,
       "operation": "attempt",
@@ -3097,12 +3152,212 @@
       "ttl_ms": 30000,
       "unavailable_attempts": null,
       "variant": null
+    },
+    {
+      "adapter": "session",
+      "arms": {
+        "sup": [
+          "session-start@before_durable_write:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__session-start__before_durable_write__sigkill",
+      "checkpoint": "before_durable_write",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "live-processes-per-session",
+          "transcript-single-writer"
+        ],
+        "queries": [
+          "one-binding-per-run"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 3,
+      "messages": 1,
+      "observation": null,
+      "operation": "session-start",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "adapter": "session",
+      "arms": {
+        "sup": [
+          "session-start@after_record_before_effect:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__session-start__after_record_before_effect__sigkill",
+      "checkpoint": "after_record_before_effect",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "live-processes-per-session",
+          "transcript-single-writer"
+        ],
+        "queries": [
+          "one-binding-per-run"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 3,
+      "messages": 1,
+      "observation": null,
+      "operation": "session-start",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "adapter": "session",
+      "arms": {
+        "sup": [
+          "session-start@after_effect_before_record:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__session-start__after_effect_before_record__sigkill",
+      "checkpoint": "after_effect_before_record",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "live-processes-per-session",
+          "transcript-single-writer"
+        ],
+        "queries": [
+          "one-binding-per-run"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 3,
+      "messages": 1,
+      "observation": null,
+      "operation": "session-start",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
+    },
+    {
+      "adapter": "session",
+      "arms": {
+        "sup": [
+          "session-start@identity-readback-committed:1"
+        ]
+      },
+      "barrier": "aligned",
+      "behaviours": [],
+      "case_id": "sup__session-start__identity-readback-committed__sigkill",
+      "checkpoint": "identity-readback-committed",
+      "claimant": null,
+      "clock_base_ms": 1700000000000,
+      "expected": {
+        "destination": [
+          "live-processes-per-session",
+          "transcript-single-writer"
+        ],
+        "queries": [
+          "one-binding-per-run"
+        ],
+        "recovery_owner": "sup"
+      },
+      "fault": "sigkill",
+      "incident_params": null,
+      "kill_order": [
+        "sup"
+      ],
+      "lane": "linux",
+      "manifest_version": 3,
+      "messages": 1,
+      "observation": null,
+      "operation": "session-start",
+      "profiles": [
+        "full"
+      ],
+      "release_after_barrier": false,
+      "restart_after": true,
+      "restart_order": [
+        "sup"
+      ],
+      "skew": null,
+      "staggered": null,
+      "targets": [
+        "sup"
+      ],
+      "ttl_ms": 30000,
+      "unavailable_attempts": null,
+      "variant": null
     }
   ],
   "clock_base_ms": 1700000000000,
   "clock_guard_ms": 1000,
-  "contract_version": 2,
-  "manifest_version": 2,
+  "contract_version": 3,
+  "manifest_version": 3,
   "profiles": {
     "fast": {
       "barrier_timeout_s": 10,

@@ -1757,6 +1757,15 @@ _INVARIANT_QUERIES: Mapping[str, str] = {
          WHERE run_id = :scope
          ORDER BY write_seq
     """,
+    # Gate item 2 (#18): the run's active session bindings, with the count the
+    # partial unique index already caps at one. The query reports; "exactly
+    # one" -- non-empty included -- is the assertion's, made after recovery.
+    contract.INVARIANT_ONE_BINDING_PER_RUN: """
+        SELECT session_id, run_id, binding_phase, observation, bound_at_ms
+          FROM session
+         WHERE run_id = :scope AND released_at_ms IS NULL
+         ORDER BY bound_at_ms, session_id
+    """,
     # The refusal of a stale writer, durable and query-answerable. This is a
     # SQL query over a persisted row, not a harness event-trace line: the trace
     # would only prove the harness saw an exception (design 5).

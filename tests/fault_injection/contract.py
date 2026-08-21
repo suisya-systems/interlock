@@ -57,9 +57,12 @@ __all__ = [
     "FAULT_KINDS",
     "FAULT_RUNNER_CONTRACT_VERSION",
     "INVARIANT_INCIDENT_COLLAPSE",
+    "INVARIANT_LIVE_PROCESSES_PER_SESSION",
     "INVARIANT_NAMES",
     "INVARIANT_NO_ANOMALY_ESCALATION",
     "INVARIANT_OBSERVATION_CLASSIFIED",
+    "INVARIANT_ONE_BINDING_PER_RUN",
+    "INVARIANT_TRANSCRIPT_SINGLE_WRITER",
     "INVARIANT_UNRESOLVED_INCIDENTS",
     "KILL_FAULTS",
     "TAKEOVER_FAULTS",
@@ -79,6 +82,7 @@ __all__ = [
     "OPERATION_LEASE_RELEASE",
     "OPERATION_LEASE_RENEW",
     "OPERATION_OBSERVE",
+    "OPERATION_SESSION_START",
     "PROTOCOL_VERSION",
     "ROLES",
     "ROLE_DISPATCHER",
@@ -87,6 +91,7 @@ __all__ = [
     "ROLE_SCRIPTS",
     "RoleDriver",
     "SYNC_POINTS",
+    "SYNC_IDENTITY_READBACK_COMMITTED",
     "SYNC_LEASE_ACQUIRED",
     "SYNC_OBSERVED",
     "SYNC_SCRIPT_COMPLETE",
@@ -100,7 +105,7 @@ __all__ = [
 
 #: Bumped by any change to the checkpoint vocabulary, the protocol messages or
 #: the driver CLI below. A failure report always carries it (design 4.4).
-FAULT_RUNNER_CONTRACT_VERSION = 2
+FAULT_RUNNER_CONTRACT_VERSION = 3
 
 #: The wire format of the two-phase barrier (design 3.1).
 PROTOCOL_VERSION = 1
@@ -163,6 +168,16 @@ OPERATION_ACK = "ack"
 #: ``bind``: the observation is read through a seam the fault can break, and the
 #: fact state it yields is written to the ``incident`` table.
 OPERATION_OBSERVE = "observe"
+#: Gate item 2's commit-before-spawn walk (issue #18): the session<->run
+#: binding is committed durably, the provider process is spawned, and the
+#: identity the provider actually assigned is read back and committed. Unlike
+#: ``bind`` -- a single durable write -- this is a record -> effect -> result
+#: path whose effect is a *process creation*, so it carries the two mid-call
+#: windows: ``after_record_before_effect`` is "between the commit and the
+#: spawn" and ``after_effect_before_record`` is "between the spawn and the
+#: identity read-back's own commit". The fourth injection point ("after the
+#: read-back") is :data:`SYNC_IDENTITY_READBACK_COMMITTED`.
+OPERATION_SESSION_START = "session-start"
 
 OPERATIONS = (
     OPERATION_LEASE_ACQUIRE,
@@ -173,6 +188,7 @@ OPERATIONS = (
     OPERATION_ATTEMPT,
     OPERATION_ACK,
     OPERATION_OBSERVE,
+    OPERATION_SESSION_START,
 )
 
 #: Which checkpoint windows each operation physically has (design 3.1).
@@ -217,6 +233,14 @@ CHECKPOINT_APPLICABILITY: Mapping[str, tuple[str, ...]] = {
         CHECKPOINT_BEFORE_DURABLE_WRITE,
         CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT,
     ),
+    # Three of #18's four injection points are these windows; the fourth --
+    # after the read-back's own commit -- is a sync point, because there is no
+    # further write for a checkpoint to sit in front of.
+    OPERATION_SESSION_START: (
+        CHECKPOINT_BEFORE_DURABLE_WRITE,
+        CHECKPOINT_AFTER_RECORD_BEFORE_EFFECT,
+        CHECKPOINT_AFTER_EFFECT_BEFORE_RECORD,
+    ),
 }
 
 
@@ -233,8 +257,17 @@ SYNC_SCRIPT_COMPLETE = "script-complete"
 #: The observation has been read and classified but nothing downstream has acted
 #: on it yet -- the anchor an escalation-policy fault needs.
 SYNC_OBSERVED = "observed"
+#: Issue #18's fourth injection point: the provider's identity read-back has
+#: been committed to SQLite ("after the read-back" is defined as after *this*
+#: commit, never as after the answer was merely seen in memory).
+SYNC_IDENTITY_READBACK_COMMITTED = "identity-readback-committed"
 
-SYNC_POINTS = (SYNC_LEASE_ACQUIRED, SYNC_SCRIPT_COMPLETE, SYNC_OBSERVED)
+SYNC_POINTS = (
+    SYNC_LEASE_ACQUIRED,
+    SYNC_SCRIPT_COMPLETE,
+    SYNC_OBSERVED,
+    SYNC_IDENTITY_READBACK_COMMITTED,
+)
 
 #: Everything a case may arm. Design 4.1: *every* fault is anchored; there is
 #: no unanchored kind.
@@ -623,6 +656,28 @@ INVARIANT_NO_ANOMALY_ESCALATION = "no-anomaly-escalation"
 INVARIANT_ONE_EFFECT_PER_KEY = "one-effect-per-key"
 INVARIANT_DELIVERED_IMPLIES_EFFECT = "delivered-implies-effect"
 
+# -- #18 additions (gate item 2) --------------------------------------------
+
+#: Exactly one active session binding for the case's run after recovery. The
+#: partial unique index makes "at most one" the database's; the non-empty half
+#: of "exactly one" is this assertion's, made only after a restart has run --
+#: a recovery that ends with no binding re-identified nothing.
+INVARIANT_ONE_BINDING_PER_RUN = "one-binding-per-run"
+
+#: Destination-side (a process is an external effect): at no point after the
+#: recovery may two provider processes be live against one session id. The
+#: observer counts real processes, out of process with the killed role; an
+#: adapter supplying this name must expose ``live_process_report()`` returning
+#: ``{session_uuid: live_process_count}``.
+INVARIANT_LIVE_PROCESSES_PER_SESSION = "live-processes-per-session"
+
+#: Destination-side: the captured event streams (the C2 transcript stand-in)
+#: for every session the case touched name exactly one identity and carry no
+#: duplicated turn. An adapter supplying this name must expose
+#: ``transcript_report()`` returning ``{session_uuid: {"distinct_ids": [...],
+#: "duplicate_turn_ids": n}}``.
+INVARIANT_TRANSCRIPT_SINGLE_WRITER = "transcript-single-writer"
+
 SQL_INVARIANTS = (
     INVARIANT_NO_UNOWNED_OUTBOX,
     INVARIANT_RETRY_COUNT_DURABLE,
@@ -635,11 +690,14 @@ SQL_INVARIANTS = (
     INVARIANT_UNRESOLVED_INCIDENTS,
     INVARIANT_OBSERVATION_CLASSIFIED,
     INVARIANT_NO_ANOMALY_ESCALATION,
+    INVARIANT_ONE_BINDING_PER_RUN,
 )
 
 DESTINATION_INVARIANTS = (
     INVARIANT_ONE_EFFECT_PER_KEY,
     INVARIANT_DELIVERED_IMPLIES_EFFECT,
+    INVARIANT_LIVE_PROCESSES_PER_SESSION,
+    INVARIANT_TRANSCRIPT_SINGLE_WRITER,
 )
 
 INVARIANT_NAMES = SQL_INVARIANTS + DESTINATION_INVARIANTS
@@ -667,6 +725,7 @@ INVARIANT_PARAMETERS: Mapping[str, tuple[str, ...]] = {
     INVARIANT_UNRESOLVED_INCIDENTS: ("scope",),
     INVARIANT_OBSERVATION_CLASSIFIED: ("scope",),
     INVARIANT_NO_ANOMALY_ESCALATION: ("scope",),
+    INVARIANT_ONE_BINDING_PER_RUN: ("scope",),
 }
 
 #: The checkpoints after which an external effect may already have happened.

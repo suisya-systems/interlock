@@ -99,9 +99,23 @@ def manifest() -> Mapping[str, Any]:
 
 @pytest.fixture(scope="session")
 def adapter() -> Any:
-    """The one adapter S9 ships. I-12/I-14 add theirs beside it (design 2.2)."""
+    """The default adapter. A case routes itself via :func:`adapter_for`."""
 
     return SPIKE_ADAPTER
+
+
+def adapter_for(case: Mapping[str, Any]) -> Any:
+    """Resolve the adapter a manifest case declares.
+
+    Routing is manifest data (the ``adapter`` key, validated at collection);
+    resolving it is policy, and it lives here so the durable half never
+    imports an implementation module (``test_import_graph``).
+    """
+
+    from tests.fault_injection.session_driver import SESSION_ADAPTER
+
+    by_name = {SPIKE_ADAPTER.name: SPIKE_ADAPTER, SESSION_ADAPTER.name: SESSION_ADAPTER}
+    return by_name[case["adapter"]]
 
 
 @pytest.fixture(scope="session")
