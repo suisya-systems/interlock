@@ -817,7 +817,10 @@ class ClaudeCliSessionProvider(SessionProvider):
             return Failure(
                 FailureKind.UNINTERPRETABLE_RESPONSE,
                 f"identity incident: {session.record.incident}",
-                {"session_id": session_id},
+                {
+                    "session_id": session_id,
+                    "expected": session.record.claude_session_uuid,
+                },
             )
 
         liveness = self._child_liveness(session)
@@ -1308,9 +1311,17 @@ class ClaudeCliSessionProvider(SessionProvider):
 
         record = session.record
         if record.incident is not None:
+            # The committed identity rides on every answer about an impounded
+            # session, not only on the answer that first detected the
+            # mismatch: which call detects it is a race against the child
+            # (a slow machine can put the whole detection inside start()'s
+            # own readout), and the evidence must not depend on winning it.
             return _Uninterpretable(
                 f"identity incident: {record.incident}",
-                {"session_id": record.session_id},
+                {
+                    "session_id": record.session_id,
+                    "expected": record.claude_session_uuid,
+                },
             )
         parsed = self._parse_events(session)
         if isinstance(parsed, _Uninterpretable):
