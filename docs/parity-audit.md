@@ -5,9 +5,10 @@
 `/home/happy_ryo/work/org/claude-org-ja`, working tree at HEAD
 `e17b5c4eca64070d825504eed7b8cd5ef2947049` (2026-08-20). All `file:line` citations for the
 operating organisation are against that tree.
-**Interlock baseline:** this repository at `afc181e` (origin/main at audit time). Two PRs were
-open and unmerged when this audit was finalised — #58 (S8 `MessageBus`) and #59 (gate item 2
-crash-window proof on C2); rows that depend on them say so explicitly.
+**Interlock baseline:** this repository at `b7e0047` (origin/main at audit time; includes
+#59, the gate item 2 crash-window single-writer proof on C2). One PR was open and unmerged
+when this audit was finalised — #58 (S8 `MessageBus`); rows that depend on it say so
+explicitly.
 **Citation rules:** Interlock decisions are cited by stable ID (`D-00NN` / `Q-00NN` /
 `AC-N` / gate item number), per the rules in `DECISIONS.md`, `ACCEPTANCE.md` and
 `PORTING_LEDGER.md`. `PORTING_LEDGER.md` is cited by the *path* a row classifies or by bucket
